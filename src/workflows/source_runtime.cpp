@@ -107,6 +107,25 @@ void prepareIdCollectively(const parallel::MpiContext& mpi_context,
   mpi_context.rethrowCollectivePreparationFailure(failure, phase);
 }
 
+[[nodiscard]] std::uint64_t sourceParentIndexBytes(std::size_t patch_count) {
+  return core::checkedMemoryBytesAdd(
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          patch_count, sizeof(std::uint64_t), "source parent index")),
+      256U, "source parent index alignment");
+}
+
+[[nodiscard]] std::pmr::vector<std::uint64_t> buildSourceParentIndex(
+    const core::SimulationState& state, std::pmr::memory_resource* resource) {
+  std::pmr::vector<std::uint64_t> parents(resource);
+  parents.reserve(state.patches.size());
+  for (const std::uint64_t parent_id : state.patches.parent_patch_id) {
+    if (parent_id != 0U) parents.push_back(parent_id);
+  }
+  std::sort(parents.begin(), parents.end());
+  parents.erase(std::unique(parents.begin(), parents.end()), parents.end());
+  return parents;
+}
+
 using IdVector = std::pmr::vector<std::uint64_t>;
 using IdBuckets = std::pmr::vector<IdVector>;
 
@@ -842,12 +861,6 @@ class SourceRuntimeImpl final : public SourceRuntime {
         m_star_formation_inputs,
         m_star_formation_input_reservation.committed());
     add_container(
-        core::MemorySubsystem::kActiveSets,
-        core::MemoryClass::kPhaseResident,
-        "sources.stellar_evolution.active_star_rows",
-        m_active_star_indices,
-        false);
-    add_container(
         core::MemorySubsystem::kScratch,
         core::MemoryClass::kPhaseResident,
         "sources.stellar_evolution.contiguous_star_batch",
@@ -992,9 +1005,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
       evolution = core::checkedMemoryBytesAdd(evolution,
           multiply(cell_count, sizeof(std::uint32_t), "source spatial index rebuild"),
           "source feedback staging");
-      evolution = core::checkedMemoryBytesAdd(evolution,
-          growth(star_count, sizeof(std::uint32_t), m_active_star_indices.capacity(),
-                 "source active star rows"), "source feedback staging");
+      // Sparse active rows have their own physical arena admission.
       peak = std::max(peak, evolution);
     }
     if (m_metal_diffusion.config().enabled && cell_count != 0U) {
@@ -1112,16 +1123,20 @@ class SourceRuntimeImpl final : public SourceRuntime {
       }
       m_contiguous_cell_batch.reserve(required_input_capacity);
 
-      std::unordered_set<std::uint64_t> patch_ids_with_children;
-      patch_ids_with_children.reserve(context.state.patches.size());
-      for (std::size_t patch_index = 0U;
-           patch_index < context.state.patches.size(); ++patch_index) {
-        const std::uint64_t parent_id =
-            context.state.patches.parent_patch_id[patch_index];
-        if (parent_id != 0U) {
-          patch_ids_with_children.insert(parent_id);
-        }
-      }
+      std::unique_ptr<core::GovernedScratchArena> parent_arena;
+      std::unique_ptr<std::pmr::vector<std::uint64_t>> parent_index;
+
+      std::exception_ptr parent_failure;
+      try {
+        parent_arena = std::make_unique<core::GovernedScratchArena>(
+            m_memory_governor, core::MemoryClass::kScratchArena,
+            sourceParentIndexBytes(context.state.patches.size()),
+            "sources.star_formation.parent_index");
+        parent_index = std::make_unique<std::pmr::vector<std::uint64_t>>(
+            buildSourceParentIndex(context.state, parent_arena->resource()));
+      } catch (...) { parent_failure = std::current_exception(); }
+      m_mpi_context.rethrowCollectivePreparationFailure(
+          parent_failure, "source parent metadata preparation");
 
       const std::size_t particle_count_before_birth =
           context.state.particles.size();
@@ -1161,7 +1176,44 @@ class SourceRuntimeImpl final : public SourceRuntime {
             context,
             cell_batch,
             source_evaluation_scale_factor,
-            patch_ids_with_children);
+            *parent_index);
+        // Bound source-report and birth-plan metadata separately from the ID
+        // registry's own precommit/result leases. The two report arrays are
+        // exact-reserved by applyFromInputs before any birth mutation. The
+        // arena owns only plans and immutable birth keys; no heap fallback.
+        std::unique_ptr<core::GovernedScratchArena> metadata_arena;
+        core::MemoryReservation report_reservation;
+        std::exception_ptr metadata_failure;
+        try {
+          const std::size_t max_births = core::checkedSizeMultiply(
+              batch_size,
+              static_cast<std::size_t>(m_star_formation.config().max_spawn_particles_per_cell_step),
+              "source metadata maximum birth count");
+          const std::uint64_t plan_bytes = static_cast<std::uint64_t>(
+              core::checkedSizeMultiply(batch_size,
+                  physics::starFormationBirthPlanBytes(), "source metadata birth plans"));
+          const std::uint64_t key_bytes = static_cast<std::uint64_t>(
+              core::checkedSizeMultiply(max_births, sizeof(std::uint64_t),
+                  "source metadata birth keys"));
+          const std::uint64_t report_bytes = static_cast<std::uint64_t>(
+              core::checkedSizeMultiply(max_births,
+                  sizeof(std::uint32_t) + sizeof(std::uint64_t),
+                  "source metadata report rows"));
+          metadata_arena = std::make_unique<core::GovernedScratchArena>(
+              m_memory_governor, core::MemoryClass::kScratchArena,
+              core::checkedMemoryBytesAdd(
+                  core::checkedMemoryBytesAdd(plan_bytes, key_bytes,
+                      "source metadata arena"), 256U, "source metadata alignment"),
+              "sources.star_formation.birth_metadata");
+          if (m_memory_governor != nullptr && report_bytes != 0U) {
+            report_reservation = m_memory_governor->reserve(
+                core::MemoryClass::kDiagnostic, report_bytes,
+                "sources.star_formation.report_metadata");
+          }
+        } catch (...) { metadata_failure = std::current_exception(); }
+        m_mpi_context.rethrowCollectivePreparationFailure(
+            metadata_failure, "source birth/report metadata admission");
+        if (report_reservation.pending()) report_reservation.commit();
         const physics::StarFormationStepReport batch_report =
             m_star_formation.applyFromInputs(
                 context.state,
@@ -1169,7 +1221,8 @@ class SourceRuntimeImpl final : public SourceRuntime {
                 context.integrator_state.dt_time_code,
                 source_evaluation_scale_factor,
                 context.integrator_state.step_index,
-                &m_particle_id_registry);
+                &m_particle_id_registry,
+                metadata_arena->resource());
         if (batch_report.counters.spawned_particles >
             std::numeric_limits<std::uint64_t>::max() - local_spawned_particles) {
           throw std::overflow_error(
@@ -1312,14 +1365,12 @@ class SourceRuntimeImpl final : public SourceRuntime {
     const core::SimulationState& state = context.state;
     const std::size_t cell_count = state.cells.size();
     m_owned_leaf_mask.assign(cell_count, 0U);
-    std::unordered_set<std::uint64_t> patch_ids_with_children;
-    patch_ids_with_children.reserve(state.patches.size());
-    for (std::size_t patch_index = 0U; patch_index < state.patches.size(); ++patch_index) {
-      const std::uint64_t parent_id = state.patches.parent_patch_id[patch_index];
-      if (parent_id != 0U) {
-        patch_ids_with_children.insert(parent_id);
-      }
-    }
+    core::GovernedScratchArena parent_arena(
+        m_memory_governor, core::MemoryClass::kScratchArena,
+        sourceParentIndexBytes(state.patches.size()),
+        "sources.metal_diffusion.parent_index");
+    const auto patch_ids_with_children = buildSourceParentIndex(
+        state, parent_arena.resource());
     for (std::uint32_t cell_index = 0U; cell_index < cell_count; ++cell_index) {
       const PatchCellGeometry geometry = starFormationPatchCellGeometry(state, cell_index);
       bool owned_leaf = true;
@@ -1332,23 +1383,27 @@ class SourceRuntimeImpl final : public SourceRuntime {
     }
   }
 
-  void buildActiveStarRows(const core::StepContext& context) {
+  void buildActiveStarRows(
+      const core::StepContext& context,
+      std::pmr::vector<std::uint32_t>& active_star_rows,
+      std::pmr::memory_resource* resource) {
     const core::SimulationState& state = context.state;
-    m_active_star_indices.clear();
+    active_star_rows.clear();
     if (!context.active_set.particles_are_subset ||
-        context.active_set.particle_indices.empty()) {
-      m_active_star_indices.resize(state.star_particles.size());
-      std::iota(m_active_star_indices.begin(), m_active_star_indices.end(), 0U);
-      return;
-    }
-    std::unordered_set<std::uint32_t> active_particles(
-        context.active_set.particle_indices.begin(),
-        context.active_set.particle_indices.end());
+        context.active_set.particle_indices.empty()) return;
+    std::pmr::vector<std::uint32_t> active_particles(resource);
+    active_particles.assign(context.active_set.particle_indices.begin(),
+                            context.active_set.particle_indices.end());
+    std::sort(active_particles.begin(), active_particles.end());
+    active_particles.erase(std::unique(active_particles.begin(), active_particles.end()),
+                           active_particles.end());
+    active_star_rows.reserve(state.star_particles.size());
+    // Preserve canonical star-row ordering independently of scheduler order.
     for (std::uint32_t star_index = 0;
          star_index < state.star_particles.size(); ++star_index) {
-      if (active_particles.contains(
+      if (std::binary_search(active_particles.begin(), active_particles.end(),
               state.star_particles.particle_index[star_index])) {
-        m_active_star_indices.push_back(star_index);
+        active_star_rows.push_back(star_index);
       }
     }
   }
@@ -1377,14 +1432,32 @@ class SourceRuntimeImpl final : public SourceRuntime {
     const bool all_stars_active =
         !context.active_set.particles_are_subset ||
         context.active_set.particle_indices.empty();
-    if (all_stars_active) {
-      m_active_star_indices.clear();
-    } else {
-      buildActiveStarRows(context);
-    }
+    std::unique_ptr<core::GovernedScratchArena> active_rows_arena;
+    std::unique_ptr<std::pmr::vector<std::uint32_t>> active_star_rows;
+    std::exception_ptr active_rows_failure;
+    try {
+      if (!all_stars_active) {
+        const std::uint64_t bytes = core::checkedMemoryBytesAdd(
+            static_cast<std::uint64_t>(core::checkedSizeMultiply(
+                context.active_set.particle_indices.size(), sizeof(std::uint32_t),
+                "source active particle lookup")),
+            static_cast<std::uint64_t>(core::checkedSizeMultiply(
+                context.state.star_particles.size(), sizeof(std::uint32_t),
+                "source active star rows")), "source active rows");
+        active_rows_arena = std::make_unique<core::GovernedScratchArena>(
+            m_memory_governor, core::MemoryClass::kScratchArena,
+            core::checkedMemoryBytesAdd(bytes, 256U, "source active alignment"),
+            "sources.stellar_evolution.active_rows");
+        active_star_rows = std::make_unique<std::pmr::vector<std::uint32_t>>(
+            active_rows_arena->resource());
+        buildActiveStarRows(context, *active_star_rows, active_rows_arena->resource());
+      }
+    } catch (...) { active_rows_failure = std::current_exception(); }
+    m_mpi_context.rethrowCollectivePreparationFailure(
+        active_rows_failure, "source active-star metadata preparation");
     const std::size_t active_star_count = all_stars_active
         ? context.state.star_particles.size()
-        : m_active_star_indices.size();
+        : active_star_rows->size();
     const std::size_t feedback_index_bytes_size = active_star_count == 0U
         ? 0U
         : core::checkedSizeMultiply(
@@ -1483,16 +1556,12 @@ class SourceRuntimeImpl final : public SourceRuntime {
     }
     const double elapsed_years = elapsedStellarEvolutionYears(context);
 
-    std::unordered_set<std::uint64_t> patch_ids_with_children;
-    patch_ids_with_children.reserve(context.state.patches.size());
-    for (std::size_t patch_index = 0;
-         patch_index < context.state.patches.size(); ++patch_index) {
-      const std::uint64_t parent_id =
-          context.state.patches.parent_patch_id[patch_index];
-      if (parent_id != 0U) {
-        patch_ids_with_children.insert(parent_id);
-      }
-    }
+    const std::uint64_t leaf_bytes = sourceParentIndexBytes(context.state.patches.size());
+    core::GovernedScratchArena leaf_arena(
+        m_memory_governor, core::MemoryClass::kScratchArena,
+        leaf_bytes, "sources.stellar_feedback.leaf_metadata");
+    const auto patch_ids_with_children = buildSourceParentIndex(
+        context.state, leaf_arena.resource());
     std::vector<std::uint32_t> owned_leaf_cells;
     owned_leaf_cells.reserve(context.state.cells.size());
     for (std::uint32_t cell_index = 0;
@@ -1572,7 +1641,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
         }
         star_batch = m_contiguous_star_batch;
       } else {
-        star_batch = std::span<const std::uint32_t>(m_active_star_indices)
+        star_batch = std::span<const std::uint32_t>(*active_star_rows)
             .subspan(batch_begin, batch_size);
       }
       core::MemoryReservation evolution_batch_reservation;
@@ -1824,7 +1893,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
       const core::StepContext& context,
       std::span<const std::uint32_t> active_cells,
       double source_evaluation_scale_factor,
-      const std::unordered_set<std::uint64_t>& patch_ids_with_children) {
+      std::span<const std::uint64_t> patch_ids_with_children) {
     const core::SimulationState& state = context.state;
     m_star_formation_inputs.clear();
 
@@ -1965,7 +2034,6 @@ class SourceRuntimeImpl final : public SourceRuntime {
   double m_mean_baryon_density0_code = 0.0;
   std::vector<std::uint32_t> m_contiguous_cell_batch;
   std::vector<physics::StarFormationCellInput> m_star_formation_inputs;
-  std::vector<std::uint32_t> m_active_star_indices;
   std::vector<std::uint32_t> m_contiguous_star_batch;
   std::vector<physics::StellarFeedbackEvent> m_feedback_events;
   physics::StellarFeedbackSpatialIndex m_feedback_spatial_index;

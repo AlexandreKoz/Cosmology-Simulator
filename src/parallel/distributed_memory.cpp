@@ -289,16 +289,6 @@ template <typename T>
   return value;
 }
 
-[[nodiscard]] std::vector<std::string> splitLines(const std::string& text) {
-  std::vector<std::string> lines;
-  std::stringstream stream(text);
-  std::string line;
-  while (std::getline(stream, line)) {
-    lines.push_back(line);
-  }
-  return lines;
-}
-
 [[nodiscard]] double absoluteValue(double value) {
   return (value < 0.0) ? -value : value;
 }
@@ -2904,17 +2894,22 @@ std::string DistributedRestartState::serialize() const {
 
 DistributedRestartState DistributedRestartState::deserialize(const std::string& encoded) {
   DistributedRestartState state;
-  const std::vector<std::string> lines = splitLines(encoded);
+  // Parse one line at a time without retaining an O(N_item) vector of heap
+  // strings. The input remains immutable so existing restart decoding and
+  // integrity semantics are unchanged.
+  std::size_t line_begin = 0U;
   std::size_t expected_item_count = 0;
   std::vector<bool> seen_rank_entry;
   std::size_t expected_slab_rank_count = 0;
   std::vector<bool> seen_slab_begin;
   std::vector<bool> seen_slab_end;
 
-  for (const std::string& line : lines) {
-    if (line.empty()) {
-      continue;
-    }
+  while (line_begin < encoded.size()) {
+    const std::size_t line_end = encoded.find('\n', line_begin);
+    const std::size_t end = line_end == std::string::npos ? encoded.size() : line_end;
+    const std::string line(encoded.data() + line_begin, end - line_begin);
+    line_begin = line_end == std::string::npos ? encoded.size() : line_end + 1U;
+    if (line.empty()) continue;
 
     const std::size_t eq = line.find('=');
     if (eq == std::string::npos) {
@@ -2952,11 +2947,21 @@ DistributedRestartState DistributedRestartState::deserialize(const std::string& 
     } else if (key == "long_range_restart_policy") {
       state.long_range_restart_policy = value;
     } else if (key == "item_count") {
-      expected_item_count = static_cast<std::size_t>(std::stoull(value));
+      expected_item_count = core::checkedIntegralNarrow<std::size_t>(
+          std::stoull(value), "restart item count");
+      if (expected_item_count > encoded.size() ||
+          expected_item_count > state.owning_rank_by_item.max_size()) {
+        throw std::length_error("restart item count exceeds encoded metadata capacity");
+      }
       state.owning_rank_by_item.assign(expected_item_count, 0);
       seen_rank_entry.assign(expected_item_count, false);
     } else if (key == "pm_slab_rank_count") {
-      expected_slab_rank_count = static_cast<std::size_t>(std::stoull(value));
+      expected_slab_rank_count = core::checkedIntegralNarrow<std::size_t>(
+          std::stoull(value), "restart slab rank count");
+      if (expected_slab_rank_count > encoded.size() ||
+          expected_slab_rank_count > state.pm_slab_begin_x_by_rank.max_size()) {
+        throw std::length_error("restart slab count exceeds encoded metadata capacity");
+      }
       state.pm_slab_begin_x_by_rank.assign(expected_slab_rank_count, 0);
       state.pm_slab_end_x_by_rank.assign(expected_slab_rank_count, 0);
       seen_slab_begin.assign(expected_slab_rank_count, false);

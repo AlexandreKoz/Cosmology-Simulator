@@ -979,8 +979,11 @@ void writeDataset1d(
   writeDataset1d<T>(group, name, file_type, memory_type, std::span<const T>(values.data(), values.size()));
 }
 
-template <typename T>
-[[nodiscard]] std::vector<T> readDataset1d(hid_t group, std::string_view name, hid_t memory_type) {
+// Read directly into the destination allocator. In particular, an aligned
+// canonical lane must not first materialize a second full std::vector.
+template <typename T, typename Allocator>
+void readDataset1dInto(hid_t group, std::string_view name, hid_t memory_type,
+                       std::vector<T, Allocator>& values) {
   const std::string dataset_name(name);
   const htri_t exists = H5Lexists(group, dataset_name.c_str(), H5P_DEFAULT);
   if (exists < 0) {
@@ -995,36 +998,69 @@ template <typename T>
   }
   Hdf5Handle space(H5Dget_space(dataset.get()));
   hsize_t dims[1] = {0};
-  if (H5Sget_simple_extent_ndims(space.get()) != 1 || H5Sget_simple_extent_dims(space.get(), dims, nullptr) != 1) {
+  if (H5Sget_simple_extent_ndims(space.get()) != 1 ||
+      H5Sget_simple_extent_dims(space.get(), dims, nullptr) != 1) {
     throw std::runtime_error("unexpected rank for dataset: " + dataset_name);
   }
-  std::vector<T> values(static_cast<std::size_t>(dims[0]));
-  if (!values.empty() && H5Dread(dataset.get(), memory_type, H5S_ALL, H5S_ALL, H5P_DEFAULT, values.data()) < 0) {
+  const std::size_t count = core::checkedIntegralNarrow<std::size_t>(
+      dims[0], "restart dataset element count");
+  (void)core::checkedSizeMultiply(count, sizeof(T), "restart dataset byte count");
+  if (count > values.max_size()) {
+    throw std::length_error("restart dataset exceeds destination capacity: " + dataset_name);
+  }
+  values.resize(count);
+  if (!values.empty() && H5Dread(dataset.get(), memory_type, H5S_ALL, H5S_ALL,
+                                 H5P_DEFAULT, values.data()) < 0) {
     throw std::runtime_error("failed reading dataset: " + dataset_name);
   }
+}
+
+template <typename T>
+[[nodiscard]] std::vector<T> readDataset1d(hid_t group, std::string_view name, hid_t memory_type) {
+  std::vector<T> values;
+  readDataset1dInto(group, name, memory_type, values);
   return values;
 }
 
 template <typename T>
-[[nodiscard]] core::AlignedVector<T> toAlignedVector(const std::vector<T>& values) {
-  core::AlignedVector<T> aligned(values.size());
-  std::copy(values.begin(), values.end(), aligned.begin());
-  return aligned;
-}
-
-template <typename T>
-[[nodiscard]] core::AlignedVector<T> readDataset1dAligned(hid_t group, std::string_view name, hid_t memory_type) {
-  return toAlignedVector(readDataset1d<T>(group, name, memory_type));
+[[nodiscard]] core::AlignedVector<T> readDataset1dAligned(
+    hid_t group, std::string_view name, hid_t memory_type) {
+  core::AlignedVector<T> values;
+  readDataset1dInto(group, name, memory_type, values);
+  return values;
 }
 
 void writeStringDataset(hid_t group, std::string_view name, const std::string& value) {
-  const std::vector<std::uint8_t> bytes(value.begin(), value.end());
-  writeDataset1d(group, name, H5T_STD_U8LE, H5T_NATIVE_UINT8, bytes);
+  // HDF5's byte dataset accepts the canonical string directly; no second
+  // string-sized byte vector is necessary. The on-disk schema is unchanged.
+  writeDataset1d<std::uint8_t>(group, name, H5T_STD_U8LE, H5T_NATIVE_UINT8,
+      std::span<const std::uint8_t>(
+          reinterpret_cast<const std::uint8_t*>(value.data()), value.size()));
 }
 
 [[nodiscard]] std::string readStringDataset(hid_t group, std::string_view name) {
-  const auto bytes = readDataset1d<std::uint8_t>(group, name, H5T_NATIVE_UINT8);
-  return std::string(bytes.begin(), bytes.end());
+  const std::string dataset_name(name);
+  const htri_t exists = H5Lexists(group, dataset_name.c_str(), H5P_DEFAULT);
+  if (exists < 0) throw std::runtime_error("failed checking dataset presence: " + dataset_name);
+  if (exists == 0) throw std::runtime_error("missing dataset: " + dataset_name);
+  Hdf5Handle dataset(H5Dopen2(group, dataset_name.c_str(), H5P_DEFAULT));
+  if (!dataset.valid()) throw std::runtime_error("missing dataset: " + dataset_name);
+  Hdf5Handle space(H5Dget_space(dataset.get()));
+  hsize_t dims[1] = {0};
+  if (H5Sget_simple_extent_ndims(space.get()) != 1 ||
+      H5Sget_simple_extent_dims(space.get(), dims, nullptr) != 1) {
+    throw std::runtime_error("unexpected rank for dataset: " + dataset_name);
+  }
+  const std::size_t count = core::checkedIntegralNarrow<std::size_t>(
+      dims[0], "restart string byte count");
+  std::string value;
+  if (count > value.max_size()) throw std::length_error("restart string exceeds maximum size");
+  value.resize(count);
+  if (!value.empty() && H5Dread(dataset.get(), H5T_NATIVE_UINT8, H5S_ALL,
+                                H5S_ALL, H5P_DEFAULT, value.data()) < 0) {
+    throw std::runtime_error("failed reading dataset: " + dataset_name);
+  }
+  return value;
 }
 
 [[nodiscard]] hid_t openOrCreateGroup(hid_t parent, const std::string& name) {
@@ -2124,11 +2160,8 @@ void readStateGroup(hid_t root, core::SimulationState& state, std::uint32_t sche
     if (hdf5AttributeExists(module_group.get(), "requirement_threshold_code")) {
       block.requirement.threshold_code = readScalarF64Attribute(module_group.get(), "requirement_threshold_code");
     }
-    const auto payload_u8 = readDataset1d<std::uint8_t>(module_group.get(), "payload", H5T_NATIVE_UINT8);
-    block.payload.resize(payload_u8.size());
-    for (std::size_t i = 0; i < payload_u8.size(); ++i) {
-      block.payload[i] = static_cast<std::byte>(payload_u8[i]);
-    }
+    block.payload = readDataset1d<std::byte>(
+        module_group.get(), "payload", H5T_NATIVE_UINT8);
     if (block.particle_indexed || block.row_stride_bytes != 0U ||
         hdf5LinkExists(module_group.get(), "particle_id_by_row")) {
       block.particle_indexed = true;

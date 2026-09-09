@@ -132,12 +132,12 @@ struct StarFormationPatchCellGeometry {
 [[nodiscard]] inline bool starFormationPatchIsLeaf(
     const core::SimulationState& state,
     std::uint32_t patch_index,
-    const std::unordered_set<std::uint64_t>& patch_ids_with_children) {
+    std::span<const std::uint64_t> patch_ids_with_children) {
   if (patch_index >= state.patches.size()) {
     return true;
   }
-  return patch_ids_with_children.find(state.patches.patch_id[patch_index]) ==
-      patch_ids_with_children.end();
+  return !std::binary_search(patch_ids_with_children.begin(),
+      patch_ids_with_children.end(), state.patches.patch_id[patch_index]);
 }
 
 }  // namespace cosmosim::workflows::internal

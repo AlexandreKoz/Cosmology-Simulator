@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/governed_scratch_arena.hpp"
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/physics/star_formation.hpp"
 
@@ -237,6 +238,71 @@ void testUnbiasedSamplingNearMassCap() {
   assert(std::abs(realized_mean - reference.expected_spawn_mass_code) < 6.0 * standard_error);
 }
 
+void testBoundedBirthMetadataAndRetry() {
+  auto config = makeAdaptiveConfig();
+  config.stochastic_spawning = false;
+  cosmosim::physics::StarFormationModel model(config);
+  const auto cell = makeEligibleAdaptiveCell();
+  cosmosim::core::SimulationState reference;
+  cosmosim::core::SimulationState state;
+  initializeAdaptiveState(reference, {&cell, 1});
+  initializeAdaptiveState(state, {&cell, 1});
+  const auto expected = model.applyFromInputs(reference, {&cell, 1}, 1.0, 1.0, 77);
+  const std::uint64_t plan_bytes = cosmosim::physics::starFormationBirthPlanBytes();
+  const std::uint64_t max_births = config.max_spawn_particles_per_cell_step;
+  const std::uint64_t arena_bytes = plan_bytes + 8U * max_births + 256U;
+  const std::uint64_t report_bytes = 12U * max_births;
+  cosmosim::core::MemoryGovernor governor({.hard_limit_bytes = arena_bytes + report_bytes});
+  bool rejected = false;
+  try {
+    auto impossible = governor.reserve(cosmosim::core::MemoryClass::kScratchArena,
+        arena_bytes + report_bytes + 1U, "test.source.metadata");
+    (void)impossible;
+  } catch (const cosmosim::core::MemoryAdmissionError&) { rejected = true; }
+  assert(rejected);
+  assert(state.particles.size() == 0U);
+  // A null-upstream arena injects a real allocation failure during planning.
+  // No canonical birth may have happened at this point.
+  {
+    cosmosim::core::GovernedScratchArena insufficient(&governor,
+        cosmosim::core::MemoryClass::kScratchArena, plan_bytes - 1U,
+        "test.source.insufficient_plans");
+    bool failed = false;
+    try {
+      (void)model.applyFromInputs(state, {&cell, 1}, 1.0, 1.0, 77,
+                                  nullptr, insufficient.resource());
+    } catch (const std::bad_alloc&) { failed = true; }
+    assert(failed);
+    assert(state.particles.size() == 0U);
+    assert(state.star_particles.size() == 0U);
+    assert(state.cells.mass_code[0] == 10.0);
+  }
+  assert(governor.snapshot().committed_bytes == 0U);
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    cosmosim::core::SimulationState trial;
+    initializeAdaptiveState(trial, {&cell, 1});
+    {
+      cosmosim::core::GovernedScratchArena arena(&governor,
+          cosmosim::core::MemoryClass::kScratchArena, arena_bytes,
+          "test.source.birth_metadata");
+      auto report_lease = governor.reserve(cosmosim::core::MemoryClass::kDiagnostic,
+          report_bytes, "test.source.report_metadata");
+      report_lease.commit();
+      const auto actual = model.applyFromInputs(trial, {&cell, 1}, 1.0, 1.0, 77,
+                                                nullptr, arena.resource());
+      assert(actual.birth_keys == expected.birth_keys);
+      assert(actual.spawned_from_cells == expected.spawned_from_cells);
+      assert(trial.particle_sidecar.particle_id == reference.particle_sidecar.particle_id);
+      assert(trial.star_particles.birth_key == reference.star_particles.birth_key);
+      assert(trial.cells.mass_code == reference.cells.mass_code);
+      assert(trial.gas_cells.metal_mass_code == reference.gas_cells.metal_mass_code);
+      assert(governor.snapshot().committed_bytes == arena_bytes + report_bytes);
+    }
+    assert(governor.snapshot().committed_bytes == 0U);
+    assert(governor.snapshot().reserved_bytes == 0U);
+  }
+}
+
 void testConservativeMultiParticleBirth() {
   auto config = makeAdaptiveConfig();
   cosmosim::physics::StarFormationModel model(config);
@@ -394,6 +460,7 @@ void testLegacyTimeIntegrationCallbackHook() {
 }  // namespace
 
 int main() {
+  testBoundedBirthMetadataAndRetry();
   testLegacyThresholdEligibility();
   testPhysicalFrameConversions();
   testVirialJeansAndFlowEligibility();

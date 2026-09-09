@@ -68,6 +68,8 @@ struct ProductionAmrHydroDiagnostics {
   std::vector<std::uint32_t> substeps_by_level;
   std::uint64_t scratch_high_water_bytes = 0;
   std::uint64_t prepared_ghost_capacity_bytes = 0;
+  // Actual nested geometry capacity, excluding the parent vector header.
+  std::uint64_t geometry_capacity_bytes = 0;
   std::uint64_t max_patch_conserved_bytes = 0;
   std::size_t active_batch_capacity_cells = 0;
   std::size_t face_batch_capacity = 0;

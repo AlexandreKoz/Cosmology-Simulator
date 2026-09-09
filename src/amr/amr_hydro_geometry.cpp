@@ -1,6 +1,7 @@
 #include "cosmosim/amr/amr_hydro_geometry.hpp"
 
 #include "cosmosim/amr/amr_patch_indexing.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -275,6 +276,62 @@ void appendAxisBoundaryGhosts(
 
 }  // namespace
 
+AmrHydroGeometryCapacity amrHydroGeometryCapacity(const PatchDescriptor& patch) {
+  const std::size_t nx = patch.cell_dims[0];
+  const std::size_t ny = patch.cell_dims[1];
+  const std::size_t nz = patch.cell_dims[2];
+  const std::size_t n = checkedPatchCellCount(patch, "AMR geometry capacity");
+  const auto mul = [](std::size_t a, std::size_t b) {
+    return core::checkedSizeMultiply(a, b, "AMR geometry topology");
+  };
+  const auto add = [](std::size_t a, std::size_t b) {
+    return core::checkedSizeAdd(a, b, "AMR geometry topology");
+  };
+  const std::size_t surface = add(add(mul(nx, ny), mul(nx, nz)), mul(ny, nz));
+  const std::size_t ghosts = mul(2U, surface);
+  const std::size_t internal = add(add(mul(nx - 1U, mul(ny, nz)),
+      mul(ny - 1U, mul(nx, nz))), mul(nz - 1U, mul(nx, ny)));
+  const std::size_t faces = add(internal, ghosts);
+  const auto bytes = [](std::size_t count, std::size_t width) {
+    return static_cast<std::uint64_t>(core::checkedSizeMultiply(
+        count, width, "AMR geometry storage"));
+  };
+  std::uint64_t retained = 0U;
+  for (const std::size_t width : {sizeof(AmrHydroCellDescriptor),
+       sizeof(std::uint64_t), sizeof(std::uint32_t)}) {
+    retained = core::checkedMemoryBytesAdd(retained, bytes(n, width), "AMR geometry storage");
+  }
+  for (const std::size_t width : {sizeof(hydro::HydroFace),
+       sizeof(hydro::HydroFluxRegisterFace), sizeof(AmrHydroFaceDescriptor)}) {
+    retained = core::checkedMemoryBytesAdd(retained, bytes(faces, width), "AMR geometry storage");
+  }
+  for (const std::size_t width : {sizeof(hydro::HydroGhostCell),
+       sizeof(AmrHydroGhostDescriptor)}) {
+    retained = core::checkedMemoryBytesAdd(retained, bytes(ghosts, width), "AMR geometry storage");
+  }
+  return {n, ghosts, faces, retained,
+      bytes(n, 2U * sizeof(std::uint32_t))};
+}
+
+std::uint64_t AmrHydroPatchGeometry::ownedCapacityBytes() const {
+  std::uint64_t bytes = 0U;
+  const auto add = [&bytes](std::size_t capacity, std::size_t width) {
+    bytes = core::checkedMemoryBytesAdd(bytes,
+        static_cast<std::uint64_t>(core::checkedSizeMultiply(
+            capacity, width, "AMR geometry physical capacity")),
+        "AMR geometry physical capacity");
+  };
+  add(real_cells.capacity(), sizeof(AmrHydroCellDescriptor));
+  add(gas_cell_ids.capacity(), sizeof(std::uint64_t));
+  add(local_cell_rows.capacity(), sizeof(std::uint32_t));
+  add(ghosts.capacity(), sizeof(AmrHydroGhostDescriptor));
+  add(faces.capacity(), sizeof(AmrHydroFaceDescriptor));
+  add(geometry.faces.capacity(), sizeof(hydro::HydroFace));
+  add(geometry.ghost_cells.capacity(), sizeof(hydro::HydroGhostCell));
+  add(geometry.flux_register_faces.capacity(), sizeof(hydro::HydroFluxRegisterFace));
+  return bytes;
+}
+
 std::span<const std::uint64_t> AmrHydroPatchGeometry::gasCellIds() const noexcept {
   return gas_cell_ids;
 }
@@ -300,7 +357,15 @@ AmrHydroPatchGeometry buildAmrHydroPatchGeometry(
     throw std::runtime_error("buildAmrHydroPatchGeometry: gas-cell identity sidecar mirrors are stale");
   }
 
-  std::vector<std::uint32_t> rows = state.gas_cell_identity.rowsForPatch(patch.patch_id);
+  // The descriptor gives the exact local row count. Avoid a second global
+  // scan merely to discover capacity, and never grow a patch row list through
+  // an unadmitted sequence of geometric reallocations.
+  std::vector<std::uint32_t> rows;
+  rows.reserve(expected_cells);
+  for (const core::GasCellIdentityRecord& record : state.gas_cell_identity.records()) {
+    if (record.owning_patch_id == patch.patch_id) rows.push_back(record.local_cell_row);
+  }
+  std::sort(rows.begin(), rows.end());
   if (rows.size() != expected_cells) {
     throw std::runtime_error("buildAmrHydroPatchGeometry: patch gas-cell coverage does not match PatchDescriptor cell_dims");
   }
@@ -324,6 +389,12 @@ AmrHydroPatchGeometry buildAmrHydroPatchGeometry(
       result.geometry.cell_width_y_comoving *
       result.geometry.cell_width_z_comoving;
 
+  const auto capacity = amrHydroGeometryCapacity(patch);
+  result.geometry.faces.reserve(capacity.faces);
+  result.geometry.ghost_cells.reserve(capacity.ghost_cells);
+  result.geometry.flux_register_faces.reserve(capacity.faces);
+  result.ghosts.reserve(capacity.ghost_cells);
+  result.faces.reserve(capacity.faces);
   result.real_cells.reserve(row_by_patch_cell.size());
   result.gas_cell_ids.reserve(row_by_patch_cell.size());
   result.local_cell_rows.reserve(row_by_patch_cell.size());
@@ -439,6 +510,12 @@ AmrHydroPatchGeometry buildRemoteAmrHydroPatchGeometry(
       result.geometry.cell_width_x_comoving *
       result.geometry.cell_width_y_comoving *
       result.geometry.cell_width_z_comoving;
+  const auto capacity = amrHydroGeometryCapacity(patch);
+  result.geometry.faces.reserve(capacity.faces);
+  result.geometry.ghost_cells.reserve(capacity.ghost_cells);
+  result.geometry.flux_register_faces.reserve(capacity.faces);
+  result.ghosts.reserve(capacity.ghost_cells);
+  result.faces.reserve(capacity.faces);
   result.real_cells.reserve(expected_cells);
   result.gas_cell_ids.assign(gas_cell_ids.begin(), gas_cell_ids.end());
   result.local_cell_rows.assign(expected_cells, core::kInvalidGasCellRow);

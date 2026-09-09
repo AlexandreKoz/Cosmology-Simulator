@@ -1447,8 +1447,36 @@ namespace {
     return std::binary_search(active_lookup.begin(), active_lookup.end(), row);
   };
 
+  // Admit the entire retained geometry set before construction. The row-map
+  // scratch has a separate lease and can be released after the last builder.
+  // Other stage buffers retain their own owners; this is not a whole-stage
+  // certificate and must not be added to an existing owner-held lease.
+  std::uint64_t geometry_bytes = static_cast<std::uint64_t>(core::checkedSizeMultiply(
+      descriptors.size(), sizeof(AmrHydroPatchGeometry), "AMR geometry objects"));
+  std::uint64_t row_scratch_bytes = 0U;
+  for (const PatchDescriptor& patch : descriptors) {
+    const auto capacity = amrHydroGeometryCapacity(patch);
+    geometry_bytes = core::checkedMemoryBytesAdd(
+        geometry_bytes, capacity.retained_bytes, "AMR geometry live set");
+    row_scratch_bytes = std::max(row_scratch_bytes, capacity.construction_scratch_bytes);
+  }
+  core::MemoryReservation geometry_reservation;
+  if (options.regrid_memory_governor != nullptr) {
+    geometry_reservation = options.regrid_memory_governor->reserve(
+        core::MemoryClass::kPhaseResident, geometry_bytes, "amr.geometry.retained");
+  }
   std::vector<AmrHydroPatchGeometry> geometries;
   geometries.reserve(descriptors.size());
+  if (geometries.capacity() != descriptors.size()) {
+    throw std::runtime_error("AMR geometry object capacity exceeds admitted bound");
+  }
+  if (geometry_reservation.pending()) geometry_reservation.commit();
+  core::MemoryReservation row_scratch_reservation;
+  if (options.regrid_memory_governor != nullptr && row_scratch_bytes != 0U) {
+    row_scratch_reservation = options.regrid_memory_governor->reserve(
+        core::MemoryClass::kScratchArena, row_scratch_bytes, "amr.geometry.row_map");
+    row_scratch_reservation.commit();
+  }
   for (const PatchDescriptor& patch : descriptors) {
     AmrHydroGeometryOptions geometry_options;
     geometry_options.physical_boundary_kind = options.physical_boundary_kind;
@@ -1462,7 +1490,14 @@ namespace {
     };
     geometries.push_back(buildAmrHydroPatchGeometry(state, patch, geometry_options));
     populateAmrHydroFluxRegisterFaces(geometries.back(), all_descriptors);
+    const std::uint64_t actual = geometries.back().ownedCapacityBytes();
+    if (actual > amrHydroGeometryCapacity(patch).retained_bytes) {
+      throw std::runtime_error("AMR geometry physical capacity exceeds admitted topology bound");
+    }
+    diagnostics.geometry_capacity_bytes = core::checkedMemoryBytesAdd(
+        diagnostics.geometry_capacity_bytes, actual, "AMR geometry actual capacity");
   }
+  row_scratch_reservation.release();
 
   std::vector<AmrHydroSparseGhostSource> remote_sources;
   if (distributed_exchange != nullptr) {

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 #include <memory>
+#include <memory_resource>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -211,6 +212,9 @@ struct StarFormationStepReport {
   std::vector<std::uint64_t> birth_keys;
 };
 
+// Exact internal birth-plan element width for owner-local staging admission.
+[[nodiscard]] std::size_t starFormationBirthPlanBytes() noexcept;
+
 [[nodiscard]] std::uint64_t starFormationBirthKey(
     std::uint64_t gas_cell_id,
     std::uint64_t global_integration_tick,
@@ -288,7 +292,8 @@ class StarFormationModel {
       double dt_code,
       double scale_factor,
       std::uint64_t global_integration_tick,
-      ParticleIdPrecommit* id_precommit = nullptr) const;
+      ParticleIdPrecommit* id_precommit = nullptr,
+      std::pmr::memory_resource* metadata_scratch = nullptr) const;
 
   [[nodiscard]] StarFormationStepReport applyFromView(
       core::SimulationState& state,

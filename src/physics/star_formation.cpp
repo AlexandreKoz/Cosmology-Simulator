@@ -455,6 +455,10 @@ std::vector<std::uint64_t> LocalParticleIdRegistry::precommit(
   return precommitStarParticleIdsExact(state.particle_sidecar.particle_id, birth_keys);
 }
 
+std::size_t starFormationBirthPlanBytes() noexcept {
+  return sizeof(StarBirthPlan);
+}
+
 StarFormationModel::StarFormationModel(
     StarFormationConfig config,
     std::shared_ptr<const EffectiveMultiphaseEosTable> effective_eos_table)
@@ -907,7 +911,8 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
     double dt_code,
     double scale_factor,
     std::uint64_t global_integration_tick,
-    ParticleIdPrecommit* id_precommit) const {
+    ParticleIdPrecommit* id_precommit,
+    std::pmr::memory_resource* metadata_scratch) const {
   StarFormationStepReport report;
   if (!m_config.enabled || !(dt_code > 0.0)) {
     return report;
@@ -916,7 +921,9 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
   const std::uint64_t identity_generation_before = state.gasCellIdentityGeneration();
   // Birth plans are event-local. Do not reserve one 136-byte record for every
   // scanned gas cell before eligibility is known.
-  std::vector<StarBirthPlan> plans;
+  std::pmr::vector<StarBirthPlan> plans(metadata_scratch == nullptr
+      ? std::pmr::get_default_resource() : metadata_scratch);
+  if (metadata_scratch != nullptr) plans.reserve(cell_inputs.size());
 
   for (const StarFormationCellInput& cell : cell_inputs) {
     ++report.counters.scanned_cells;
@@ -1045,8 +1052,16 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
   // complete local birth batch without a full scan of the existing particle set
   // or one heap allocation per ID. The workflow ownership gate performs the exact
   // global duplicate-ID check after legal source mutation and before acceptance.
-  std::vector<std::uint64_t> new_birth_keys;
+  std::pmr::vector<std::uint64_t> new_birth_keys(metadata_scratch == nullptr
+      ? std::pmr::get_default_resource() : metadata_scratch);
   new_birth_keys.reserve(total_new_particles);
+  // The production owner has admitted both report arrays before entering the
+  // distributed ID precommit. Exact reserves prevent allocator growth after
+  // canonical state begins its birth transaction.
+  if (metadata_scratch != nullptr) {
+    report.spawned_from_cells.reserve(total_new_particles);
+    report.birth_keys.reserve(total_new_particles);
+  }
   for (const StarBirthPlan& plan : plans) {
     for (std::uint32_t ordinal = 0U; ordinal < plan.spawn_count; ++ordinal) {
       new_birth_keys.push_back(starFormationBirthKey(

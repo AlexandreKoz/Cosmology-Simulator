@@ -95,9 +95,24 @@ struct AmrHydroPatchGeometry {
   std::vector<AmrHydroFaceDescriptor> faces;
   std::uint64_t source_gas_cell_identity_generation = 0;
 
+  // Physical capacities of the eight nested geometry arrays, excluding this
+  // object's own storage in its parent vector. No logical-size substitution.
+  [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
   [[nodiscard]] std::span<const std::uint64_t> gasCellIds() const noexcept;
   [[nodiscard]] std::vector<std::size_t> internalFaceIndices() const;
 };
+
+struct AmrHydroGeometryCapacity {
+  std::size_t real_cells = 0;
+  std::size_t ghost_cells = 0;
+  std::size_t faces = 0;
+  std::uint64_t retained_bytes = 0;
+  std::uint64_t construction_scratch_bytes = 0;
+};
+
+// Checked, exact topology counts for the regular patch representation.
+// retained_bytes excludes the AmrHydroPatchGeometry object itself.
+[[nodiscard]] AmrHydroGeometryCapacity amrHydroGeometryCapacity(const PatchDescriptor& patch);
 
 [[nodiscard]] AmrHydroPatchGeometry buildAmrHydroPatchGeometry(
     const core::SimulationState& state,

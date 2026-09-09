@@ -722,6 +722,35 @@ void testExplicitBlockingGhostExchangePlanRequiresOwnedSendAndGhostReceive() {
   assert(threw);
 }
 
+void testRestartMetadataLargeAndMalformedCounts() {
+  cosmosim::parallel::DistributedRestartState state;
+  state.schema_version = 2;
+  state.world_size = 3;
+  state.pm_grid_nx = 12;
+  state.pm_grid_ny = 12;
+  state.pm_grid_nz = 12;
+  state.pm_slab_begin_x_by_rank = {0, 4, 8};
+  state.pm_slab_end_x_by_rank = {4, 8, 12};
+  state.owning_rank_by_item.resize(4096U);
+  for (std::size_t i = 0; i < state.owning_rank_by_item.size(); ++i) {
+    state.owning_rank_by_item[i] = static_cast<int>(i % 3U);
+  }
+  const std::string encoded = state.serialize();
+  const auto restored = cosmosim::parallel::DistributedRestartState::deserialize(encoded);
+  assert(restored.owning_rank_by_item == state.owning_rank_by_item);
+  assert(restored.pm_slab_begin_x_by_rank == state.pm_slab_begin_x_by_rank);
+  assert(restored.pm_slab_end_x_by_rank == state.pm_slab_end_x_by_rank);
+  assert(restored.serialize() == encoded);
+  for (const std::string malformed : {
+      std::string("item_count=18446744073709551615\n"),
+      std::string("pm_slab_rank_count=18446744073709551615\n")}) {
+    bool rejected = false;
+    try { (void)cosmosim::parallel::DistributedRestartState::deserialize(malformed); }
+    catch (const std::length_error&) { rejected = true; }
+    assert(rejected);
+  }
+}
+
 void testRestartStateRoundTrip() {
   cosmosim::parallel::DistributedRestartState in;
   in.schema_version = 2;
@@ -1877,6 +1906,7 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
 }  // namespace
 
 int main() {
+  testRestartMetadataLargeAndMalformedCounts();
   testExactDistributedCutRepairSynthetic();
   testBoundedMpiTransferPlannerSyntheticLimits();
   testDirectedAmrBoundaryRequestPlannerSelectsOnlySharedFaces();

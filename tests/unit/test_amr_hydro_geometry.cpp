@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "cosmosim/amr/amr_hydro_geometry.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/hydro/hydro_reconstruction.hpp"
 #include "cosmosim/hydro/hydro_riemann.hpp"
@@ -71,6 +72,51 @@ cosmosim::amr::PatchDescriptor makeDescriptor() {
   patch.extent_comov = {1.0, 2.0, 4.0};
   patch.cell_dims = {2, 2, 2};
   return patch;
+}
+
+void testGeometryPhysicalCapacityAndTightAdmission() {
+  const auto patch = makeDescriptor();
+  const auto bound = cosmosim::amr::amrHydroGeometryCapacity(patch);
+  assert(bound.real_cells == 8U);
+  assert(bound.ghost_cells == 24U);
+  assert(bound.faces == 36U);
+  assert(bound.construction_scratch_bytes == 64U);
+  const auto state = makePatchState();
+  auto geometry = cosmosim::amr::buildAmrHydroPatchGeometry(state, patch);
+  assert(geometry.ownedCapacityBytes() <= bound.retained_bytes);
+  assert(geometry.ownedCapacityBytes() == bound.retained_bytes);
+  cosmosim::core::MemoryGovernor governor({.hard_limit_bytes = bound.retained_bytes + 63U});
+  bool rejected = false;
+  try {
+    auto lease = governor.reserve(cosmosim::core::MemoryClass::kScratchArena,
+        bound.retained_bytes + bound.construction_scratch_bytes, "test.amr.geometry");
+    (void)lease;
+  } catch (const cosmosim::core::MemoryAdmissionError&) {
+    rejected = true;
+  }
+  assert(rejected);
+  assert(governor.snapshot().committed_bytes == 0U);
+  assert(governor.snapshot().reserved_bytes == 0U);
+  {
+    auto retained = governor.reserve(cosmosim::core::MemoryClass::kPhaseResident,
+        bound.retained_bytes, "test.amr.geometry");
+    retained.commit();
+    assert(governor.snapshot().committed_bytes == bound.retained_bytes);
+  }
+  assert(governor.snapshot().committed_bytes == 0U);
+  for (int repeat = 0; repeat < 3; ++repeat) {
+    const auto next = cosmosim::amr::buildAmrHydroPatchGeometry(state, patch);
+    assert(next.ownedCapacityBytes() == bound.retained_bytes);
+  }
+  auto degenerate = patch;
+  degenerate.cell_dims = {1U, 1U, 1U};
+  const auto one = cosmosim::amr::amrHydroGeometryCapacity(degenerate);
+  assert(one.real_cells == 1U && one.ghost_cells == 6U && one.faces == 6U);
+  degenerate.cell_dims = {0U, 1U, 1U};
+  rejected = false;
+  try { (void)cosmosim::amr::amrHydroGeometryCapacity(degenerate); }
+  catch (const std::invalid_argument&) { rejected = true; }
+  assert(rejected);
 }
 
 void testPatchGeometryCountsAndIdentityCoverage() {
@@ -234,6 +280,7 @@ void testHydroSolverAdvancesPatchThroughAdapter() {
 }  // namespace
 
 int main() {
+  testGeometryPhysicalCapacityAndTightAdmission();
   testPatchGeometryCountsAndIdentityCoverage();
   testRejectsStaleIdentityGeneration();
   testHydroSolverAdvancesPatchThroughAdapter();

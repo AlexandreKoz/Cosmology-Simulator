@@ -508,6 +508,16 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           .governed_commitment = false,
           .uncertainty_note = "AMR per-patch scratch is released after each patch; high-water retains the observed peak"});
     }
+    if (m_last_amr_hydro_diagnostics.geometry_capacity_bytes != 0U) {
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kGasHydro,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kPhaseResident,
+          .label = "hydro.amr.geometry_retained",
+          .high_water_bytes = m_last_amr_hydro_diagnostics.geometry_capacity_bytes,
+          .estimate_only = false,
+          .uncertainty_note = "actual nested capacity; parent object-vector storage and admission are tracked by the stage owner; released at stage exit"});
+    }
     if (m_last_amr_hydro_diagnostics.prepared_ghost_capacity_bytes != 0U) {
       builder.addEntry(core::MemoryEntry{
           .subsystem = core::MemorySubsystem::kMpiBuffers,
@@ -2079,6 +2089,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
                       {"hydro_active_batch_capacity_cells", std::to_string(amr_diagnostics.active_batch_capacity_cells)},
                       {"hydro_face_batch_capacity", std::to_string(amr_diagnostics.face_batch_capacity)},
                       {"hydro_scratch_high_water_bytes", std::to_string(amr_diagnostics.scratch_high_water_bytes)},
+                      {"hydro_geometry_capacity_bytes", std::to_string(amr_diagnostics.geometry_capacity_bytes)},
                       {"hydro_prepared_ghost_capacity_bytes", std::to_string(amr_diagnostics.prepared_ghost_capacity_bytes)},
                       {"hydro_max_patch_conserved_bytes", std::to_string(amr_diagnostics.max_patch_conserved_bytes)},
                       {"hydro_batch_scratch_bytes_per_cell", std::to_string(hydro::k_hydro_runtime_batch_scratch_budget_bytes_per_cell)},
