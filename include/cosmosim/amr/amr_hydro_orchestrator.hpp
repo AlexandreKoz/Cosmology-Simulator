@@ -51,6 +51,11 @@ struct ProductionAmrHydroOptions {
   core::MemoryGovernor* regrid_memory_governor = nullptr;
 };
 
+// Complete physical workspace for immutable step-start ghost snapshots.
+// The patch count includes inactive patches; only active shells consume state.
+[[nodiscard]] std::uint64_t amrPreparedGhostWorkspaceBytes(
+    std::size_t patch_count, std::size_t prepared_ghost_count);
+
 struct ProductionAmrHydroDiagnostics {
   std::size_t patch_count = 0;
   std::size_t advanced_patch_count = 0;

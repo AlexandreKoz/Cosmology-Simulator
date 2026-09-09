@@ -20,6 +20,22 @@
 #include <utility>
 
 namespace cosmosim::amr {
+
+std::uint64_t amrPreparedGhostWorkspaceBytes(
+    std::size_t patch_count, std::size_t prepared_ghost_count) {
+  const std::size_t offset_count = core::checkedSizeAdd(
+      patch_count, 1U, "AMR prepared ghost offsets");
+  return core::checkedMemoryBytesAdd(
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          prepared_ghost_count, sizeof(hydro::HydroConservedState),
+          "AMR prepared ghost states")),
+      core::checkedMemoryBytesAdd(
+          static_cast<std::uint64_t>(core::checkedSizeMultiply(
+              offset_count, sizeof(std::size_t), "AMR prepared ghost offsets")),
+          256U, "AMR prepared ghost alignment"),
+      "AMR prepared ghost coexistence");
+}
+
 namespace {
 
 constexpr double k_geometry_tol = 1.0e-10;
@@ -1569,7 +1585,42 @@ namespace {
   // entire canonical SimulationState is still at the common step-start epoch.
   // This preserves the old synchronized-sweep semantics without retaining a
   // full conserved SoA for every local patch simultaneously.
-  std::vector<std::vector<hydro::HydroConservedState>> prepared_ghost_states(geometries.size());
+  // One bounded, contiguous step-start snapshot replaces nested vectors.
+  // Offsets are immutable after construction, so no snapshot address can be
+  // invalidated by a later patch. Inactive patches occupy no shell storage.
+  std::size_t prepared_ghost_count = 0U;
+  for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
+    if (patchRequiresGhostFill(patch_index)) {
+      prepared_ghost_count = core::checkedSizeAdd(
+          prepared_ghost_count, geometries[patch_index].geometry.ghost_cells.size(),
+          "AMR prepared ghost total");
+    }
+  }
+  const std::size_t ghost_offset_count = core::checkedSizeAdd(
+      geometries.size(), 1U, "AMR prepared ghost offsets");
+  const std::uint64_t prepared_ghost_bytes = amrPreparedGhostWorkspaceBytes(
+      geometries.size(), prepared_ghost_count);
+  core::GovernedScratchArena prepared_ghost_arena(
+      options.regrid_memory_governor, core::MemoryClass::kPhaseResident,
+      prepared_ghost_bytes, "amr.ghosts.step_start_snapshots");
+  std::pmr::vector<std::size_t> prepared_ghost_offsets(prepared_ghost_arena.resource());
+  std::pmr::vector<hydro::HydroConservedState> prepared_ghost_states(prepared_ghost_arena.resource());
+  prepared_ghost_offsets.reserve(ghost_offset_count);
+  prepared_ghost_offsets.push_back(0U);
+  for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
+    const std::size_t count = patchRequiresGhostFill(patch_index)
+        ? geometries[patch_index].geometry.ghost_cells.size() : 0U;
+    prepared_ghost_offsets.push_back(core::checkedSizeAdd(
+        prepared_ghost_offsets.back(), count, "AMR prepared ghost offset"));
+  }
+  if (prepared_ghost_offsets.back() != prepared_ghost_count) {
+    throw std::logic_error("AMR prepared ghost membership changed during preparation");
+  }
+  prepared_ghost_states.resize(prepared_ghost_count);
+  diagnostics.prepared_ghost_capacity_bytes = static_cast<std::uint64_t>(
+      core::checkedSizeMultiply(prepared_ghost_states.capacity(),
+                                sizeof(hydro::HydroConservedState),
+                                "AMR prepared ghost actual capacity"));
   for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
     if (!patchRequiresGhostFill(patch_index)) {
       continue;
@@ -1654,21 +1705,55 @@ namespace {
         diagnostics.ghost_fill,
         fillAmrHydroGhostCells(ghost_views, remote_sources, options.adiabatic_index));
 
-    auto& prepared = prepared_ghost_states[patch_index];
-    prepared.reserve(geometries[patch_index].geometry.ghost_cells.size());
+    const std::size_t prepared_begin = prepared_ghost_offsets[patch_index];
+    std::size_t ghost_slot = 0U;
     for (const hydro::HydroGhostCell& ghost : geometries[patch_index].geometry.ghost_cells) {
-      prepared.push_back(target_state.loadCell(ghost.ghost_cell));
+      prepared_ghost_states[prepared_begin + ghost_slot++] =
+          target_state.loadCell(ghost.ghost_cell);
     }
-    const std::uint64_t prepared_bytes = static_cast<std::uint64_t>(prepared.capacity()) *
-        static_cast<std::uint64_t>(sizeof(hydro::HydroConservedState));
-    if (diagnostics.prepared_ghost_capacity_bytes >
-        std::numeric_limits<std::uint64_t>::max() - prepared_bytes) {
-      throw std::overflow_error("AMR prepared ghost capacity byte count overflow");
+    if (prepared_begin + ghost_slot != prepared_ghost_offsets[patch_index + 1U]) {
+      throw std::logic_error("AMR prepared ghost extent differs from admitted geometry");
     }
-    diagnostics.prepared_ghost_capacity_bytes += prepared_bytes;
   }
 
-  FluxRegisterAccumulator flux_registers;
+  // All legal reflux keys are already present in the immutable geometry.
+  // Admit a bounded flat lookup and accumulator before the first cell update.
+  // The collection scratch is released after construction, while the fixed
+  // accumulator remains live through reflux. No hash-node growth occurs in
+  // the numerical sweep.
+  std::size_t flux_face_count = 0U;
+  for (const auto& geometry : geometries) {
+    for (const auto& face : geometry.geometry.flux_register_faces) {
+      if (face.role != hydro::HydroFluxRegisterFaceRole::kNone) {
+        flux_face_count = core::checkedSizeAdd(flux_face_count, 1U,
+                                               "AMR flux-register face count");
+      }
+    }
+  }
+  const std::uint64_t key_scratch_bytes = static_cast<std::uint64_t>(
+      core::checkedSizeMultiply(flux_face_count, sizeof(std::uint64_t),
+                                "AMR flux-register key collection"));
+  core::GovernedScratchArena flux_arena(
+      options.regrid_memory_governor, core::MemoryClass::kPhaseResident,
+      core::checkedMemoryBytesAdd(
+          FluxRegisterAccumulator::fixedWorkspaceBytes(flux_face_count),
+          key_scratch_bytes, "AMR flux-register preparation coexistence"),
+      "amr.flux_registers.fixed_workspace");
+  FluxRegisterAccumulator flux_registers(flux_arena.resource());
+  {
+    std::pmr::vector<std::uint64_t> keys(flux_arena.resource());
+    keys.reserve(flux_face_count);
+    for (const auto& geometry : geometries) {
+      for (const auto& face : geometry.geometry.flux_register_faces) {
+        if (face.role != hydro::HydroFluxRegisterFaceRole::kNone) {
+          keys.push_back(face.register_key);
+        }
+      }
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    flux_registers.prepareFixedKeys(keys);
+  }
   for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
     const AmrHydroPatchGeometry& patch_geometry = geometries[patch_index];
     std::vector<std::size_t> active_patch_cells;
@@ -1683,13 +1768,15 @@ namespace {
     }
     hydro::HydroConservedStateSoa conserved_state = loadAmrHydroConservedState(
         state, patch_geometry, options.adiabatic_index);
-    if (prepared_ghost_states[patch_index].size() != patch_geometry.geometry.ghost_cells.size()) {
+    const std::size_t prepared_begin = prepared_ghost_offsets[patch_index];
+    if (prepared_ghost_offsets[patch_index + 1U] - prepared_begin !=
+        patch_geometry.geometry.ghost_cells.size()) {
       throw std::logic_error("AMR hydro active patch is missing its step-start ghost snapshot");
     }
     for (std::size_t ghost_slot = 0; ghost_slot < patch_geometry.geometry.ghost_cells.size(); ++ghost_slot) {
       conserved_state.storeCell(
           patch_geometry.geometry.ghost_cells[ghost_slot].ghost_cell,
-          prepared_ghost_states[patch_index][ghost_slot]);
+          prepared_ghost_states[prepared_begin + ghost_slot]);
     }
     // buildAmrHydroPatchGeometry emits real cells in increasing patch-local
     // order. This checked invariant permits allocation-free membership queries

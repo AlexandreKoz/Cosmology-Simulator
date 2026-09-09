@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 #include <vector>
 #include <optional>
 #include <algorithm>
@@ -736,6 +737,17 @@ void testRestartMetadataLargeAndMalformedCounts() {
     state.owning_rank_by_item[i] = static_cast<int>(i % 3U);
   }
   const std::string encoded = state.serialize();
+  assert(state.serializedSizeBytes() == encoded.size());
+  std::ostringstream streamed;
+  state.serializeTo(streamed);
+  assert(streamed.str() == encoded);
+  cosmosim::parallel::DistributedRestartState empty_state = state;
+  empty_state.owning_rank_by_item.clear();
+  const std::string empty_encoded = empty_state.serialize();
+  assert(empty_state.serializedSizeBytes() == empty_encoded.size());
+  std::ostringstream empty_stream;
+  empty_state.serializeTo(empty_stream);
+  assert(empty_stream.str() == empty_encoded);
   const auto restored = cosmosim::parallel::DistributedRestartState::deserialize(encoded);
   assert(restored.owning_rank_by_item == state.owning_rank_by_item);
   assert(restored.pm_slab_begin_x_by_rank == state.pm_slab_begin_x_by_rank);

@@ -1,6 +1,6 @@
 # Current repository status
 
-**Authority date:** 2026-09-08
+**Authority date:** 2026-09-09
 **Status scope:** this source snapshot; historical campaign reports are not current truth
 
 This file is the concise current-status entry point. Build-specific dependency
@@ -16,6 +16,10 @@ production acceptance are **not certified**: complete AMR geometry/ghost and
 source/output metadata ownership, real MPI runtime, and whole-process envelope
 evidence remain outstanding. The serial dispatcher and fail-closed incomplete
 contracts remain mandatory. See `docs/repair/m2d_final_coding_closure_20260908.md`.
+
+## M2D owner-lifetime continuation — 2026-09-09
+
+The new authoritative source includes the prior M2D patch plus bounded retained source-cell staging, fixed-key AMR flux accumulation, contiguous admitted step-start ghost snapshots, and streamed distributed restart metadata/HDF5 writing/integrity hashing. See `docs/repair/m2d_owner_lifetime_continuation_20260909.md`. Focused CPU and HDF5 source/scientific/restart tests pass. Full stage-wide source, AMR, and I/O owner-lifetime contracts remain incomplete; this continuation is not a certification of M2D or of a 48 GiB workstation envelope. The dispatcher stays serial and incomplete tasks remain non-overlappable. Real MPI and FFTW configuration is blocked by missing development dependencies in the repair environment. Full build and package-completeness inventories are not yet accepted.
 
 ## Configuration policy
 

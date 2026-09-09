@@ -142,3 +142,11 @@ runtime test. A true two-rank patch-migration test carrying pending reflux and
 temporal history through destination commit and restart remains an explicit
 MPI-capable follow-up validation item; no test name claims that coverage until
 it exists.
+
+## M2D fixed-key reflux workspace
+
+`FluxRegisterAccumulator` retains its default dynamically keyed compatibility constructor and `entries()` interface. Production synchronized hydro may instead construct it with a PMR resource and call `prepareFixedKeys(sorted_unique_keys)` before advancing a patch. Valid records use a fixed sorted lookup and preallocated accumulator slots, preserving each key’s contribution order; an unknown key is rejected. `fixedWorkspaceBytes(key_count)` provides a checked retained-capacity bound including alignment slack. The caller must keep the resource alive until the accumulator is destroyed and separately admit key-collection scratch and materialized result vectors. No restart format or scientific solver contract changes. This additive interface does not certify all AMR phase allocations.
+
+### Step-start ghost snapshot ownership
+
+The synchronized production path admits one contiguous PhaseResident ghost snapshot arena before preparing patches. It stores `G` conserved shell states and `P+1` immutable offsets, with checked bound `G*sizeof(HydroConservedState)+(P+1)*sizeof(size_t)+256`. Only patches requiring ghost fill contribute to G. No full-patch snapshot is added. The arena remains live through the numerical sweep and is released after its final use. The public `amrPreparedGhostWorkspaceBytes` helper exposes this exact implementation bound for testing/admission; it does not include local source SoAs, ghost-fill temporary searches, or solver scratch. Fixed-key flux preparation is transactional and reuses existing vector capacity after clear; a failed fresh allocation is retried with a fresh admitted arena.

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory_resource>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -170,6 +171,15 @@ struct FluxRegisterEntry {
 
 class FluxRegisterAccumulator final : public hydro::HydroFluxRegisterSink {
  public:
+  explicit FluxRegisterAccumulator(std::pmr::memory_resource* resource =
+                                       std::pmr::get_default_resource());
+  // Production may predeclare the complete set of legal register keys. The
+  // fixed lookup and accumulators are then allocated before any flux update;
+  // recordFaceFlux performs no allocation and preserves per-key accumulation
+  // order. The ordinary dynamically keyed compatibility path is unchanged.
+  [[nodiscard]] static std::uint64_t fixedWorkspaceBytes(std::size_t key_count);
+  void prepareFixedKeys(std::span<const std::uint64_t> sorted_unique_keys);
+  [[nodiscard]] std::size_t entryCount() const noexcept;
   void recordFaceFlux(const hydro::HydroFluxRegisterRecord& record) override;
   [[nodiscard]] std::vector<FluxRegisterEntry> entries() const;
   void clear();
@@ -183,8 +193,10 @@ class FluxRegisterAccumulator final : public hydro::HydroFluxRegisterSink {
     double fine_area_comov = 0.0;
   };
 
-  std::unordered_map<std::uint64_t, std::size_t> m_slot_by_key;
-  std::vector<AccumulatedEntry> m_entries;
+  std::pmr::unordered_map<std::uint64_t, std::size_t> m_slot_by_key;
+  std::pmr::vector<AccumulatedEntry> m_entries;
+  std::pmr::vector<std::uint64_t> m_fixed_keys;
+  bool m_fixed = false;
 };
 
 struct RefluxDiagnostics {

@@ -1,6 +1,11 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+#include <array>
+#include <cstring>
+#include <stdexcept>
+
+#include "cosmosim/core/governed_scratch_arena.hpp"
 
 #include "cosmosim/amr/amr_framework.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
@@ -187,6 +192,103 @@ void testActualSweepFluxesGenerateRegisterEntry() {
   assertConservedNear(entry.fine_face_flux_code, expected_fine_average);
 }
 
+void testFixedFluxRegisterOwnershipAndEquivalence() {
+  using namespace cosmosim;
+  const auto coarse_geometry = makeOneFaceGeometry(
+      1.0, 1.0, hydro::HydroFaceSide::kUpper,
+      hydro::HydroFluxRegisterFaceRole::kCoarse, 1.0);
+  const auto fine_geometry = makeOneFaceGeometry(
+      0.5, -1.0, hydro::HydroFaceSide::kLower,
+      hydro::HydroFluxRegisterFaceRole::kFine, -1.0);
+  const std::array<std::uint64_t, 1> keys{k_register_key};
+  core::MemoryGovernor governor;
+  const auto before = governor.snapshot().committed_bytes;
+  {
+    core::GovernedScratchArena arena(&governor, core::MemoryClass::kPhaseResident,
+        amr::FluxRegisterAccumulator::fixedWorkspaceBytes(keys.size()),
+        "test.amr.fixed_flux");
+    amr::FluxRegisterAccumulator fixed(arena.resource());
+    amr::FluxRegisterAccumulator ordinary;
+    fixed.prepareFixedKeys(keys);
+    auto coarse = makeConserved(primitive(1.0, 0.7, 1.1), primitive(0.8, -0.2, 0.9));
+    auto fine = makeConserved(primitive(1.2, -0.3, 1.3), primitive(1.0, 0.7, 1.1));
+    auto coarse_copy = coarse;
+    auto fine_copy = fine;
+    runSweep(coarse, coarse_geometry, fixed);
+    runSweep(fine, fine_geometry, fixed);
+    runSweep(coarse_copy, coarse_geometry, ordinary);
+    runSweep(fine_copy, fine_geometry, ordinary);
+    const auto actual = fixed.entries();
+    const auto expected = ordinary.entries();
+    assert(actual.size() == expected.size());
+    assert(actual.size() == 1U);
+    // All fields, including metadata and accumulated conserved fluxes, must
+    // be identical to the existing dynamic-key scientific path.
+    const auto& a = actual.front();
+    const auto& b = expected.front();
+    assert(a.register_key == b.register_key);
+    assert(a.coarse_patch_id == b.coarse_patch_id);
+    assert(a.coarse_gas_cell_id == b.coarse_gas_cell_id);
+    assert(a.coarse_cell_index == b.coarse_cell_index);
+    assert(a.level == b.level);
+    assert(a.axis == b.axis);
+    assert(a.orientation == b.orientation);
+    assert(a.coarse_face_count == b.coarse_face_count);
+    assert(a.fine_face_count == b.fine_face_count);
+    assertNear(a.face_area_comov, b.face_area_comov);
+    assertNear(a.coarse_area_comov, b.coarse_area_comov);
+    assertNear(a.fine_area_comov, b.fine_area_comov);
+    assertNear(a.dt_code, b.dt_code);
+    const auto assertEqualFlux = [](const amr::ConservedState& lhs,
+                                    const amr::ConservedState& rhs) {
+      assertNear(lhs.mass_code, rhs.mass_code);
+      assertNear(lhs.momentum_x_code, rhs.momentum_x_code);
+      assertNear(lhs.momentum_y_code, rhs.momentum_y_code);
+      assertNear(lhs.momentum_z_code, rhs.momentum_z_code);
+      assertNear(lhs.total_energy_code, rhs.total_energy_code);
+      assertNear(lhs.metal_mass_code, rhs.metal_mass_code);
+    };
+    assertEqualFlux(a.coarse_face_flux_code, b.coarse_face_flux_code);
+    assertEqualFlux(a.fine_face_flux_code, b.fine_face_flux_code);
+    assert(fixed.entryCount() == 1U);
+    assert(governor.snapshot().committed_bytes > before);
+    bool rejected = false;
+    try {
+      const std::array<std::uint64_t, 1> bad_keys{k_register_key + 1U};
+      fixed.prepareFixedKeys(bad_keys);
+    } catch (const std::logic_error&) { rejected = true; }
+    assert(rejected);
+    fixed.clear();
+    fixed.prepareFixedKeys(keys);
+    assert(fixed.entryCount() == 0U);
+    bool unknown_rejected = false;
+    try {
+      const auto bad_record = hydro::HydroFluxRegisterRecord{
+          .role = hydro::HydroFluxRegisterFaceRole::kCoarse,
+          .register_key = k_register_key + 1U,
+          .coarse_patch_id = k_coarse_patch_id,
+          .coarse_cell_index = k_coarse_cell_index,
+          .face_area_comoving = 1.0,
+          .dt_code = 0.125};
+      fixed.recordFaceFlux(bad_record);
+    } catch (const std::out_of_range&) { unknown_rejected = true; }
+    assert(unknown_rejected);
+    assert(fixed.entryCount() == 0U);
+  }
+  assert(governor.snapshot().committed_bytes == before);
+  {
+    core::MemoryGovernor tight(core::MemoryGovernorPolicy{
+        .hard_limit_bytes = amr::FluxRegisterAccumulator::fixedWorkspaceBytes(1U) - 1U});
+    bool rejected = false;
+    try {
+      core::GovernedScratchArena arena(&tight, core::MemoryClass::kPhaseResident,
+          amr::FluxRegisterAccumulator::fixedWorkspaceBytes(1U), "test.amr.tight_flux");
+    } catch (const core::MemoryAdmissionError&) { rejected = true; }
+    assert(rejected);
+    assert(tight.snapshot().committed_bytes == 0U);
+  }
+}
+
 void testSameLevelFacesDoNotGenerateRegisterEntries() {
   auto geometry = makeOneFaceGeometry(
       1.0,
@@ -206,5 +308,6 @@ void testSameLevelFacesDoNotGenerateRegisterEntries() {
 int main() {
   testActualSweepFluxesGenerateRegisterEntry();
   testSameLevelFacesDoNotGenerateRegisterEntries();
+  testFixedFluxRegisterOwnershipAndEquivalence();
   return 0;
 }

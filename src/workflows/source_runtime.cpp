@@ -49,6 +49,22 @@ constexpr std::uint64_t k_feedback_batch_bytes_per_star =
     static_cast<std::uint64_t>(sizeof(physics::StellarFeedbackEvent)) +
     static_cast<std::uint64_t>(sizeof(std::uint32_t));
 
+template <class T>
+void replaceSourceVectorCapacity(std::vector<T>& values, std::size_t capacity,
+                                 std::string_view owner) {
+  if (capacity <= values.capacity()) return;
+  // Allocate and validate the replacement before relinquishing the old owner.
+  // An over-grant or copy failure destroys only the replacement, leaving the
+  // canonical input and its existing retained-capacity lease intact.
+  std::vector<T> replacement;
+  replacement.reserve(capacity);
+  if (replacement.capacity() != capacity) {
+    throw std::length_error(std::string(owner) + " allocator exceeded admitted capacity");
+  }
+  replacement.insert(replacement.end(), values.begin(), values.end());
+  values.swap(replacement);
+}
+
 [[nodiscard]] double newtonGCodeFromUnits(const core::UnitSystem& units) {
   return core::newtonGravitationalConstantCode(units);
 }
@@ -853,7 +869,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
         core::MemoryClass::kPhaseResident,
         "sources.star_formation.contiguous_cell_batch",
         m_contiguous_cell_batch,
-        false);
+        m_contiguous_cell_batch_reservation.committed());
     add_container(
         core::MemorySubsystem::kScratch,
         core::MemoryClass::kPhaseResident,
@@ -1087,6 +1103,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
           local_active_count, k_star_formation_cell_batch_max);
 
       core::MemoryReservation replacement_input_reservation;
+      core::MemoryReservation replacement_cell_rows_reservation;
       std::exception_ptr reservation_failure;
       try {
         if (m_memory_governor != nullptr &&
@@ -1099,6 +1116,15 @@ class SourceRuntimeImpl final : public SourceRuntime {
               core::MemoryClass::kPhaseResident,
               static_cast<std::uint64_t>(input_bytes),
               "sources.star_formation.input_batch");
+        }
+        if (m_memory_governor != nullptr &&
+            required_input_capacity > m_contiguous_cell_batch.capacity()) {
+          replacement_cell_rows_reservation = m_memory_governor->reserve(
+              core::MemoryClass::kPhaseResident,
+              static_cast<std::uint64_t>(core::checkedSizeMultiply(
+                  required_input_capacity, sizeof(std::uint32_t),
+                  "source contiguous cell batch")),
+              "sources.star_formation.contiguous_cell_batch");
         }
       } catch (...) {
         reservation_failure = std::current_exception();
@@ -1114,14 +1140,28 @@ class SourceRuntimeImpl final : public SourceRuntime {
         replacement_input_reservation.commit();
       }
       if (required_input_capacity > m_star_formation_inputs.capacity()) {
-        m_star_formation_inputs.reserve(required_input_capacity);
+        replaceSourceVectorCapacity(m_star_formation_inputs, required_input_capacity,
+                                    "source input");
         if (m_memory_governor != nullptr) {
           m_star_formation_input_reservation.release();
           m_star_formation_input_reservation =
               std::move(replacement_input_reservation);
         }
       }
-      m_contiguous_cell_batch.reserve(required_input_capacity);
+      if (replacement_cell_rows_reservation.pending()) {
+        replacement_cell_rows_reservation.commit();
+      }
+      if (required_input_capacity > m_contiguous_cell_batch.capacity()) {
+        // The replacement coexists with the old retained allocation. Preserve
+        // the old lease if allocation fails and reconcile only after success.
+        replaceSourceVectorCapacity(m_contiguous_cell_batch, required_input_capacity,
+                                    "source cell-row");
+        if (m_memory_governor != nullptr) {
+          m_contiguous_cell_batch_reservation.release();
+          m_contiguous_cell_batch_reservation =
+              std::move(replacement_cell_rows_reservation);
+        }
+      }
 
       std::unique_ptr<core::GovernedScratchArena> parent_arena;
       std::unique_ptr<std::pmr::vector<std::uint64_t>> parent_index;
@@ -2023,6 +2063,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
   core::MemoryReservation m_feedback_event_reservation;
   core::MemoryReservation m_contiguous_star_batch_reservation;
   core::MemoryReservation m_star_formation_input_reservation;
+  core::MemoryReservation m_contiguous_cell_batch_reservation;
   core::MemoryReservation m_diffusion_phase_reservation;
   core::MemoryReservation m_diffusion_faces_reservation;
   std::uint32_t m_world_rank = 0;

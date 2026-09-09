@@ -2,12 +2,15 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <memory_resource>
 #include <optional>
 #include <vector>
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/core/governed_scratch_arena.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/hydro/hydro_riemann.hpp"
 
@@ -141,6 +144,38 @@ void setCell(
   setCell(state, 3, 1.375, 0.7, -0.10, 0.7, 1, 201, 9102, records);
   state.gas_cell_identity.assign(std::move(records));
   return state;
+}
+
+void testPreparedGhostWorkspaceAdmission() {
+  using namespace cosmosim;
+  const std::uint64_t bound = amr::amrPreparedGhostWorkspaceBytes(2U, 12U);
+  assert(bound == 12U * sizeof(hydro::HydroConservedState) +
+      3U * sizeof(std::size_t) + 256U);
+  core::MemoryGovernor tight(core::MemoryGovernorPolicy{.hard_limit_bytes = bound - 1U});
+  bool rejected = false;
+  try {
+    core::GovernedScratchArena arena(&tight, core::MemoryClass::kPhaseResident,
+                                    bound, "amr.test.ghost_snapshots");
+  } catch (const core::MemoryAdmissionError&) { rejected = true; }
+  assert(rejected);
+  assert(tight.snapshot().committed_bytes == 0U);
+  core::MemoryGovernor governor(core::MemoryGovernorPolicy{.hard_limit_bytes = bound});
+  {
+    core::GovernedScratchArena arena(&governor, core::MemoryClass::kPhaseResident,
+                                    bound, "amr.test.ghost_snapshots");
+    std::pmr::vector<std::size_t> offsets(arena.resource());
+    std::pmr::vector<hydro::HydroConservedState> values(arena.resource());
+    offsets.resize(3U);
+    values.resize(12U);
+    assert(values.capacity() * sizeof(hydro::HydroConservedState) +
+           offsets.capacity() * sizeof(std::size_t) <= bound);
+    assert(governor.snapshot().committed_bytes == bound);
+  }
+  assert(governor.snapshot().committed_bytes == 0U);
+  bool overflow = false;
+  try { (void)amr::amrPreparedGhostWorkspaceBytes(1U, std::numeric_limits<std::size_t>::max()); }
+  catch (const std::overflow_error&) { overflow = true; }
+  assert(overflow);
 }
 
 void testProductionAmrGeometryScatterAndRefluxPath() {
@@ -542,6 +577,7 @@ void testProductionRegridReservationDoesNotScaleWithUnrelatedParticles() {
 }  // namespace
 
 int main() {
+  testPreparedGhostWorkspaceAdmission();
   testProductionAmrGeometryScatterAndRefluxPath();
   testPatchLocalMappingSurvivesRowReorder();
   testProductionRegridRejectsIdCollisions();

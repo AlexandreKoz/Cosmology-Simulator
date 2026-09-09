@@ -14,6 +14,7 @@
 #include <numeric>
 #include <optional>
 #include <sstream>
+#include <streambuf>
 #include <unordered_map>
 #include <unordered_set>
 #include <stdexcept>
@@ -2863,8 +2864,62 @@ void GhostExchangeBuffer::unpackAppendTo(
   unpackAppendTo(destination);
 }
 
-std::string DistributedRestartState::serialize() const {
-  std::ostringstream stream;
+namespace {
+
+// A counting streambuf measures the exact emitted byte count without retaining
+// any text. The append streambuf then writes directly into the sole result
+// string. Both use checked sizes; neither materializes per-record strings.
+class RestartCountingStreambuf final : public std::streambuf {
+ public:
+  [[nodiscard]] std::size_t count() const noexcept { return m_count; }
+ protected:
+  std::streamsize xsputn(const char*, std::streamsize count) override {
+    if (count < 0) throw std::length_error("negative restart serialization length");
+    m_count = core::checkedSizeAdd(m_count, static_cast<std::size_t>(count),
+                                   "distributed restart serialization length");
+    return count;
+  }
+  int_type overflow(int_type ch) override {
+    if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+      m_count = core::checkedSizeAdd(m_count, 1U,
+                                    "distributed restart serialization length");
+    }
+    return traits_type::not_eof(ch);
+  }
+ private:
+  std::size_t m_count = 0U;
+};
+
+class RestartStringStreambuf final : public std::streambuf {
+ public:
+  explicit RestartStringStreambuf(std::string& output) : m_output(output) {}
+ protected:
+  std::streamsize xsputn(const char* bytes, std::streamsize count) override {
+    if (count < 0) throw std::length_error("negative restart serialization length");
+    const std::size_t size = static_cast<std::size_t>(count);
+    (void)core::checkedSizeAdd(m_output.size(), size,
+                               "distributed restart serialization length");
+    m_output.append(bytes, size);
+    return count;
+  }
+  int_type overflow(int_type ch) override {
+    if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+      (void)core::checkedSizeAdd(m_output.size(), 1U,
+                                 "distributed restart serialization length");
+      m_output.push_back(traits_type::to_char_type(ch));
+    }
+    return traits_type::not_eof(ch);
+  }
+ private:
+  std::string& m_output;
+};
+
+}  // namespace
+
+void DistributedRestartState::serializeTo(std::ostream& stream) const {
+  if (pm_slab_begin_x_by_rank.size() != pm_slab_end_x_by_rank.size()) {
+    throw std::invalid_argument("distributed restart PM slab table extents differ");
+  }
   stream << std::setprecision(std::numeric_limits<double>::max_digits10);
   stream << "schema_version=" << schema_version << '\n';
   stream << "decomposition_epoch=" << decomposition_epoch << '\n';
@@ -2889,7 +2944,31 @@ std::string DistributedRestartState::serialize() const {
     stream << "pm_slab_begin_x[" << rank << "]=" << pm_slab_begin_x_by_rank[rank] << '\n';
     stream << "pm_slab_end_x[" << rank << "]=" << pm_slab_end_x_by_rank[rank] << '\n';
   }
-  return stream.str();
+ }
+
+std::size_t DistributedRestartState::serializedSizeBytes() const {
+  RestartCountingStreambuf buffer;
+  std::ostream stream(&buffer);
+  stream.exceptions(std::ios::badbit | std::ios::failbit);
+  serializeTo(stream);
+  return buffer.count();
+}
+
+std::string DistributedRestartState::serialize() const {
+  const std::size_t bytes = serializedSizeBytes();
+  std::string output;
+  if (bytes > output.max_size()) {
+    throw std::length_error("distributed restart serialization exceeds string max_size");
+  }
+  output.reserve(bytes);
+  RestartStringStreambuf buffer(output);
+  std::ostream stream(&buffer);
+  stream.exceptions(std::ios::badbit | std::ios::failbit);
+  serializeTo(stream);
+  if (output.size() != bytes) {
+    throw std::logic_error("distributed restart serialization changed size between passes");
+  }
+  return output;
 }
 
 DistributedRestartState DistributedRestartState::deserialize(const std::string& encoded) {

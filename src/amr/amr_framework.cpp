@@ -1,6 +1,7 @@
 #include "cosmosim/amr/amr_framework.hpp"
 
 #include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -149,6 +150,64 @@ ConservedState operator*(ConservedState lhs, double factor) {
   return lhs;
 }
 
+FluxRegisterAccumulator::FluxRegisterAccumulator(std::pmr::memory_resource* resource)
+    : m_slot_by_key(resource), m_entries(resource), m_fixed_keys(resource) {}
+
+std::uint64_t FluxRegisterAccumulator::fixedWorkspaceBytes(std::size_t key_count) {
+  // The two vectors allocate once each. Include alignment slack for a bounded
+  // monotonic resource; no hash buckets or nodes exist in fixed mode.
+  return core::checkedMemoryBytesAdd(
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          key_count, sizeof(AccumulatedEntry) + sizeof(std::uint64_t),
+          "AMR fixed flux-register workspace")),
+      256U, "AMR fixed flux-register alignment");
+}
+
+void FluxRegisterAccumulator::prepareFixedKeys(
+    std::span<const std::uint64_t> sorted_unique_keys) {
+  if (m_fixed || !m_entries.empty() || !m_slot_by_key.empty()) {
+    throw std::logic_error("flux-register fixed keys require an empty accumulator");
+  }
+  if (!std::is_sorted(sorted_unique_keys.begin(), sorted_unique_keys.end()) ||
+      std::adjacent_find(sorted_unique_keys.begin(), sorted_unique_keys.end()) !=
+          sorted_unique_keys.end() ||
+      (!sorted_unique_keys.empty() && sorted_unique_keys.front() == 0U)) {
+    throw std::invalid_argument("AMR fixed flux-register keys must be sorted, unique, and nonzero");
+  }
+  // A cleared fixed workspace retains its two vector capacities. Reuse them
+  // without consuming another monotonic-arena allocation on repeated steps.
+  if (m_fixed_keys.capacity() >= sorted_unique_keys.size() &&
+      m_entries.capacity() >= sorted_unique_keys.size()) {
+    m_fixed_keys.assign(sorted_unique_keys.begin(), sorted_unique_keys.end());
+    m_entries.resize(sorted_unique_keys.size());
+    for (std::size_t i = 0; i < sorted_unique_keys.size(); ++i) {
+      m_entries[i] = AccumulatedEntry{};
+      m_entries[i].entry.register_key = sorted_unique_keys[i];
+    }
+    m_fixed = true;
+    return;
+  }
+  // Publish only after both allocations and initialization succeed. A
+  // bounded-arena failure leaves the accumulator empty and recoverable; the
+  // caller may discard the arena and retry with a new admitted workspace.
+  std::pmr::vector<std::uint64_t> prepared_keys(m_fixed_keys.get_allocator().resource());
+  std::pmr::vector<AccumulatedEntry> prepared_entries(m_entries.get_allocator().resource());
+  prepared_keys.assign(sorted_unique_keys.begin(), sorted_unique_keys.end());
+  prepared_entries.resize(sorted_unique_keys.size());
+  for (std::size_t i = 0; i < sorted_unique_keys.size(); ++i) {
+    prepared_entries[i].entry.register_key = sorted_unique_keys[i];
+  }
+  m_fixed_keys.swap(prepared_keys);
+  m_entries.swap(prepared_entries);
+  m_fixed = true;
+}
+
+std::size_t FluxRegisterAccumulator::entryCount() const noexcept {
+  if (!m_fixed) return m_entries.size();
+  return static_cast<std::size_t>(std::count_if(m_entries.begin(), m_entries.end(),
+      [](const AccumulatedEntry& entry) { return entry.entry.coarse_patch_id != 0U; }));
+}
+
 void FluxRegisterAccumulator::recordFaceFlux(const hydro::HydroFluxRegisterRecord& record) {
   if (record.role == hydro::HydroFluxRegisterFaceRole::kNone) {
     return;
@@ -164,10 +223,26 @@ void FluxRegisterAccumulator::recordFaceFlux(const hydro::HydroFluxRegisterRecor
   }
 
   std::size_t slot = 0;
-  const auto found = m_slot_by_key.find(record.register_key);
-  if (found == m_slot_by_key.end()) {
-    slot = m_entries.size();
-    m_slot_by_key.emplace(record.register_key, slot);
+  bool is_new = false;
+  if (m_fixed) {
+    const auto found = std::lower_bound(
+        m_fixed_keys.begin(), m_fixed_keys.end(), record.register_key);
+    if (found == m_fixed_keys.end() || *found != record.register_key) {
+      throw std::out_of_range("AMR flux-register key was not admitted by geometry");
+    }
+    slot = static_cast<std::size_t>(found - m_fixed_keys.begin());
+    is_new = m_entries[slot].entry.coarse_patch_id == 0U;
+  } else {
+    const auto found = m_slot_by_key.find(record.register_key);
+    if (found == m_slot_by_key.end()) {
+      slot = m_entries.size();
+      m_slot_by_key.emplace(record.register_key, slot);
+      is_new = true;
+    } else {
+      slot = found->second;
+    }
+  }
+  if (is_new) {
     AccumulatedEntry accumulated;
     accumulated.entry.register_key = record.register_key;
     accumulated.entry.coarse_patch_id = record.coarse_patch_id;
@@ -178,9 +253,12 @@ void FluxRegisterAccumulator::recordFaceFlux(const hydro::HydroFluxRegisterRecor
     accumulated.entry.orientation = record.orientation;
     accumulated.entry.face_area_comov = record.face_area_comoving;
     accumulated.entry.dt_code = record.dt_code;
-    m_entries.push_back(accumulated);
+    if (m_fixed) {
+      m_entries[slot] = accumulated;
+    } else {
+      m_entries.push_back(accumulated);
+    }
   } else {
-    slot = found->second;
     validateCompatibleRegisterRecord(m_entries[slot].entry, record);
   }
 
@@ -207,8 +285,9 @@ void FluxRegisterAccumulator::recordFaceFlux(const hydro::HydroFluxRegisterRecor
 
 std::vector<FluxRegisterEntry> FluxRegisterAccumulator::entries() const {
   std::vector<FluxRegisterEntry> result;
-  result.reserve(m_entries.size());
+  result.reserve(entryCount());
   for (const AccumulatedEntry& accumulated : m_entries) {
+    if (m_fixed && accumulated.entry.coarse_patch_id == 0U) continue;
     FluxRegisterEntry entry = accumulated.entry;
     const double register_area = accumulated.coarse_area_comov > 0.0
         ? accumulated.coarse_area_comov
@@ -231,6 +310,8 @@ std::vector<FluxRegisterEntry> FluxRegisterAccumulator::entries() const {
 void FluxRegisterAccumulator::clear() {
   m_slot_by_key.clear();
   m_entries.clear();
+  m_fixed_keys.clear();
+  m_fixed = false;
 }
 
 RefinementDecision RefinementEvaluator::evaluateCell(

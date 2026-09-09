@@ -12,6 +12,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <streambuf>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -2177,9 +2178,85 @@ void readStateGroup(hid_t root, core::SimulationState& state, std::uint32_t sche
   }
 }
 
+// Preserve the existing contiguous uint8 dataset schema while keeping the
+// serialization staging independent of the ownership-table population.
+// HDF5's internal memory is governed by the existing external-runtime reserve.
+class DistributedRestartHdf5Streambuf final : public std::streambuf {
+ public:
+  DistributedRestartHdf5Streambuf(hid_t dataset, std::size_t expected_bytes)
+      : m_dataset(dataset), m_expected_bytes(expected_bytes) {}
+
+  void finish() {
+    flush();
+    if (m_written != m_expected_bytes) {
+      throw std::logic_error("distributed restart serialized length changed during write");
+    }
+  }
+
+ protected:
+  std::streamsize xsputn(const char* bytes, std::streamsize count) override {
+    if (count < 0) throw std::length_error("negative distributed restart write length");
+    const std::size_t size = static_cast<std::size_t>(count);
+    if (size > m_expected_bytes - m_written - m_used) {
+      throw std::length_error("distributed restart exceeds admitted dataset extent");
+    }
+    std::size_t consumed = 0U;
+    while (consumed < size) {
+      const std::size_t take = std::min(size - consumed, m_buffer.size() - m_used);
+      std::memcpy(m_buffer.data() + m_used, bytes + consumed, take);
+      m_used += take;
+      consumed += take;
+      if (m_used == m_buffer.size()) flush();
+    }
+    return count;
+  }
+
+  int_type overflow(int_type ch) override {
+    if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+      const char value = traits_type::to_char_type(ch);
+      (void)xsputn(&value, 1);
+    }
+    return traits_type::not_eof(ch);
+  }
+
+ private:
+  void flush() {
+    if (m_used == 0U) return;
+    const hsize_t offset[1] = {static_cast<hsize_t>(m_written)};
+    const hsize_t count[1] = {static_cast<hsize_t>(m_used)};
+    Hdf5Handle file_space(H5Dget_space(m_dataset));
+    Hdf5Handle memory_space(H5Screate_simple(1, count, nullptr));
+    if (!file_space.valid() || !memory_space.valid() ||
+        H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, offset, nullptr, count, nullptr) < 0 ||
+        H5Dwrite(m_dataset, H5T_NATIVE_UINT8, memory_space.get(), file_space.get(),
+                 H5P_DEFAULT, m_buffer.data()) < 0) {
+      throw std::runtime_error("failed streaming distributed restart metadata");
+    }
+    m_written += m_used;
+    m_used = 0U;
+  }
+
+  hid_t m_dataset;
+  std::size_t m_expected_bytes;
+  std::size_t m_written = 0U;
+  std::size_t m_used = 0U;
+  std::array<std::uint8_t, 65536U> m_buffer{};
+};
+
 void writeDistributedGravityGroup(hid_t root, const parallel::DistributedRestartState& distributed_state) {
   Hdf5Handle group(openOrCreateGroup(root, "/distributed_gravity"));
-  writeStringDataset(group.get(), "state", distributed_state.serialize());
+  const std::size_t byte_count = distributed_state.serializedSizeBytes();
+  const hsize_t dims[1] = {core::checkedIntegralNarrow<hsize_t>(
+      byte_count, "distributed restart dataset extent")};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle dataset(H5Dcreate2(group.get(), "state", H5T_STD_U8LE, space.get(),
+                               H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  if (!dataset.valid()) throw std::runtime_error("failed creating distributed restart dataset");
+  DistributedRestartHdf5Streambuf buffer(dataset.get(), byte_count);
+  std::ostream stream(&buffer);
+  stream.exceptions(std::ios::badbit | std::ios::failbit);
+  distributed_state.serializeTo(stream);
+  buffer.finish();
 }
 
 void readDistributedGravityGroup(hid_t root, parallel::DistributedRestartState& distributed_state) {
@@ -2921,7 +2998,55 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
     append_u64(module_state.last_committed_step_index);
     append_u64(module_state.deterministic_from_serialized_inputs ? 1ull : 0ull);
   }
-  append_string(payload.distributed_gravity_state.serialize());
+  // Hash the exact same canonical text as before, including its length
+  // prefix, without retaining another population-scale serialization string.
+  const std::size_t distributed_bytes =
+      payload.distributed_gravity_state.serializedSizeBytes();
+  append_u64(static_cast<std::uint64_t>(distributed_bytes));
+  class DistributedRestartHashStreambuf final : public std::streambuf {
+   public:
+    DistributedRestartHashStreambuf(std::uint64_t& legacy_hash,
+                                   core::internal::Sha256& strong_hash,
+                                   std::size_t expected_bytes)
+        : m_legacy_hash(legacy_hash), m_strong_hash(strong_hash),
+          m_expected_bytes(expected_bytes) {}
+    void finish() const {
+      if (m_written != m_expected_bytes) {
+        throw std::logic_error("distributed restart changed length during integrity hashing");
+      }
+    }
+   protected:
+    std::streamsize xsputn(const char* bytes, std::streamsize count) override {
+      if (count < 0) throw std::length_error("negative distributed restart hash length");
+      const std::size_t size = static_cast<std::size_t>(count);
+      if (size > m_expected_bytes - m_written) {
+        throw std::length_error("distributed restart exceeds integrity hash extent");
+      }
+      const auto* data = reinterpret_cast<const std::uint8_t*>(bytes);
+      m_legacy_hash = fnv1aAppend(m_legacy_hash,
+          {reinterpret_cast<const std::byte*>(bytes), size});
+      m_strong_hash.update(data, size);
+      m_written += size;
+      return count;
+    }
+    int_type overflow(int_type ch) override {
+      if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+        const char value = traits_type::to_char_type(ch);
+        (void)xsputn(&value, 1);
+      }
+      return traits_type::not_eof(ch);
+    }
+   private:
+    std::uint64_t& m_legacy_hash;
+    core::internal::Sha256& m_strong_hash;
+    std::size_t m_expected_bytes;
+    std::size_t m_written = 0U;
+  };
+  DistributedRestartHashStreambuf distributed_buffer(hash, strong_hash, distributed_bytes);
+  std::ostream distributed_stream(&distributed_buffer);
+  distributed_stream.exceptions(std::ios::badbit | std::ios::failbit);
+  payload.distributed_gravity_state.serializeTo(distributed_stream);
+  distributed_buffer.finish();
 
   return RestartIntegrityDigests{hash, sha256DigestHex(strong_hash.finish())};
 }

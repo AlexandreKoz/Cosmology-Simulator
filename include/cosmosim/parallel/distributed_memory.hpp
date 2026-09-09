@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <exception>
 #include <limits>
 #include <stdexcept>
@@ -640,6 +641,11 @@ struct DistributedRestartState {
   std::vector<std::size_t> pm_slab_begin_x_by_rank;
   std::vector<std::size_t> pm_slab_end_x_by_rank;
 
+  // The stream path preserves the historical text representation without a
+  // second population-sized string. serialize() performs a checked counting
+  // pass and one exact-size destination allocation.
+  void serializeTo(std::ostream& stream) const;
+  [[nodiscard]] std::size_t serializedSizeBytes() const;
   [[nodiscard]] std::string serialize() const;
   [[nodiscard]] static DistributedRestartState deserialize(const std::string& encoded);
 };
