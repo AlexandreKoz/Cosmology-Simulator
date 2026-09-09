@@ -344,6 +344,10 @@ BlackHoleAgnStepReport BlackHoleAgnModel::apply(
       ? *id_precommit
       : static_cast<ParticleIdPrecommit&>(local_registry);
   const std::vector<std::uint64_t> seeded_ids = registry.precommit(state, birth_keys);
+  struct PrecommitResultScope {
+    ParticleIdPrecommit& registry;
+    ~PrecommitResultScope() { registry.finishPrecommit(); }
+  } precommit_result_scope{registry};
   if (seeded_ids.size() != accepted_candidates.size()) {
     throw std::runtime_error("BlackHoleAgnModel: particle-ID precommit returned the wrong seed count");
   }

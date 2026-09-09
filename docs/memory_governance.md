@@ -384,3 +384,32 @@ collective. Test-only fault points are `sfc_local_preparation`,
 `sfc_cut_sample`, `sfc_memory_preflight`, `sfc_memory_prefix`, and
 `sfc_memory_repair_metadata`. The MPI test suite must verify these on real
 np2/np3/np4 ranks; CPU-only compilation is not distributed certification.
+
+## M2D final coding follow-up — bounded ID and phase metadata (2026-09-08)
+
+The distributed source-ID registry now retains a sorted uint64 shard rather than
+a node-owning hash set. A fixed local initialization batch is exchanged through
+bounded MPI rounds. Collision requests, decisions, and validation work use a
+`GovernedScratchArena` with a null upstream resource; the arena has one physical
+allocation and one existing-governor lease. The registry's retained shard has a
+separate persistent-cache lease, and precommit results remain leased until the
+source birth transaction finishes. The internal factory is test-only/owner-local;
+the production SourceRuntime remains the sole coordination authority. The
+`ParticleIdPrecommit::finishPrecommit()` hook defaults to a no-op for existing
+implementations. No ID construction or collision ordering contract changes.
+
+The snapshot writer now uses compact sorted sidecar-row lookup records instead
+of three unordered maps. Its optional governor pointer is supplied by the
+production output owner; the standalone API remains compatible. The lookup
+arena is released after serialization. Restart writes module-sidecar payloads
+directly from canonical bytes instead of retaining a second payload. AMR
+synchronized hydro uses a governed sparse active-row index and allocation-free
+patch-local membership queries, preserving the original solver active order.
+
+These are physical lifetime improvements, not a complete whole-task certificate.
+The ID scratch envelope is bounded by the admitted source batch, global record
+count and configured transport round size; the retained shard scales with its
+authoritative ID population. Full source metadata, AMR geometry/ghost/flux
+coexistence, and all writer/readback metadata remain incomplete owner models.
+The existing serial dispatcher, local physical leases, incomplete-contract
+overlap refusal, and external-runtime reserve remain authoritative.

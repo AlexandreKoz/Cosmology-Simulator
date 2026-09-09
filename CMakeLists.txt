@@ -735,6 +735,14 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_unit_process_memory PRIVATE cosmosim_core)
   add_test(NAME unit_process_memory COMMAND test_unit_process_memory)
 
+  add_executable(test_unit_sidecar_row_lookup tests/unit/test_sidecar_row_lookup.cpp)
+  target_link_libraries(test_unit_sidecar_row_lookup PRIVATE cosmosim_core)
+  add_test(NAME unit_sidecar_row_lookup COMMAND test_unit_sidecar_row_lookup)
+
+  add_executable(test_unit_particle_id_registry tests/unit/test_particle_id_registry.cpp)
+  target_link_libraries(test_unit_particle_id_registry PRIVATE cosmosim_workflows)
+  add_test(NAME unit_particle_id_registry COMMAND test_unit_particle_id_registry)
+
   add_executable(test_unit_memory_governor tests/unit/test_memory_governor.cpp)
   target_link_libraries(test_unit_memory_governor PRIVATE cosmosim_core)
   add_test(NAME unit_memory_governor COMMAND test_unit_memory_governor)

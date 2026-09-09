@@ -237,6 +237,9 @@ struct StarFormationStepReport {
 class ParticleIdPrecommit {
  public:
   virtual ~ParticleIdPrecommit() = default;
+  // Releases a result lease after the caller finishes its birth transaction.
+  // Legacy/standalone registries have no retained result lease.
+  virtual void finishPrecommit() noexcept {}
   virtual void preparePopulationGrowth(core::SimulationState&, std::size_t,
                                        core::ParticleSpecies) {}
   [[nodiscard]] virtual std::vector<std::uint64_t> precommit(

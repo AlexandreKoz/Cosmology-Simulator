@@ -13,6 +13,8 @@
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
+namespace cosmosim::core { class MemoryGovernor; }
+
 namespace cosmosim::io {
 
 // Science-snapshot semantics are explicit. CHUI-native files may contain
@@ -93,6 +95,9 @@ struct SnapshotIoPolicy {
 };
 
 struct SnapshotWritePayload {
+  // Optional owner authority. Standalone callers retain the legacy ungoverned
+  // API; production workflow supplies its existing process governor.
+  core::MemoryGovernor* memory_governor = nullptr;
   const core::SimulationState* state = nullptr;
   const core::SimulationConfig* config = nullptr;
   std::string normalized_config_text;

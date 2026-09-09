@@ -10,6 +10,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <memory_resource>
 #include <span>
 #include <stdexcept>
 #include <unordered_set>
@@ -17,6 +18,7 @@
 
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/core/governed_scratch_arena.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/time_scheduler.hpp"
 #include "cosmosim/physics/black_hole_agn.hpp"
@@ -28,6 +30,7 @@
 #include "cosmosim/physics/metal_diffusion.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
+#include "workflows/internal/particle_id_registry.hpp"
 #include "workflows/internal/metal_diffusion_topology.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/retained_population_growth.hpp"
@@ -96,46 +99,58 @@ makeRuntimeEffectiveEosTable(
       physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
 }
 
+template <class TFunction>
+void prepareIdCollectively(const parallel::MpiContext& mpi_context,
+                           std::string_view phase, TFunction&& prepare) {
+  std::exception_ptr failure;
+  try { prepare(); } catch (...) { failure = std::current_exception(); }
+  mpi_context.rethrowCollectivePreparationFailure(failure, phase);
+}
+
+using IdVector = std::pmr::vector<std::uint64_t>;
+using IdBuckets = std::pmr::vector<IdVector>;
+
 struct ShardedUint64Exchange {
-  std::vector<std::uint64_t> values;
-  std::vector<std::size_t> recv_counts;
-  std::vector<std::size_t> recv_displacements;
+  explicit ShardedUint64Exchange(std::pmr::memory_resource* resource)
+      : values(resource), recv_counts(resource), recv_displacements(resource) {}
+  IdVector values;
+  std::pmr::vector<std::size_t> recv_counts;
+  std::pmr::vector<std::size_t> recv_displacements;
 };
 
+// The transport has O(ranks + configured round bytes) physical scratch.
+// Logical received records are bounded by the caller's admitted source batch.
+// No population-sized MPI round-plan object is retained.
 [[nodiscard]] ShardedUint64Exchange exchangeShardedUint64Records(
     const parallel::MpiContext& mpi_context,
-    const std::vector<std::vector<std::uint64_t>>& values_by_rank,
-    std::size_t record_width) {
+    const IdBuckets& values_by_rank,
+    std::size_t record_width,
+    std::pmr::memory_resource* resource) {
   const int world_size = mpi_context.worldSize();
   std::exception_ptr local_failure;
   try {
-    if (record_width == 0U) {
-      throw std::invalid_argument("sharded uint64 exchange requires nonzero record width");
-    }
-    if (world_size <= 0 || values_by_rank.size() != static_cast<std::size_t>(world_size)) {
-      throw std::invalid_argument("sharded uint64 exchange rank extent mismatch");
+    if (record_width == 0U || world_size <= 0 ||
+        values_by_rank.size() != static_cast<std::size_t>(world_size)) {
+      throw std::invalid_argument("sharded uint64 exchange framing/rank extent mismatch");
     }
     for (const auto& values : values_by_rank) {
       if (values.size() % record_width != 0U) {
         throw std::invalid_argument("sharded uint64 exchange received a partial record");
       }
     }
-  } catch (...) {
-    local_failure = std::current_exception();
-  }
+  } catch (...) { local_failure = std::current_exception(); }
   mpi_context.rethrowCollectivePreparationFailure(
       local_failure, "sharded uint64 local framing validation");
 
+  ShardedUint64Exchange result(resource);
   if (!mpi_context.isEnabled()) {
-    return ShardedUint64Exchange{
-        .values = values_by_rank.front(),
-        .recv_counts = {values_by_rank.front().size()},
-        .recv_displacements = {0U},
-    };
+    result.values.assign(values_by_rank.front().begin(), values_by_rank.front().end());
+    result.recv_counts.push_back(result.values.size());
+    result.recv_displacements.push_back(0U);
+    return result;
   }
 #if COSMOSIM_ENABLE_MPI
-  std::vector<std::uint64_t> send_counts64;
-  std::vector<std::uint64_t> recv_counts64;
+  std::pmr::vector<std::uint64_t> send_counts64(resource), recv_counts64(resource);
   local_failure = nullptr;
   try {
     send_counts64.resize(static_cast<std::size_t>(world_size), 0U);
@@ -144,129 +159,175 @@ struct ShardedUint64Exchange {
       send_counts64[rank] = core::checkedIntegralNarrow<std::uint64_t>(
           values_by_rank[rank].size(), "sharded uint64 logical send count");
     }
-  } catch (...) {
-    local_failure = std::current_exception();
-  }
+  } catch (...) { local_failure = std::current_exception(); }
   mpi_context.rethrowCollectivePreparationFailure(
       local_failure, "sharded uint64 count-buffer preparation");
-
-  if (MPI_Alltoall(
-          send_counts64.data(), 1, MPI_UINT64_T,
-          recv_counts64.data(), 1, MPI_UINT64_T,
-          MPI_COMM_WORLD) != MPI_SUCCESS) {
+  if (MPI_Alltoall(send_counts64.data(), 1, MPI_UINT64_T,
+                   recv_counts64.data(), 1, MPI_UINT64_T,
+                   MPI_COMM_WORLD) != MPI_SUCCESS) {
     throw std::runtime_error("sharded uint64 MPI_Alltoall count exchange failed");
   }
 
-  parallel::BoundedMpiTransferPlan send_plan;
-  parallel::BoundedMpiTransferPlan recv_plan;
-  std::vector<std::uint64_t> recv_values;
-  std::vector<std::uint64_t> send_round_buffer;
-  std::vector<std::uint64_t> recv_round_buffer;
-  parallel::BoundedMpiRoundLayout zero_round;
+  std::pmr::vector<int> send_counts(resource), recv_counts(resource);
+  std::pmr::vector<int> send_displacements(resource), recv_displacements(resource);
+  std::pmr::vector<std::uint64_t> send_round_buffer(resource), recv_round_buffer(resource);
+  std::uint64_t per_peer_cap = 0U;
+  std::uint64_t global_round_count = 0U;
   local_failure = nullptr;
   try {
-    std::vector<std::size_t> send_counts(send_counts64.size(), 0U);
-    std::vector<std::size_t> recv_counts(recv_counts64.size(), 0U);
-    for (std::size_t rank = 0; rank < send_counts.size(); ++rank) {
-      send_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
-          send_counts64[rank], "sharded uint64 send count");
-      recv_counts[rank] = core::checkedIntegralNarrow<std::size_t>(
-          recv_counts64[rank], "sharded uint64 receive count");
-      if (recv_counts[rank] % record_width != 0U) {
-        throw std::runtime_error("sharded uint64 receive count violates record framing");
+    const std::size_t ranks = static_cast<std::size_t>(world_size);
+    result.recv_counts.resize(ranks, 0U);
+    result.recv_displacements.resize(ranks, 0U);
+    std::size_t total = 0U;
+    for (std::size_t peer = 0; peer < ranks; ++peer) {
+      result.recv_counts[peer] = core::checkedIntegralNarrow<std::size_t>(
+          recv_counts64[peer], "sharded uint64 receive count");
+      if (result.recv_counts[peer] % record_width != 0U) {
+        throw std::runtime_error("sharded uint64 receive record framing mismatch");
       }
+      result.recv_displacements[peer] = total;
+      total = core::checkedSizeAdd(total, result.recv_counts[peer],
+                                   "sharded uint64 receive total");
     }
-    const std::size_t round_bytes = parallel::mpiTransportRoundLimitBytes();
-    const std::size_t round_elements = round_bytes / sizeof(std::uint64_t);
-    if (round_elements == 0U) {
-      throw std::runtime_error("sharded uint64 MPI transport round is smaller than one uint64 element");
+    result.values.resize(total);
+    // One element per peer is the minimum legal round. Both the aggregate
+    // count and every displacement remain representable by MPI int.
+    const std::size_t round_elements = std::max<std::size_t>(
+        ranks, parallel::mpiTransportRoundLimitBytes() / sizeof(std::uint64_t));
+    std::uint64_t local_max_peer = 1U;
+    for (std::size_t peer = 0; peer < ranks; ++peer) {
+      local_max_peer = std::max({local_max_peer, send_counts64[peer], recv_counts64[peer]});
     }
-    send_plan = parallel::planBoundedMpiTransferRounds(
-        send_counts,
-        static_cast<std::size_t>(std::numeric_limits<int>::max()),
-        round_elements);
-    recv_plan = parallel::planBoundedMpiTransferRounds(
-        recv_counts,
-        static_cast<std::size_t>(std::numeric_limits<int>::max()),
-        round_elements);
-    recv_values.resize(recv_plan.logical_total_count, 0U);
-
-    std::size_t maximum_send_round = 0U;
-    for (const auto& round : send_plan.rounds) {
-      maximum_send_round = std::max(maximum_send_round, round.round_count);
-    }
-    std::size_t maximum_recv_round = 0U;
-    for (const auto& round : recv_plan.rounds) {
-      maximum_recv_round = std::max(maximum_recv_round, round.round_count);
-    }
-    send_round_buffer.resize(maximum_send_round, 0U);
-    recv_round_buffer.resize(maximum_recv_round, 0U);
-    zero_round.counts.resize(static_cast<std::size_t>(world_size), 0);
-    zero_round.displacements.resize(static_cast<std::size_t>(world_size), 0);
-    zero_round.logical_offsets.resize(static_cast<std::size_t>(world_size), 0U);
-  } catch (...) {
-    local_failure = std::current_exception();
-  }
+    per_peer_cap = std::min<std::uint64_t>(
+        static_cast<std::uint64_t>(round_elements / ranks),
+        static_cast<std::uint64_t>(std::numeric_limits<int>::max()) / ranks);
+    // The common cap is finalized after the collective preparation gate.
+    // Do not allocate round buffers until all ranks agree on this maximum.
+    global_round_count = local_max_peer;
+    const std::size_t capacity = core::checkedSizeMultiply(
+        ranks, static_cast<std::size_t>(per_peer_cap), "sharded uint64 round capacity");
+    send_counts.resize(ranks, 0); recv_counts.resize(ranks, 0);
+    send_displacements.resize(ranks, 0); recv_displacements.resize(ranks, 0);
+    (void)capacity;
+  } catch (...) { local_failure = std::current_exception(); }
   mpi_context.rethrowCollectivePreparationFailure(
-      local_failure, "sharded uint64 post-count payload preparation");
-
-  const std::uint64_t local_round_count = static_cast<std::uint64_t>(
-      std::max(send_plan.rounds.size(), recv_plan.rounds.size()));
-  const std::uint64_t global_round_count =
-      mpi_context.allreduceMaxUint64(local_round_count);
-  for (std::uint64_t round_index = 0U; round_index < global_round_count;
-       ++round_index) {
-    const auto& send_round = round_index < send_plan.rounds.size()
-        ? send_plan.rounds[static_cast<std::size_t>(round_index)]
-        : zero_round;
-    const auto& recv_round = round_index < recv_plan.rounds.size()
-        ? recv_plan.rounds[static_cast<std::size_t>(round_index)]
-        : zero_round;
-    for (std::size_t peer = 0; peer < send_round.counts.size(); ++peer) {
-      const std::size_t count = static_cast<std::size_t>(send_round.counts[peer]);
-      if (count == 0U) {
-        continue;
-      }
-      const std::size_t copy_bytes = count * sizeof(std::uint64_t);
-      std::memcpy(
-          send_round_buffer.data() +
-              static_cast<std::size_t>(send_round.displacements[peer]),
-          values_by_rank[peer].data() + send_round.logical_offsets[peer],
-          copy_bytes);
+      local_failure, "sharded uint64 bounded payload preparation");
+  const std::uint64_t global_max_peer = mpi_context.allreduceMaxUint64(global_round_count);
+  per_peer_cap = std::max<std::uint64_t>(1U, std::min(per_peer_cap, global_max_peer));
+  const std::size_t ranks = static_cast<std::size_t>(world_size);
+  local_failure = nullptr;
+  try {
+    const std::size_t capacity = core::checkedSizeMultiply(ranks,
+        static_cast<std::size_t>(per_peer_cap), "sharded uint64 round buffer capacity");
+    send_round_buffer.resize(capacity); recv_round_buffer.resize(capacity);
+    std::uint64_t local_round_count = 0U;
+    for (std::size_t peer = 0; peer < ranks; ++peer) {
+      const auto rounds = [per_peer_cap](std::uint64_t count) {
+        return count / per_peer_cap + (count % per_peer_cap != 0U ? 1U : 0U);
+      };
+      local_round_count = std::max({local_round_count,
+          rounds(send_counts64[peer]), rounds(recv_counts64[peer])});
     }
-    if (MPI_Alltoallv(
-            send_round_buffer.empty() ? nullptr : send_round_buffer.data(),
-            send_round.counts.data(), send_round.displacements.data(), MPI_UINT64_T,
-            recv_round_buffer.empty() ? nullptr : recv_round_buffer.data(),
-            recv_round.counts.data(), recv_round.displacements.data(), MPI_UINT64_T,
-            MPI_COMM_WORLD) != MPI_SUCCESS) {
-      throw std::runtime_error("sharded uint64 bounded MPI_Alltoallv payload exchange failed");
-    }
-    for (std::size_t peer = 0; peer < recv_round.counts.size(); ++peer) {
-      const std::size_t count = static_cast<std::size_t>(recv_round.counts[peer]);
-      if (count == 0U) {
-        continue;
+    global_round_count = local_round_count;
+  } catch (...) { local_failure = std::current_exception(); }
+  mpi_context.rethrowCollectivePreparationFailure(local_failure,
+      "sharded uint64 round-buffer preparation");
+  global_round_count = mpi_context.allreduceMaxUint64(global_round_count);
+  for (std::uint64_t round = 0U; round < global_round_count; ++round) {
+    const std::uint64_t offset = round * per_peer_cap;
+    std::size_t send_total = 0U, recv_total = 0U;
+    for (std::size_t peer = 0; peer < ranks; ++peer) {
+      const std::uint64_t sc = offset < send_counts64[peer]
+          ? std::min(per_peer_cap, send_counts64[peer] - offset) : 0U;
+      const std::uint64_t rc = offset < recv_counts64[peer]
+          ? std::min(per_peer_cap, recv_counts64[peer] - offset) : 0U;
+      send_counts[peer] = static_cast<int>(sc);
+      recv_counts[peer] = static_cast<int>(rc);
+      send_displacements[peer] = static_cast<int>(send_total);
+      recv_displacements[peer] = static_cast<int>(recv_total);
+      if (sc != 0U) {
+        std::memcpy(send_round_buffer.data() + send_total,
+                    values_by_rank[peer].data() + static_cast<std::size_t>(offset),
+                    static_cast<std::size_t>(sc) * sizeof(std::uint64_t));
       }
-      // The bounded plans already proved these prefixes and round extents.
-      const std::size_t destination =
-          recv_plan.logical_displacements[peer] +
-          recv_round.logical_offsets[peer];
-      const std::size_t copy_bytes = count * sizeof(std::uint64_t);
-      std::memcpy(
-          recv_values.data() + destination,
-          recv_round_buffer.data() +
-              static_cast<std::size_t>(recv_round.displacements[peer]),
-          copy_bytes);
+      send_total += static_cast<std::size_t>(sc);
+      recv_total += static_cast<std::size_t>(rc);
+    }
+    if (MPI_Alltoallv(send_round_buffer.data(), send_counts.data(),
+                      send_displacements.data(), MPI_UINT64_T,
+                      recv_round_buffer.data(), recv_counts.data(),
+                      recv_displacements.data(), MPI_UINT64_T,
+                      MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("sharded uint64 bounded MPI_Alltoallv failed");
+    }
+    for (std::size_t peer = 0; peer < ranks; ++peer) {
+      const std::size_t count = static_cast<std::size_t>(recv_counts[peer]);
+      if (count != 0U) {
+        std::memcpy(result.values.data() + result.recv_displacements[peer] +
+                        static_cast<std::size_t>(offset),
+                    recv_round_buffer.data() + static_cast<std::size_t>(recv_displacements[peer]),
+                    count * sizeof(std::uint64_t));
+      }
     }
   }
-  return ShardedUint64Exchange{
-      .values = std::move(recv_values),
-      .recv_counts = std::move(recv_plan.logical_counts),
-      .recv_displacements = std::move(recv_plan.logical_displacements),
-  };
+  return result;
 #else
   throw std::runtime_error("distributed sharded particle-ID registry requires an MPI build");
 #endif
+}
+
+// Merge two sorted, disjoint sequences into already-admitted vector capacity.
+// Reverse traversal avoids an additional population-sized merge buffer.
+template <class TContainer>
+void appendSortedIds(TContainer& values, std::span<const std::uint64_t> incoming) {
+  const std::size_t old_size = values.size();
+  if (incoming.size() > values.capacity() - old_size) {
+    throw std::length_error("sharded ID merge exceeds admitted capacity");
+  }
+  values.resize(old_size + incoming.size());
+  std::size_t i = old_size, j = incoming.size(), k = values.size();
+  while (j != 0U) {
+    if (i != 0U && values[i - 1U] > incoming[j - 1U]) {
+      values[--k] = values[--i];
+    } else {
+      values[--k] = incoming[--j];
+    }
+  }
+}
+
+[[nodiscard]] std::uint64_t checkedIdBytes(std::uint64_t count,
+                                            std::uint64_t width,
+                                            std::string_view label) {
+  if (width != 0U && count > std::numeric_limits<std::uint64_t>::max() / width) {
+    throw std::overflow_error(std::string(label) + ": byte multiplication overflow");
+  }
+  return count * width;
+}
+
+// The arena is a hard physical cap, not an optimistic peak estimate. The
+// coefficients cover the explicitly reserved PMR arrays and their alignment.
+// If an implementation requests more, null-upstream allocation fails safely.
+[[nodiscard]] std::uint64_t idRoundWorkspaceBytes(std::uint64_t global_records,
+                                                    std::uint64_t local_records,
+                                                    std::uint64_t ranks,
+                                                    std::uint64_t record_width) {
+  std::uint64_t bytes = checkedIdBytes(global_records,
+      record_width * sizeof(std::uint64_t) * 2U + 128U, "ID round records");
+  bytes = core::checkedMemoryBytesAdd(bytes,
+      checkedIdBytes(local_records, record_width * sizeof(std::uint64_t) * 2U + 64U,
+                     "ID round local records"), "ID round workspace");
+  bytes = core::checkedMemoryBytesAdd(bytes,
+      checkedIdBytes(ranks, 512U, "ID round rank metadata"), "ID round workspace");
+  const std::uint64_t transport = std::max<std::uint64_t>(
+      checkedIdBytes(ranks, sizeof(std::uint64_t), "ID round minimum transport"),
+      std::min<std::uint64_t>(parallel::mpiTransportRoundLimitBytes(),
+          checkedIdBytes(checkedIdBytes(global_records, record_width,
+              "ID round wire records"),
+              checkedIdBytes(ranks, sizeof(std::uint64_t), "ID round peer width"),
+              "ID round maximum transport")));
+  bytes = core::checkedMemoryBytesAdd(bytes, checkedIdBytes(transport, 2U,
+      "ID send/receive workspace"), "ID round workspace");
+  return core::checkedMemoryBytesAdd(bytes, 4096U, "ID arena alignment allowance");
 }
 
 [[nodiscard]] std::size_t shardForUint64(std::uint64_t value, int world_size) {
@@ -293,18 +354,33 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
     m_growth_owner = owner;
     m_growth_handler = handler;
   }
+  void setMemoryGovernor(core::MemoryGovernor* governor) noexcept {
+    m_memory_governor = governor;
+  }
+  void finishPrecommit() noexcept override { m_result_reservation.release(); }
 
   void preparePopulationGrowth(core::SimulationState& state, std::size_t count,
                                core::ParticleSpecies species) override {
     if (m_growth_handler != nullptr) m_growth_handler(m_growth_owner, state, count, species);
   }
 
+  [[nodiscard]] std::uint64_t occupiedCapacityBytes() const {
+    return checkedIdBytes(m_occupied_shard.capacity(), sizeof(std::uint64_t),
+                          "ID occupied shard capacity");
+  }
+  [[nodiscard]] bool occupiedCapacityGoverned() const noexcept {
+    return m_occupied_reservation.committed();
+  }
+
   [[nodiscard]] std::vector<std::uint64_t> precommit(
       const core::SimulationState& state,
       std::span<const std::uint64_t> birth_keys) override {
-    if (!m_initialized) {
-      initializeOccupiedShard(state.particle_sidecar.particle_id);
-    }
+    prepareIdCollectively(m_mpi_context, "particle-ID precommit entry", [&]() {
+      if (m_result_reservation.committed()) {
+        throw std::logic_error("particle-ID precommit result still has a live consumer");
+      }
+    });
+    if (!m_initialized) initializeOccupiedShard(state.particle_sidecar.particle_id);
     validateBirthKeysDistributed(birth_keys);
 
     struct LocalCandidate {
@@ -313,42 +389,81 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
       std::uint32_t collision_ordinal = 0U;
       bool resolved = false;
     };
-    std::vector<LocalCandidate> candidates;
+    struct ReceivedCandidate {
+      std::uint64_t particle_id = 0U;
+      std::uint64_t birth_key = 0U;
+      std::uint64_t origin_index = 0U;
+      std::uint32_t ordinal = 0U;
+      int origin_rank = 0;
+    };
+    const int world_size = m_mpi_context.worldSize();
+    std::uint64_t local_count = 0U;
+    prepareIdCollectively(m_mpi_context, "particle-ID count preparation", [&]() {
+      local_count = core::checkedIntegralNarrow<std::uint64_t>(
+          birth_keys.size(), "ID local precommit count");
+    });
+    const std::uint64_t global_count = m_mpi_context.allreduceSumUint64(local_count);
+    if (global_count == 0U) return {};
+    std::unique_ptr<core::GovernedScratchArena> outer;
+    std::pmr::vector<LocalCandidate> candidates;
+    IdVector batch_reserved_on_shard;
+    prepareIdCollectively(m_mpi_context, "particle-ID outer workspace preparation", [&]() {
+    const std::uint64_t outer_bytes = core::checkedMemoryBytesAdd(
+        checkedIdBytes(local_count, sizeof(LocalCandidate) + sizeof(std::uint64_t) * 2U,
+                       "ID outer local workspace"),
+        core::checkedMemoryBytesAdd(
+            checkedIdBytes(global_count, sizeof(std::uint64_t), "ID reserved candidates"),
+            4096U, "ID outer alignment"), "ID outer workspace");
+    outer = std::make_unique<core::GovernedScratchArena>(m_memory_governor, core::MemoryClass::kScratchArena,
+                                      outer_bytes, "sources.ids.precommit");
+    candidates = std::pmr::vector<LocalCandidate>(outer->resource());
     candidates.reserve(birth_keys.size());
     for (const std::uint64_t birth_key : birth_keys) {
       candidates.push_back(LocalCandidate{
           .particle_id = physics::starFormationParticleIdFromBirthKey(birth_key, 0U),
-          .birth_key = birth_key,
-      });
+          .birth_key = birth_key});
     }
+    batch_reserved_on_shard = IdVector(outer->resource());
+    batch_reserved_on_shard.reserve(core::checkedIntegralNarrow<std::size_t>(
+        global_count, "ID batch reservation capacity"));
 
-    std::unordered_set<std::uint64_t> batch_reserved_on_shard;
-    const int world_size = m_mpi_context.worldSize();
+    });
     for (std::uint32_t pass = 0U; pass < 1024U; ++pass) {
-      std::vector<std::vector<std::uint64_t>> requests(
-          static_cast<std::size_t>(world_size));
+      // The arena is released after each collision pass; no allocator or
+      // round-plan high-water can accumulate over the retry sequence.
+      std::unique_ptr<core::GovernedScratchArena> scratch;
+      IdBuckets requests;
+      prepareIdCollectively(m_mpi_context, "particle-ID collision request preparation", [&]() {
+      scratch = std::make_unique<core::GovernedScratchArena>(m_memory_governor, core::MemoryClass::kScratchArena,
+          idRoundWorkspaceBytes(global_count, local_count,
+                                static_cast<std::uint64_t>(world_size), 4U),
+          "sources.ids.collision_round");
+      requests = IdBuckets(scratch->resource());
+      requests.resize(static_cast<std::size_t>(world_size));
+      std::pmr::vector<std::size_t> request_counts(scratch->resource());
+      request_counts.resize(requests.size(), 0U);
+      for (const auto& candidate : candidates) {
+        if (!candidate.resolved) ++request_counts[shardForUint64(candidate.particle_id, world_size)];
+      }
+      for (std::size_t rank = 0; rank < requests.size(); ++rank) {
+        requests[rank].reserve(core::checkedSizeMultiply(request_counts[rank], 4U,
+            "ID collision request records"));
+      }
       for (std::size_t local_index = 0; local_index < candidates.size(); ++local_index) {
         const LocalCandidate& candidate = candidates[local_index];
-        if (candidate.resolved) {
-          continue;
-        }
+        if (candidate.resolved) continue;
         auto& target = requests[shardForUint64(candidate.particle_id, world_size)];
         target.push_back(candidate.particle_id);
         target.push_back(candidate.birth_key);
         target.push_back(static_cast<std::uint64_t>(local_index));
-        target.push_back(static_cast<std::uint64_t>(candidate.collision_ordinal));
+        target.push_back(candidate.collision_ordinal);
       }
-      const ShardedUint64Exchange received =
-          exchangeShardedUint64Records(m_mpi_context, requests, 4U);
-
-      struct ReceivedCandidate {
-        std::uint64_t particle_id = 0U;
-        std::uint64_t birth_key = 0U;
-        std::uint64_t origin_index = 0U;
-        std::uint32_t ordinal = 0U;
-        int origin_rank = 0;
-      };
-      std::vector<ReceivedCandidate> shard_candidates;
+      });
+      const ShardedUint64Exchange received = exchangeShardedUint64Records(
+          m_mpi_context, requests, 4U, scratch->resource());
+      IdBuckets decisions(scratch->resource());
+      prepareIdCollectively(m_mpi_context, "particle-ID collision decision preparation", [&]() {
+      std::pmr::vector<ReceivedCandidate> shard_candidates(scratch->resource());
       shard_candidates.reserve(received.values.size() / 4U);
       for (int origin_rank = 0; origin_rank < world_size; ++origin_rank) {
         const std::size_t begin = received.recv_displacements[static_cast<std::size_t>(origin_rank)];
@@ -360,12 +475,9 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
             throw std::runtime_error("particle-ID collision ordinal wire value overflow");
           }
           shard_candidates.push_back(ReceivedCandidate{
-              .particle_id = received.values[index],
-              .birth_key = received.values[index + 1U],
+              .particle_id = received.values[index], .birth_key = received.values[index + 1U],
               .origin_index = received.values[index + 2U],
-              .ordinal = static_cast<std::uint32_t>(ordinal64),
-              .origin_rank = origin_rank,
-          });
+              .ordinal = static_cast<std::uint32_t>(ordinal64), .origin_rank = origin_rank});
         }
       }
       std::sort(shard_candidates.begin(), shard_candidates.end(),
@@ -375,40 +487,44 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
                   if (lhs.origin_rank != rhs.origin_rank) return lhs.origin_rank < rhs.origin_rank;
                   return lhs.origin_index < rhs.origin_index;
                 });
-
-      // decision record: local candidate index, 0=resolved, 1=rehash.
-      std::vector<std::vector<std::uint64_t>> decisions(
-          static_cast<std::size_t>(world_size));
+      decisions.resize(static_cast<std::size_t>(world_size));
+      std::pmr::vector<std::size_t> decision_counts(scratch->resource());
+      decision_counts.resize(decisions.size(), 0U);
+      for (const auto& candidate : shard_candidates) ++decision_counts[static_cast<std::size_t>(candidate.origin_rank)];
+      for (std::size_t rank = 0; rank < decisions.size(); ++rank) {
+        decisions[rank].reserve(core::checkedSizeMultiply(decision_counts[rank], 2U,
+            "ID collision decision records"));
+      }
+      IdVector new_reserved(scratch->resource());
+      new_reserved.reserve(shard_candidates.size());
       std::size_t begin = 0U;
       while (begin < shard_candidates.size()) {
         std::size_t end_group = begin + 1U;
         while (end_group < shard_candidates.size() &&
-               shard_candidates[end_group].particle_id ==
-                   shard_candidates[begin].particle_id) {
-          ++end_group;
-        }
+               shard_candidates[end_group].particle_id == shard_candidates[begin].particle_id) ++end_group;
         const std::uint64_t particle_id = shard_candidates[begin].particle_id;
-        const bool collides_reserved = m_occupied_shard.contains(particle_id) ||
-            batch_reserved_on_shard.contains(particle_id);
+        const bool collides_reserved = containsOccupied(particle_id) ||
+            std::binary_search(batch_reserved_on_shard.begin(), batch_reserved_on_shard.end(), particle_id);
         const std::size_t first_rehash = collides_reserved ? begin : begin + 1U;
         if (!collides_reserved) {
           const ReceivedCandidate& winner = shard_candidates[begin];
           auto& result = decisions[static_cast<std::size_t>(winner.origin_rank)];
-          result.push_back(winner.origin_index);
-          result.push_back(0U);
-          batch_reserved_on_shard.insert(particle_id);
+          result.push_back(winner.origin_index); result.push_back(0U);
+          new_reserved.push_back(particle_id);
         }
         for (std::size_t index = first_rehash; index < end_group; ++index) {
           const ReceivedCandidate& collision = shard_candidates[index];
           auto& result = decisions[static_cast<std::size_t>(collision.origin_rank)];
-          result.push_back(collision.origin_index);
-          result.push_back(1U);
+          result.push_back(collision.origin_index); result.push_back(1U);
         }
         begin = end_group;
       }
-
-      const ShardedUint64Exchange returned =
-          exchangeShardedUint64Records(m_mpi_context, decisions, 2U);
+      // Both sequences are sorted, so the merge is linear and allocation-free.
+      appendSortedIds(batch_reserved_on_shard, new_reserved);
+      });
+      const ShardedUint64Exchange returned = exchangeShardedUint64Records(
+          m_mpi_context, decisions, 2U, scratch->resource());
+      prepareIdCollectively(m_mpi_context, "particle-ID collision response validation", [&]() {
       for (std::size_t index = 0; index < returned.values.size(); index += 2U) {
         const std::uint64_t local_index64 = returned.values[index];
         const std::uint64_t action = returned.values[index + 1U];
@@ -416,10 +532,7 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
           throw std::runtime_error("particle-ID shard returned an invalid collision decision");
         }
         LocalCandidate& candidate = candidates[static_cast<std::size_t>(local_index64)];
-        if (action == 0U) {
-          candidate.resolved = true;
-          continue;
-        }
+        if (action == 0U) { candidate.resolved = true; continue; }
         if (candidate.collision_ordinal == std::numeric_limits<std::uint32_t>::max()) {
           throw std::runtime_error("ParticleIdRegistry: deterministic collision ordinal overflow");
         }
@@ -427,77 +540,175 @@ class DistributedParticleIdRegistry final : public physics::ParticleIdPrecommit 
         candidate.particle_id = physics::starFormationParticleIdFromBirthKey(
             candidate.birth_key, candidate.collision_ordinal);
       }
-
+      });
       std::uint64_t local_unresolved = 0U;
-      for (const LocalCandidate& candidate : candidates) {
-        local_unresolved += candidate.resolved ? 0U : 1U;
-      }
+      for (const auto& candidate : candidates) local_unresolved += candidate.resolved ? 0U : 1U;
       if (m_mpi_context.allreduceSumUint64(local_unresolved) == 0U) {
-        m_occupied_shard.insert(
-            batch_reserved_on_shard.begin(), batch_reserved_on_shard.end());
+        // Admit the returned IDs before committing the occupied shard. The
+        // caller releases this result lease after its birth transaction ends.
+        core::MemoryReservation result_lease;
         std::vector<std::uint64_t> result;
-        result.reserve(candidates.size());
-        for (const LocalCandidate& candidate : candidates) {
-          result.push_back(candidate.particle_id);
-        }
+        prepareIdCollectively(m_mpi_context,
+            "particle-ID occupied-shard commit preparation", [&]() {
+          if (m_memory_governor != nullptr) {
+            result_lease = m_memory_governor->reserve(core::MemoryClass::kPhaseResident,
+                checkedIdBytes(local_count, sizeof(std::uint64_t), "ID precommit result"),
+                "sources.ids.precommit_result");
+          }
+          result.reserve(birth_keys.size());
+          if (result.capacity() > birth_keys.size()) {
+            throw std::length_error("ID precommit result exceeds admitted capacity");
+          }
+          for (const auto& candidate : candidates) result.push_back(candidate.particle_id);
+          if (result_lease.pending()) result_lease.commit();
+          reserveOccupiedCapacity(core::checkedSizeAdd(m_occupied_shard.size(),
+              batch_reserved_on_shard.size(), "ID occupied append capacity"));
+        });
+        appendSortedIds(m_occupied_shard, batch_reserved_on_shard);
+        m_result_reservation = std::move(result_lease);
         return result;
       }
     }
-    throw std::runtime_error(
-        "ParticleIdRegistry: deterministic sharded collision resolution exhausted");
+    throw std::runtime_error("ParticleIdRegistry: deterministic sharded collision resolution exhausted");
   }
 
  private:
+  [[nodiscard]] bool containsOccupied(std::uint64_t id) const noexcept {
+    return std::binary_search(m_occupied_shard.begin(), m_occupied_shard.end(), id);
+  }
+
+  void reserveOccupiedCapacity(std::size_t target) {
+    if (target <= m_occupied_shard.capacity()) return;
+    const std::size_t old_capacity = m_occupied_shard.capacity();
+    const std::size_t growth = old_capacity / 2U;
+    const std::size_t capacity = std::max(target, core::checkedSizeAdd(
+        old_capacity, std::max<std::size_t>(growth, 1U), "ID occupied capacity growth"));
+    const std::uint64_t bytes = checkedIdBytes(capacity, sizeof(std::uint64_t),
+                                               "ID occupied replacement");
+    auto replacement_lease = m_memory_governor == nullptr ? core::MemoryReservation{} :
+        m_memory_governor->reserve(core::MemoryClass::kPersistentCache, bytes,
+                                   "sources.ids.occupied_shard");
+    std::vector<std::uint64_t> replacement;
+    replacement.reserve(capacity);
+    if (replacement.capacity() > capacity) {
+      throw std::length_error("ID occupied allocator exceeded admitted replacement capacity");
+    }
+    replacement.insert(replacement.end(), m_occupied_shard.begin(), m_occupied_shard.end());
+    if (replacement_lease.pending()) replacement_lease.commit();
+    m_occupied_shard.swap(replacement);
+    m_occupied_reservation = std::move(replacement_lease);
+  }
+
+  // Initial population validation is streamed in fixed local batches. The
+  // persistent shard is O(owned hash shard), never replicated on every rank.
   void initializeOccupiedShard(std::span<const std::uint64_t> local_ids) {
+    constexpr std::size_t k_initial_chunk = 4096U;
     const int world_size = m_mpi_context.worldSize();
-    std::vector<std::vector<std::uint64_t>> ids_by_rank(
-        static_cast<std::size_t>(world_size));
-    for (const std::uint64_t id : local_ids) {
-      ids_by_rank[shardForUint64(id, world_size)].push_back(id);
+    const std::uint64_t local_rounds = local_ids.size() / k_initial_chunk +
+        (local_ids.size() % k_initial_chunk != 0U ? 1U : 0U);
+    const std::uint64_t global_rounds = m_mpi_context.allreduceMaxUint64(local_rounds);
+    m_occupied_shard.clear();
+    try {
+      for (std::uint64_t round = 0U; round < global_rounds; ++round) {
+        const std::size_t begin = round < local_rounds
+            ? static_cast<std::size_t>(round) * k_initial_chunk : local_ids.size();
+        const std::size_t count = begin < local_ids.size()
+            ? std::min(k_initial_chunk, local_ids.size() - begin) : 0U;
+        const std::uint64_t global_count = m_mpi_context.allreduceSumUint64(count);
+        std::unique_ptr<core::GovernedScratchArena> scratch;
+        IdBuckets ids_by_rank;
+        prepareIdCollectively(m_mpi_context, "particle-ID initial shard preparation", [&]() {
+        scratch = std::make_unique<core::GovernedScratchArena>(m_memory_governor, core::MemoryClass::kScratchArena,
+            idRoundWorkspaceBytes(global_count, count,
+                                  static_cast<std::uint64_t>(world_size), 1U),
+            "sources.ids.initial_shard");
+        ids_by_rank = IdBuckets(scratch->resource());
+        ids_by_rank.resize(static_cast<std::size_t>(world_size));
+        std::pmr::vector<std::size_t> counts(scratch->resource());
+        counts.resize(ids_by_rank.size(), 0U);
+        for (std::size_t i = 0U; i < count; ++i) ++counts[shardForUint64(local_ids[begin + i], world_size)];
+        for (std::size_t rank = 0; rank < counts.size(); ++rank) ids_by_rank[rank].reserve(counts[rank]);
+        for (std::size_t i = 0U; i < count; ++i) ids_by_rank[shardForUint64(local_ids[begin + i], world_size)].push_back(local_ids[begin + i]);
+        });
+        const ShardedUint64Exchange received = exchangeShardedUint64Records(
+            m_mpi_context, ids_by_rank, 1U, scratch->resource());
+        IdVector shard_ids(scratch->resource());
+        prepareIdCollectively(m_mpi_context, "particle-ID initial shard decode", [&]() {
+          shard_ids.assign(received.values.begin(), received.values.end());
+          std::sort(shard_ids.begin(), shard_ids.end());
+        });
+        bool invalid_local = (!shard_ids.empty() && shard_ids.front() == 0U) ||
+            std::adjacent_find(shard_ids.begin(), shard_ids.end()) != shard_ids.end();
+        if (!invalid_local) {
+          for (const auto id : shard_ids) {
+            if (containsOccupied(id)) { invalid_local = true; break; }
+          }
+        }
+        if (m_mpi_context.allreduceSumUint64(invalid_local ? 1ULL : 0ULL) != 0U) {
+          throw std::runtime_error("ParticleIdRegistry: zero or duplicate existing ID during sharded initialization");
+        }
+        std::exception_ptr local_failure;
+        try { reserveOccupiedCapacity(core::checkedSizeAdd(m_occupied_shard.size(),
+            shard_ids.size(), "ID initial shard append")); }
+        catch (...) { local_failure = std::current_exception(); }
+        m_mpi_context.rethrowCollectivePreparationFailure(local_failure,
+            "particle-ID initial shard capacity preparation");
+        appendSortedIds(m_occupied_shard, shard_ids);
+      }
+      m_initialized = true;
+    } catch (...) {
+      m_occupied_shard.clear();
+      m_initialized = false;
+      throw;
     }
-    const ShardedUint64Exchange received =
-        exchangeShardedUint64Records(m_mpi_context, ids_by_rank, 1U);
-    std::vector<std::uint64_t> shard_ids = received.values;
-    std::sort(shard_ids.begin(), shard_ids.end());
-    const bool invalid_local =
-        (!shard_ids.empty() && shard_ids.front() == 0U) ||
-        std::adjacent_find(shard_ids.begin(), shard_ids.end()) != shard_ids.end();
-    if (m_mpi_context.allreduceSumUint64(invalid_local ? 1ULL : 0ULL) != 0U) {
-      throw std::runtime_error(
-          "ParticleIdRegistry: zero or duplicate existing ID during sharded initialization");
-    }
-    m_occupied_shard.insert(shard_ids.begin(), shard_ids.end());
-    m_initialized = true;
   }
 
   void validateBirthKeysDistributed(std::span<const std::uint64_t> birth_keys) const {
     const int world_size = m_mpi_context.worldSize();
-    std::vector<std::vector<std::uint64_t>> keys_by_rank(
-        static_cast<std::size_t>(world_size));
-    for (const std::uint64_t key : birth_keys) {
-      keys_by_rank[shardForUint64(key, world_size)].push_back(key);
-    }
-    const ShardedUint64Exchange received =
-        exchangeShardedUint64Records(m_mpi_context, keys_by_rank, 1U);
-    std::vector<std::uint64_t> shard_keys = received.values;
-    std::sort(shard_keys.begin(), shard_keys.end());
-    const bool invalid_local =
-        (!shard_keys.empty() && shard_keys.front() == 0U) ||
+    std::uint64_t local_count = 0U;
+    prepareIdCollectively(m_mpi_context, "particle-ID birth-key count preparation", [&]() {
+      local_count = core::checkedIntegralNarrow<std::uint64_t>(
+          birth_keys.size(), "ID birth-key count");
+    });
+    const std::uint64_t global_count = m_mpi_context.allreduceSumUint64(local_count);
+    if (global_count == 0U) return;
+    std::unique_ptr<core::GovernedScratchArena> scratch;
+    IdBuckets keys_by_rank;
+    prepareIdCollectively(m_mpi_context, "particle-ID birth-key workspace preparation", [&]() {
+      scratch = std::make_unique<core::GovernedScratchArena>(m_memory_governor, core::MemoryClass::kScratchArena,
+        idRoundWorkspaceBytes(global_count, local_count,
+                              static_cast<std::uint64_t>(world_size), 1U),
+        "sources.ids.birth_key_validation");
+    keys_by_rank = IdBuckets(scratch->resource());
+    keys_by_rank.resize(static_cast<std::size_t>(world_size));
+    std::pmr::vector<std::size_t> counts(scratch->resource());
+    counts.resize(keys_by_rank.size(), 0U);
+    for (const auto key : birth_keys) ++counts[shardForUint64(key, world_size)];
+    for (std::size_t rank = 0; rank < counts.size(); ++rank) keys_by_rank[rank].reserve(counts[rank]);
+    for (const auto key : birth_keys) keys_by_rank[shardForUint64(key, world_size)].push_back(key);
+    });
+    const ShardedUint64Exchange received = exchangeShardedUint64Records(
+        m_mpi_context, keys_by_rank, 1U, scratch->resource());
+    IdVector shard_keys(scratch->resource());
+    prepareIdCollectively(m_mpi_context, "particle-ID birth-key decode", [&]() {
+      shard_keys.assign(received.values.begin(), received.values.end());
+      std::sort(shard_keys.begin(), shard_keys.end());
+    });
+    const bool invalid_local = (!shard_keys.empty() && shard_keys.front() == 0U) ||
         std::adjacent_find(shard_keys.begin(), shard_keys.end()) != shard_keys.end();
     if (m_mpi_context.allreduceSumUint64(invalid_local ? 1ULL : 0ULL) != 0U) {
-      throw std::runtime_error(
-          "ParticleIdRegistry: zero or duplicate immutable birth key across owner ranks");
+      throw std::runtime_error("ParticleIdRegistry: zero or duplicate immutable birth key across owner ranks");
     }
   }
 
   const parallel::MpiContext& m_mpi_context;
+  core::MemoryGovernor* m_memory_governor = nullptr;
   void* m_growth_owner = nullptr;
   GrowthHandler m_growth_handler = nullptr;
   bool m_initialized = false;
-  // Only IDs whose hash shard belongs to this rank are retained. Aggregate
-  // memory remains O(N), not O(N * ranks), while collision decisions stay
-  // deterministic because each candidate ID has one authoritative shard.
-  std::unordered_set<std::uint64_t> m_occupied_shard;
+  std::vector<std::uint64_t> m_occupied_shard;
+  core::MemoryReservation m_occupied_reservation;
+  core::MemoryReservation m_result_reservation;
 };
 
 [[nodiscard]] physics::BlackHoleAgnConfig makeRuntimeBlackHoleAgnConfig(
@@ -577,6 +788,7 @@ class SourceRuntimeImpl final : public SourceRuntime {
         m_is_cosmological(
             config.mode.mode == core::SimulationMode::kCosmoCube ||
             config.mode.mode == core::SimulationMode::kZoomIn) {
+    m_particle_id_registry.setMemoryGovernor(m_memory_governor);
     m_particle_id_registry.setGrowthHandler(this,
         &SourceRuntimeImpl::preparePopulationGrowthCallback);
     if (m_bh_seeding_requested) {
@@ -658,6 +870,16 @@ class SourceRuntimeImpl final : public SourceRuntime {
         .estimate_only = false,
         .governed_commitment = m_feedback_index_reservation.committed(),
     });
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kParticles,
+        .lifetime = core::MemoryLifetime::kPersistent,
+        .memory_class = core::MemoryClass::kPersistentCache,
+        .label = "sources.ids.occupied_shard",
+        .owned_capacity_bytes = m_particle_id_registry.occupiedCapacityBytes(),
+        .high_water_bytes = m_particle_id_registry.occupiedCapacityBytes(),
+        .estimate_only = false,
+        .governed_commitment = m_particle_id_registry.occupiedCapacityGoverned(),
+        .uncertainty_note = "one sorted immutable-ID cache per hash shard; no rank-global replication"});
     const bool diffusion_governed = m_diffusion_phase_reservation.committed();
     add_container(
         core::MemorySubsystem::kScratch,
@@ -1756,7 +1978,16 @@ class SourceRuntimeImpl final : public SourceRuntime {
   std::uint64_t m_diffusion_topology_scratch_high_water_bytes = 0U;
 };
 
-}  // namespace
+ }  // namespace
+
+namespace internal {
+std::unique_ptr<physics::ParticleIdPrecommit> makeDistributedParticleIdRegistry(
+    const parallel::MpiContext& mpi_context, core::MemoryGovernor* governor) {
+  auto registry = std::make_unique<DistributedParticleIdRegistry>(mpi_context);
+  registry->setMemoryGovernor(governor);
+  return registry;
+}
+}  // namespace internal
 
 std::unique_ptr<SourceRuntime> makeSourceRuntime(
     const core::SimulationConfig& config,

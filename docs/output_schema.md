@@ -443,3 +443,16 @@ the existing backward-compatibility policy.
 ## M2D-1 optional diagnostic provenance
 
 The existing provenance derived-runtime-state text may include `optional_diagnostic_cadence_policy=coalesced_nonpersistent` and light/heavy pending, first/latest due, and missed-count summaries. The operational event stream records actual execution epochs, coalescing, and terminal drops. No snapshot or restart schema field was added. A science product generated during catch-up represents its actual current physical epoch, never a reconstructed historical state.
+
+
+## M2D I/O residency follow-up (2026-09-08)
+
+The snapshot writer's sidecar-row lookup is now a compact, phase-local sorted
+index with an optional owner-held memory-governor admission. The production
+workflow supplies the existing governor; standalone callers retain the
+compatible null-authority behavior. Missing/duplicate sidecar indices remain
+errors. Restart module-sidecar payloads are written directly from their
+authoritative byte storage without changing the dataset type, shape, contents
+or schema. No snapshot/restart schema version or normalized configuration key
+changes are introduced. Other writer metadata and readback capacity growth
+remain subject to their existing owner contracts and external-runtime reserve.

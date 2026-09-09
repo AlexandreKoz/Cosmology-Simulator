@@ -561,3 +561,20 @@ equivalence, measured rank max/mean RSS/PSS and work imbalance, and legal
 batch-size and Release rank/thread comparisons. Use the authoritative presets
 in `docs/build_instructions.md`; do not count unavailable dependencies as
 passing or change numerical tolerances for memory work.
+
+
+## M2D final coding follow-up gates (2026-09-08)
+
+`unit_particle_id_registry` exercises deterministic collision rehashing,
+invalid initial IDs, retained/released leases, empty batches, and tight-budget
+rejection. `unit_sidecar_row_lookup` exercises unsorted rows, duplicates,
+missing indices, exact headroom and overflow. `unit_memory_governor` now also
+checks bounded arena exhaustion and lease release. The source and reference
+workflow integrations preserve the accepted scientific order.
+
+MPI-only source-ID branches require a real MPI build and np2/np3/np4 execution;
+a declaration-stub syntax check is not a runtime pass. The remaining AMR
+geometry/ghost and I/O metadata allocation ownership must be completed before
+claiming a whole-task certificate. Full CPU/HDF5 inventories, extracted-source
+completeness, distributed fault/restart/science equivalence, and measured
+whole-process/topology evidence remain separate acceptance gates.

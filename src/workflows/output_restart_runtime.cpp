@@ -473,6 +473,7 @@ bool maybeWriteOutputs(
     try {
       io::SnapshotWritePayload snapshot_payload;
       snapshot_payload.state = &state;
+      snapshot_payload.memory_governor = services.memory_governor;
       snapshot_payload.config = &config;
       snapshot_payload.normalized_config_text = frozen_config.normalized_text;
       snapshot_payload.provenance = snapshot_provenance;

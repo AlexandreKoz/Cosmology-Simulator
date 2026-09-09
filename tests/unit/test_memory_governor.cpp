@@ -3,6 +3,8 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <memory_resource>
+#include "cosmosim/core/governed_scratch_arena.hpp"
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -400,6 +402,46 @@ void testRetainedWorkspaceBatchSizing() {
 
 }
 
+void testGovernedScratchArena() {
+  MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 1024U});
+  {
+    cosmosim::core::GovernedScratchArena arena(
+        &governor, MemoryClass::kScratchArena, 1024U, "unit.arena");
+    assert(arena.capacityBytes() == 1024U);
+    assert(governor.snapshot().committed_bytes == 1024U);
+    std::pmr::vector<std::uint64_t> values(arena.resource());
+    values.reserve(64U);
+    values.assign(64U, 7U);
+    assert(values.front() == 7U && values.back() == 7U);
+    bool exhausted = false;
+    try {
+      values.reserve(1024U);
+    } catch (const std::bad_alloc&) { exhausted = true; }
+    assert(exhausted);
+    assert(governor.snapshot().committed_bytes == 1024U);
+    bool rejected = false;
+    try {
+      cosmosim::core::GovernedScratchArena extra(
+          &governor, MemoryClass::kScratchArena, 1U, "unit.arena_over");
+    } catch (const cosmosim::core::MemoryAdmissionError&) { rejected = true; }
+    assert(rejected);
+  }
+  assert(governor.snapshot().committed_bytes == 0U);
+  assert(governor.snapshot().reserved_bytes == 0U);
+  {
+    cosmosim::core::GovernedScratchArena empty(
+        &governor, MemoryClass::kScratchArena, 0U, "unit.empty_arena");
+    assert(empty.capacityBytes() == 0U);
+  }
+  bool oversized = false;
+  try {
+    cosmosim::core::GovernedScratchArena too_large(
+        nullptr, MemoryClass::kScratchArena,
+        std::numeric_limits<std::uint64_t>::max(), "unit.oversized_arena");
+  } catch (const std::exception&) { oversized = true; }
+  assert(oversized);
+}
+
 void testConcurrentControlPlaneReservations() {
   MemoryGovernor governor(MemoryGovernorPolicy{.hard_limit_bytes = 1U << 20U});
   constexpr int k_threads = 8;
@@ -443,6 +485,7 @@ int main() {
   testCommittedReservationTransfersIntoBaselineAtomically();
   testDeterministicHeadroomAwareBatchSizing();
   testRetainedWorkspaceBatchSizing();
+  testGovernedScratchArena();
   testConcurrentControlPlaneReservations();
   return 0;
 }

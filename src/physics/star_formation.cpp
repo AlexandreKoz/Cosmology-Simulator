@@ -1058,6 +1058,10 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
       ? *id_precommit
       : static_cast<ParticleIdPrecommit&>(local_registry);
   const std::vector<std::uint64_t> new_particle_ids = registry.precommit(state, new_birth_keys);
+  struct PrecommitResultScope {
+    ParticleIdPrecommit& registry;
+    ~PrecommitResultScope() { registry.finishPrecommit(); }
+  } precommit_result_scope{registry};
   if (new_particle_ids.size() != new_birth_keys.size()) {
     throw std::runtime_error("StarFormationModel: particle-ID precommit returned the wrong batch size");
   }

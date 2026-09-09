@@ -27,6 +27,8 @@
 #include "io/internal/snapshot_set_internal.hpp"
 #include "io/internal/transactional_file.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/governed_scratch_arena.hpp"
+#include "io/internal/sidecar_row_lookup.hpp"
 #include "core/internal/sha256.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
@@ -956,30 +958,17 @@ void writeScienceSnapshotHdf5(
     throw std::runtime_error(
         "snapshot writer: persistent particle IDs must be nonzero and unique");
   }
-  std::unordered_map<std::uint32_t, std::size_t> tracer_row_by_particle;
-  std::unordered_map<std::uint32_t, std::size_t> star_row_by_particle;
-  std::unordered_map<std::uint32_t, std::size_t> black_hole_row_by_particle;
-  tracer_row_by_particle.reserve(state.tracers.size());
-  star_row_by_particle.reserve(state.star_particles.size());
-  black_hole_row_by_particle.reserve(state.black_holes.size());
-  for (std::size_t star_row = 0; star_row < state.star_particles.size(); ++star_row) {
-    const std::uint32_t particle_index = state.star_particles.particle_index[star_row];
-    if (!star_row_by_particle.emplace(particle_index, star_row).second) {
-      throw std::runtime_error("snapshot writer: duplicate stellar sidecar particle index");
-    }
-  }
-  for (std::size_t tracer_row = 0; tracer_row < state.tracers.size(); ++tracer_row) {
-    const std::uint32_t particle_index = state.tracers.particle_index[tracer_row];
-    if (!tracer_row_by_particle.emplace(particle_index, tracer_row).second) {
-      throw std::runtime_error("snapshot writer: duplicate tracer sidecar particle index");
-    }
-  }
-  for (std::size_t bh_row = 0; bh_row < state.black_holes.size(); ++bh_row) {
-    const std::uint32_t particle_index = state.black_holes.particle_index[bh_row];
-    if (!black_hole_row_by_particle.emplace(particle_index, bh_row).second) {
-      throw std::runtime_error("snapshot writer: duplicate black-hole sidecar particle index");
-    }
-  }
+  const std::uint64_t lookup_bytes = internal::sidecarLookupWorkspaceBytes(
+      state.star_particles.size(), state.tracers.size(), state.black_holes.size());
+  core::GovernedScratchArena sidecar_lookup_arena(
+      payload.memory_governor, core::MemoryClass::kDiagnostic,
+      lookup_bytes, "io.snapshot.sidecar_lookup");
+  internal::SidecarRowLookup star_row_by_particle(
+      state.star_particles.particle_index, sidecar_lookup_arena.resource(), "stellar");
+  internal::SidecarRowLookup tracer_row_by_particle(
+      state.tracers.particle_index, sidecar_lookup_arena.resource(), "tracer");
+  internal::SidecarRowLookup black_hole_row_by_particle(
+      state.black_holes.particle_index, sidecar_lookup_arena.resource(), "black-hole");
 
   std::array<std::uint64_t, 6> count_by_type{};
   std::array<double, 6> mass_table{};
@@ -1505,11 +1494,8 @@ void writeScienceSnapshotHdf5(
           }
 
           if (type_index == 4U) {
-            const auto it = star_row_by_particle.find(static_cast<std::uint32_t>(idx));
-            if (it == star_row_by_particle.end()) {
-              throw std::runtime_error("snapshot writer: star particle lacks authoritative stellar sidecar row");
-            }
-            const std::size_t row = it->second;
+            const std::size_t row = star_row_by_particle.rowFor(
+                static_cast<std::uint32_t>(idx));
             d0[j] = state.star_particles.metallicity_mass_fraction[row];
             d1[j] = state.star_particles.formation_scale_factor[row];
             d2[j] = conversion.massToStored(state.star_particles.birth_mass_code[row]);
@@ -1523,11 +1509,8 @@ void writeScienceSnapshotHdf5(
             d6[j] = conversion.massToStored(state.star_particles.stellar_newly_synthesized_metals_cumulative_code[row]);
             d7[j] = state.star_particles.stellar_feedback_energy_cumulative_erg[row];
           } else if (type_index == 3U) {
-            const auto it = tracer_row_by_particle.find(static_cast<std::uint32_t>(idx));
-            if (it == tracer_row_by_particle.end()) {
-              throw std::runtime_error("snapshot writer: tracer particle lacks authoritative tracer sidecar row");
-            }
-            const std::size_t row = it->second;
+            const std::size_t row = tracer_row_by_particle.rowFor(
+                static_cast<std::uint32_t>(idx));
             u640[j] = state.tracers.parent_particle_id[row];
             u641[j] = state.tracers.injection_step[row];
             u320[j] = state.tracers.host_cell_index[row];
@@ -1535,11 +1518,8 @@ void writeScienceSnapshotHdf5(
             d1[j] = conversion.massToStored(state.tracers.last_host_mass_code[row]);
             d2[j] = conversion.massToStored(state.tracers.cumulative_exchanged_mass_code[row]);
           } else if (type_index == 5U) {
-            const auto it = black_hole_row_by_particle.find(static_cast<std::uint32_t>(idx));
-            if (it == black_hole_row_by_particle.end()) {
-              throw std::runtime_error("snapshot writer: black-hole particle lacks authoritative BH sidecar row");
-            }
-            const std::size_t row = it->second;
+            const std::size_t row = black_hole_row_by_particle.rowFor(
+                static_cast<std::uint32_t>(idx));
             d0[j] = conversion.massToStored(state.black_holes.subgrid_mass_code[row]);
             d1[j] = conversion.starFormationRateCodeToStored(state.black_holes.accretion_rate_code[row]);
             d2[j] = state.black_holes.feedback_energy_code[row];
@@ -1566,7 +1546,7 @@ void writeScienceSnapshotHdf5(
           write_double_extra("CHUI_StellarNewlySynthesizedMetalsCumulative", d6.data(), output_offset, count);
           write_double_extra("CHUI_StellarFeedbackEnergyCumulativeErg", d7.data(), output_offset, count);
           for (std::size_t j = 0; j < count; ++j) {
-            const std::size_t row = star_row_by_particle.at(particle_indices[j]);
+            const std::size_t row = star_row_by_particle.rowFor(particle_indices[j]);
             d0[j] = conversion.massToStored(state.star_particles.stellar_deposited_mass_cumulative_code[row]);
             d1[j] = conversion.massToStored(state.star_particles.stellar_deposited_metals_cumulative_code[row]);
             d2[j] = state.star_particles.stellar_deposited_feedback_energy_cumulative_erg[row];

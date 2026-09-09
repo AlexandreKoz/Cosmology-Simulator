@@ -2,12 +2,14 @@
 
 #include "cosmosim/amr/amr_patch_indexing.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/governed_scratch_arena.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <memory_resource>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -1417,8 +1419,33 @@ namespace {
   }
   diagnostics.patch_count = all_descriptors.size();
 
-  std::unordered_set<std::uint32_t> active_lookup(active_cell_rows.begin(), active_cell_rows.end());
   const bool all_cells_active = active_cell_rows.empty();
+  // Sparse active membership is a sorted, phase-local index rather than a
+  // population-scale collection of hash nodes. Keep the original input and
+  // patch iteration order unchanged; only membership lookup is transformed.
+  const std::uint64_t active_lookup_bytes = all_cells_active ? 0U :
+      core::checkedMemoryBytesAdd(
+          core::checkedIntegralNarrow<std::uint64_t>(
+              core::checkedSizeMultiply(active_cell_rows.size(), sizeof(std::uint32_t),
+                                        "AMR active lookup bytes"),
+              "AMR active lookup byte width"),
+          256U, "AMR active lookup alignment");
+  core::GovernedScratchArena active_lookup_arena(
+      options.regrid_memory_governor, core::MemoryClass::kScratchArena,
+      active_lookup_bytes, "amr.active_cell_lookup");
+  std::pmr::vector<std::uint32_t> active_lookup(active_lookup_arena.resource());
+  if (!all_cells_active) {
+    active_lookup.assign(active_cell_rows.begin(), active_cell_rows.end());
+    std::sort(active_lookup.begin(), active_lookup.end());
+    active_lookup.erase(std::unique(active_lookup.begin(), active_lookup.end()),
+                        active_lookup.end());
+    if (!active_lookup.empty() && active_lookup.back() >= state.cells.size()) {
+      throw std::out_of_range("AMR active cell row exceeds canonical cell extent");
+    }
+  }
+  const auto isActiveCell = [&active_lookup](std::uint32_t row) {
+    return std::binary_search(active_lookup.begin(), active_lookup.end(), row);
+  };
 
   std::vector<AmrHydroPatchGeometry> geometries;
   geometries.reserve(descriptors.size());
@@ -1478,8 +1505,8 @@ namespace {
     return all_cells_active || std::any_of(
         geometries[patch_index].real_cells.begin(),
         geometries[patch_index].real_cells.end(),
-        [&active_lookup](const AmrHydroCellDescriptor& cell) {
-          return active_lookup.contains(cell.local_cell_row);
+        [&isActiveCell](const AmrHydroCellDescriptor& cell) {
+          return isActiveCell(cell.local_cell_row);
         });
   };
   const auto addGhostDiagnostics = [](AmrHydroGhostFillDiagnostics& target,
@@ -1612,7 +1639,7 @@ namespace {
     std::vector<std::size_t> active_patch_cells;
     active_patch_cells.reserve(patch_geometry.real_cells.size());
     for (const AmrHydroCellDescriptor& cell : patch_geometry.real_cells) {
-      if (all_cells_active || active_lookup.contains(cell.local_cell_row)) {
+      if (all_cells_active || isActiveCell(cell.local_cell_row)) {
         active_patch_cells.push_back(cell.patch_local_cell);
       }
     }
@@ -1629,12 +1656,20 @@ namespace {
           patch_geometry.geometry.ghost_cells[ghost_slot].ghost_cell,
           prepared_ghost_states[patch_index][ghost_slot]);
     }
-    std::unordered_set<std::size_t> patch_active_lookup(active_patch_cells.begin(), active_patch_cells.end());
+    // buildAmrHydroPatchGeometry emits real cells in increasing patch-local
+    // order. This checked invariant permits allocation-free membership queries
+    // without reordering the active set passed to the numerical solver.
+    if (!std::is_sorted(active_patch_cells.begin(), active_patch_cells.end())) {
+      throw std::logic_error("AMR patch-local active cells are not ordered");
+    }
+    const auto patchCellActive = [&active_patch_cells](std::size_t row) {
+      return std::binary_search(active_patch_cells.begin(), active_patch_cells.end(), row);
+    };
     std::vector<std::size_t> active_faces;
     for (std::size_t face_index = 0; face_index < patch_geometry.geometry.faces.size(); ++face_index) {
       const hydro::HydroFace& face = patch_geometry.geometry.faces[face_index];
-      if (patch_active_lookup.contains(face.owner_cell) ||
-          (face.neighbor_cell < patch_geometry.geometry.cellCount() && patch_active_lookup.contains(face.neighbor_cell))) {
+      if (patchCellActive(face.owner_cell) ||
+          (face.neighbor_cell < patch_geometry.geometry.cellCount() && patchCellActive(face.neighbor_cell))) {
         active_faces.push_back(face_index);
       }
     }

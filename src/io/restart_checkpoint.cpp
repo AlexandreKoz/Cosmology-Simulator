@@ -1917,11 +1917,12 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
     writeScalarU32Attribute(module_group.get(), "requirement_species_mask", block->requirement.species_mask);
     writeScalarU32Attribute(module_group.get(), "requirement_particle_flags_mask", block->requirement.particle_flags_mask);
     writeScalarF64Attribute(module_group.get(), "requirement_threshold_code", block->requirement.threshold_code);
-    std::vector<std::uint8_t> payload(block->payload.size());
-    for (std::size_t i = 0; i < block->payload.size(); ++i) {
-      payload[i] = std::to_integer<std::uint8_t>(block->payload[i]);
-    }
-    writeDataset1d(module_group.get(), "payload", H5T_STD_U8LE, H5T_NATIVE_UINT8, payload);
+    // std::byte and uint8_t are both one-byte object representations. Write
+    // the canonical payload directly; a second full sidecar is unnecessary.
+    writeDataset1d(module_group.get(), "payload", H5T_STD_U8LE, H5T_NATIVE_UINT8,
+                   std::span<const std::uint8_t>(
+                       reinterpret_cast<const std::uint8_t*>(block->payload.data()),
+                       block->payload.size()));
     if (block->isParticleIndexed()) {
       writeDataset1d(
           module_group.get(),
