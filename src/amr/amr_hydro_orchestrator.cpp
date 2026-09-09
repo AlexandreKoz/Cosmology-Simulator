@@ -930,29 +930,63 @@ void populateAmrHydroFluxRegisterFaces(
   }
 }
 
-void scatterAmrHydroConservedState(
+namespace {
+// A single sorted mirror index replaces the two population-scale hash maps
+// previously rebuilt for every patch scatter. Duplicate-parent semantics are
+// preserved: only a parent referenced by exactly one gas cell is mirrored.
+struct AmrParentMirrorIndex {
+  using Row = std::pair<std::uint64_t, std::uint32_t>;
+  std::pmr::vector<Row> rows;
+  std::pmr::vector<std::uint64_t> parent_ids;
+
+  explicit AmrParentMirrorIndex(std::pmr::memory_resource* resource)
+      : rows(resource), parent_ids(resource) {}
+
+  [[nodiscard]] static std::uint64_t workspaceBytes(const core::SimulationState& state) {
+    return core::checkedMemoryBytesAdd(
+        static_cast<std::uint64_t>(core::checkedSizeMultiply(
+            state.particles.size(), sizeof(Row), "AMR parent mirror rows")),
+        core::checkedMemoryBytesAdd(
+            static_cast<std::uint64_t>(core::checkedSizeMultiply(
+                state.gas_cell_identity.records().size(), sizeof(std::uint64_t),
+                "AMR parent mirror references")),
+            256U, "AMR parent mirror alignment"), "AMR parent mirror workspace");
+  }
+
+  void build(const core::SimulationState& state) {
+    rows.reserve(state.particles.size());
+    parent_ids.reserve(state.gas_cell_identity.records().size());
+    for (std::uint32_t row = 0; row < state.particles.size(); ++row) {
+      rows.emplace_back(state.particle_sidecar.particle_id[row], row);
+    }
+    std::sort(rows.begin(), rows.end());
+    for (const auto& record : state.gas_cell_identity.records()) {
+      if (record.parent_particle_id.has_value()) parent_ids.push_back(*record.parent_particle_id);
+    }
+    std::sort(parent_ids.begin(), parent_ids.end());
+  }
+
+  [[nodiscard]] std::optional<std::uint32_t> uniqueParentRow(std::uint64_t id) const {
+    const auto refs = std::equal_range(parent_ids.begin(), parent_ids.end(), id);
+    if (refs.second - refs.first != 1) return std::nullopt;
+    const auto it = std::lower_bound(rows.begin(), rows.end(), Row{id, 0U});
+    if (it == rows.end() || it->first != id) return std::nullopt;
+    return it->second;
+  }
+};
+
+void scatterAmrHydroConservedStateWithIndex(
     core::SimulationState& state,
     const AmrHydroPatchGeometry& patch_geometry,
     const hydro::HydroConservedStateSoa& conserved,
-    double adiabatic_index) {
+    double adiabatic_index,
+    const AmrParentMirrorIndex& parent_index) {
   state.requireGasCellIdentityMapFresh(
       patch_geometry.source_gas_cell_identity_generation,
       "scatterAmrHydroConservedState");
   if (conserved.size() < patch_geometry.geometry.cellCount()) {
     throw std::invalid_argument("scatterAmrHydroConservedState: conserved storage lacks real AMR cells");
   }
-  std::unordered_map<std::uint64_t, std::uint32_t> parent_row_by_id;
-  parent_row_by_id.reserve(state.particles.size());
-  for (std::uint32_t row = 0; row < state.particles.size(); ++row) {
-    parent_row_by_id.emplace(state.particle_sidecar.particle_id[row], row);
-  }
-  std::unordered_map<std::uint64_t, std::size_t> parent_use_count;
-  for (const auto& record : state.gas_cell_identity.records()) {
-    if (record.parent_particle_id.has_value()) {
-      parent_use_count[*record.parent_particle_id] += 1U;
-    }
-  }
-
   for (std::size_t patch_cell = 0; patch_cell < patch_geometry.real_cells.size(); ++patch_cell) {
     const AmrHydroCellDescriptor& cell = patch_geometry.real_cells[patch_cell];
     const auto row = state.rowForGasCellId(cell.gas_cell_id);
@@ -976,17 +1010,31 @@ void scatterAmrHydroConservedState(
         std::clamp(primitive.metallicity_mass_fraction, 0.0, 1.0) * state.cells.mass_code[*row];
 
     const auto parent_id = state.parentParticleIdForGasCellId(cell.gas_cell_id);
-    if (parent_id.has_value() && parent_use_count[*parent_id] == 1U) {
-      const auto parent_it = parent_row_by_id.find(*parent_id);
-      if (parent_it != parent_row_by_id.end()) {
-        const std::uint32_t parent_row = parent_it->second;
-        state.particles.mass_code[parent_row] = state.cells.mass_code[*row];
-        state.particles.velocity_x_peculiar[parent_row] = primitive.vel_x_peculiar;
-        state.particles.velocity_y_peculiar[parent_row] = primitive.vel_y_peculiar;
-        state.particles.velocity_z_peculiar[parent_row] = primitive.vel_z_peculiar;
+    if (parent_id.has_value()) {
+      if (const auto parent_row = parent_index.uniqueParentRow(*parent_id);
+          parent_row.has_value()) {
+        state.particles.mass_code[*parent_row] = state.cells.mass_code[*row];
+        state.particles.velocity_x_peculiar[*parent_row] = primitive.vel_x_peculiar;
+        state.particles.velocity_y_peculiar[*parent_row] = primitive.vel_y_peculiar;
+        state.particles.velocity_z_peculiar[*parent_row] = primitive.vel_z_peculiar;
       }
     }
   }
+}
+
+}  // namespace
+
+void scatterAmrHydroConservedState(
+    core::SimulationState& state,
+    const AmrHydroPatchGeometry& patch_geometry,
+    const hydro::HydroConservedStateSoa& conserved,
+    double adiabatic_index) {
+  core::GovernedScratchArena arena(nullptr, core::MemoryClass::kScratchArena,
+      AmrParentMirrorIndex::workspaceBytes(state), "amr.parent_mirror.compatibility");
+  AmrParentMirrorIndex index(arena.resource());
+  index.build(state);
+  scatterAmrHydroConservedStateWithIndex(state, patch_geometry, conserved,
+      adiabatic_index, index);
 }
 
 RefluxDiagnostics applyFluxRegistersToSimulationState(
@@ -1407,6 +1455,79 @@ RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
 
 namespace {
 
+// The synchronized sweep owns one reusable target SoA, seven local-source
+// lanes, active indexes and the complete sparse solver scratch. Admission and
+// physical preparation finish before the first canonical cell update. This
+// owner excludes geometry, prepared ghosts and flux-register storage, which
+// have independent leases. No governor operations occur inside numerical loops.
+struct AmrSynchronizedSweepWorkspace {
+  core::MemoryReservation reservation;
+  hydro::HydroConservedStateSoa conserved;
+  std::array<std::vector<double>, 7> source_fields;
+  std::vector<std::size_t> active_cells;
+  std::vector<std::size_t> active_faces;
+  hydro::HydroScratchBuffers scratch;
+  std::uint64_t actual_capacity_bytes = 0U;
+
+  explicit AmrSynchronizedSweepWorkspace(
+      std::span<const AmrHydroPatchGeometry> geometries,
+      const ProductionAmrHydroOptions& options) {
+    std::size_t max_real = 0U;
+    std::size_t max_total = 0U;
+    std::size_t max_faces = 0U;
+    for (const auto& geometry : geometries) {
+      max_real = std::max(max_real, geometry.geometry.cellCount());
+      max_total = std::max(max_total, geometry.geometry.totalCellStorageCount());
+      max_faces = std::max(max_faces, geometry.geometry.faces.size());
+    }
+    const auto bytes = [](std::size_t count, std::size_t width) {
+      return static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          count, width, "AMR synchronized sweep workspace"));
+    };
+    std::uint64_t bound = bytes(max_total, 13U * sizeof(double));
+    bound = core::checkedMemoryBytesAdd(bound,
+        bytes(max_real, sizeof(std::size_t)), "AMR active cells");
+    bound = core::checkedMemoryBytesAdd(bound,
+        bytes(max_faces, sizeof(std::size_t)), "AMR active faces");
+    bound = core::checkedMemoryBytesAdd(bound,
+        hydro::HydroScratchBuffers::workspaceBytes(max_real, max_faces,
+            max_real, max_total, options.active_batch_policy), "AMR solver scratch");
+    if (options.regrid_memory_governor != nullptr) {
+      reservation = options.regrid_memory_governor->reserve(
+          core::MemoryClass::kPhaseResident, bound, "amr.synchronized_sweep.workspace");
+    }
+    conserved.resize(max_total);
+    for (auto& field : source_fields) {
+      field.reserve(max_total);
+      if (field.capacity() != max_total) {
+        throw std::length_error("AMR source field exceeded admitted capacity");
+      }
+    }
+    active_cells.reserve(max_real);
+    active_faces.reserve(max_faces);
+    if (active_cells.capacity() != max_real || active_faces.capacity() != max_faces) {
+      throw std::length_error("AMR active index exceeded admitted capacity");
+    }
+    (void)scratch.prepareForActiveSet(max_real, max_faces, max_real, max_total,
+                                     options.active_batch_policy);
+    actual_capacity_bytes = conserved.ownedCapacityBytes();
+    for (const auto& field : source_fields) {
+      actual_capacity_bytes = core::checkedMemoryBytesAdd(actual_capacity_bytes,
+          bytes(field.capacity(), sizeof(double)), "AMR source physical capacity");
+    }
+    actual_capacity_bytes = core::checkedMemoryBytesAdd(actual_capacity_bytes,
+        bytes(active_cells.capacity(), sizeof(std::size_t)), "AMR active physical capacity");
+    actual_capacity_bytes = core::checkedMemoryBytesAdd(actual_capacity_bytes,
+        bytes(active_faces.capacity(), sizeof(std::size_t)), "AMR active physical capacity");
+    actual_capacity_bytes = core::checkedMemoryBytesAdd(actual_capacity_bytes,
+        scratch.ownedCapacityBytes(), "AMR solver physical capacity");
+    if (actual_capacity_bytes > bound) {
+      throw std::length_error("AMR synchronized workspace exceeds admitted physical bound");
+    }
+    if (reservation.pending()) reservation.commit();
+  }
+};
+
 [[nodiscard]] ProductionAmrHydroDiagnostics advanceProductionAmrHydroSynchronizedImpl(
     core::SimulationState& state,
     std::span<const std::uint32_t> active_cell_rows,
@@ -1625,52 +1746,103 @@ namespace {
     if (!patchRequiresGhostFill(patch_index)) {
       continue;
     }
-    hydro::HydroConservedStateSoa target_state = loadAmrHydroConservedState(
-        state, geometries[patch_index], options.adiabatic_index);
-    const std::uint64_t target_bytes = static_cast<std::uint64_t>(target_state.size()) *
-        static_cast<std::uint64_t>(6U * sizeof(double));
-    diagnostics.max_patch_conserved_bytes = std::max(
-        diagnostics.max_patch_conserved_bytes, target_bytes);
-
-    std::vector<std::size_t> local_source_indices;
-    for (std::size_t source_index = 0; source_index < geometries.size(); ++source_index) {
-      if (source_index == patch_index) {
-        continue;
-      }
+    const auto touchesTarget = [&](std::size_t source_index) {
+      if (source_index == patch_index) return false;
       bool touches = false;
       for (const hydro::HydroFaceAxis axis : {
                hydro::HydroFaceAxis::kX,
                hydro::HydroFaceAxis::kY,
                hydro::HydroFaceAxis::kZ}) {
         touches = touches || touchesOnSide(
-            geometries[patch_index].patch,
-            geometries[source_index].patch,
-            axis,
-            hydro::HydroFaceSide::kLower);
+            geometries[patch_index].patch, geometries[source_index].patch,
+            axis, hydro::HydroFaceSide::kLower);
         touches = touches || touchesOnSide(
-            geometries[patch_index].patch,
-            geometries[source_index].patch,
-            axis,
-            hydro::HydroFaceSide::kUpper);
+            geometries[patch_index].patch, geometries[source_index].patch,
+            axis, hydro::HydroFaceSide::kUpper);
       }
-      if (touches) {
-        local_source_indices.push_back(source_index);
+      return touches;
+    };
+    std::size_t source_count = 0U;
+    std::size_t source_cells = 0U;
+    for (std::size_t source_index = 0; source_index < geometries.size(); ++source_index) {
+      if (touchesTarget(source_index)) {
+        source_count = core::checkedSizeAdd(source_count, 1U, "AMR ghost source count");
+        source_cells = core::checkedSizeAdd(source_cells,
+            geometries[source_index].geometry.totalCellStorageCount(),
+            "AMR ghost source storage");
       }
+    }
+    const std::size_t target_cells =
+        geometries[patch_index].geometry.totalCellStorageCount();
+    const auto ghostBytes = [](std::size_t count, std::size_t width) {
+      return static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          count, width, "AMR ghost preparation physical capacity"));
+    };
+    std::uint64_t ghost_preparation_bound = ghostBytes(
+        core::checkedSizeAdd(target_cells, source_cells, "AMR ghost preparation cells"),
+        6U * sizeof(double));
+    ghost_preparation_bound = core::checkedMemoryBytesAdd(
+        ghost_preparation_bound, ghostBytes(source_count, sizeof(std::size_t)),
+        "AMR ghost source indices");
+    ghost_preparation_bound = core::checkedMemoryBytesAdd(
+        ghost_preparation_bound, ghostBytes(source_count, sizeof(hydro::HydroConservedStateSoa)),
+        "AMR ghost source objects");
+    ghost_preparation_bound = core::checkedMemoryBytesAdd(
+        ghost_preparation_bound, ghostBytes(core::checkedSizeAdd(source_count, 1U,
+            "AMR ghost view count"), sizeof(AmrHydroGhostFillPatch)),
+        "AMR ghost preparation views");
+    // This lease includes the target, all simultaneously live local source
+    // SoAs and their descriptor/index capacities. It excludes the already
+    // governed immutable shell and the ghost-selection scratch's own lease.
+    // The lease is declared before every owned container, so failure releases
+    // it only after the partially constructed physical storage is destroyed.
+    core::MemoryReservation ghost_preparation_reservation;
+    if (options.regrid_memory_governor != nullptr) {
+      ghost_preparation_reservation = options.regrid_memory_governor->reserve(
+          core::MemoryClass::kPhaseResident, ghost_preparation_bound,
+          "amr.ghosts.local_source_preparation");
+      ghost_preparation_reservation.commit();
+    }
+    hydro::HydroConservedStateSoa target_state = loadAmrHydroConservedState(
+        state, geometries[patch_index], options.adiabatic_index);
+    const std::uint64_t target_bytes = target_state.ownedCapacityBytes();
+    diagnostics.max_patch_conserved_bytes = std::max(
+        diagnostics.max_patch_conserved_bytes, target_bytes);
+    if (target_bytes > ghostBytes(target_cells, 6U * sizeof(double))) {
+      throw std::length_error("AMR ghost target exceeds admitted physical capacity");
+    }
+    std::vector<std::size_t> local_source_indices;
+    local_source_indices.reserve(source_count);
+    for (std::size_t source_index = 0; source_index < geometries.size(); ++source_index) {
+      if (touchesTarget(source_index)) local_source_indices.push_back(source_index);
+    }
+    if (local_source_indices.capacity() != source_count ||
+        local_source_indices.size() != source_count) {
+      throw std::length_error("AMR ghost source index exceeds admitted capacity");
     }
 
     std::vector<hydro::HydroConservedStateSoa> local_source_states;
-    local_source_states.reserve(local_source_indices.size());
+    local_source_states.reserve(source_count);
+    if (local_source_states.capacity() != source_count) {
+      throw std::length_error("AMR ghost source object capacity exceeds admission");
+    }
     for (const std::size_t source_index : local_source_indices) {
       local_source_states.push_back(loadAmrHydroConservedState(
           state, geometries[source_index], options.adiabatic_index));
-      const std::uint64_t source_bytes = static_cast<std::uint64_t>(
-          local_source_states.back().size()) * static_cast<std::uint64_t>(6U * sizeof(double));
+      const std::uint64_t source_bytes = local_source_states.back().ownedCapacityBytes();
+      if (source_bytes > ghostBytes(
+              geometries[source_index].geometry.totalCellStorageCount(), 6U * sizeof(double))) {
+        throw std::length_error("AMR ghost source exceeds admitted physical capacity");
+      }
       diagnostics.max_patch_conserved_bytes = std::max(
           diagnostics.max_patch_conserved_bytes, source_bytes);
     }
 
     std::vector<AmrHydroGhostFillPatch> ghost_views;
-    ghost_views.reserve(1U + local_source_indices.size());
+    ghost_views.reserve(core::checkedSizeAdd(source_count, 1U, "AMR ghost view capacity"));
+    if (ghost_views.capacity() != source_count + 1U) {
+      throw std::length_error("AMR ghost view capacity exceeds admission");
+    }
     ghost_views.push_back(AmrHydroGhostFillPatch{
         .geometry = &geometries[patch_index],
         .conserved = &target_state,
@@ -1703,7 +1875,8 @@ namespace {
     }
     addGhostDiagnostics(
         diagnostics.ghost_fill,
-        fillAmrHydroGhostCells(ghost_views, remote_sources, options.adiabatic_index));
+        fillAmrHydroGhostCells(ghost_views, remote_sources, options.adiabatic_index,
+                               options.regrid_memory_governor));
 
     const std::size_t prepared_begin = prepared_ghost_offsets[patch_index];
     std::size_t ghost_slot = 0U;
@@ -1754,9 +1927,16 @@ namespace {
     keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
     flux_registers.prepareFixedKeys(keys);
   }
+  AmrSynchronizedSweepWorkspace sweep_workspace(geometries, options);
+  core::GovernedScratchArena parent_mirror_arena(
+      options.regrid_memory_governor, core::MemoryClass::kScratchArena,
+      AmrParentMirrorIndex::workspaceBytes(state), "amr.parent_mirror.index");
+  AmrParentMirrorIndex parent_mirror_index(parent_mirror_arena.resource());
+  parent_mirror_index.build(state);
   for (std::size_t patch_index = 0; patch_index < geometries.size(); ++patch_index) {
     const AmrHydroPatchGeometry& patch_geometry = geometries[patch_index];
-    std::vector<std::size_t> active_patch_cells;
+    auto& active_patch_cells = sweep_workspace.active_cells;
+    active_patch_cells.clear();
     active_patch_cells.reserve(patch_geometry.real_cells.size());
     for (const AmrHydroCellDescriptor& cell : patch_geometry.real_cells) {
       if (all_cells_active || isActiveCell(cell.local_cell_row)) {
@@ -1766,8 +1946,9 @@ namespace {
     if (active_patch_cells.empty()) {
       continue;
     }
-    hydro::HydroConservedStateSoa conserved_state = loadAmrHydroConservedState(
-        state, patch_geometry, options.adiabatic_index);
+    auto& conserved_state = sweep_workspace.conserved;
+    loadAmrHydroConservedStateInto(state, patch_geometry,
+                                  options.adiabatic_index, conserved_state);
     const std::size_t prepared_begin = prepared_ghost_offsets[patch_index];
     if (prepared_ghost_offsets[patch_index + 1U] - prepared_begin !=
         patch_geometry.geometry.ghost_cells.size()) {
@@ -1787,7 +1968,8 @@ namespace {
     const auto patchCellActive = [&active_patch_cells](std::size_t row) {
       return std::binary_search(active_patch_cells.begin(), active_patch_cells.end(), row);
     };
-    std::vector<std::size_t> active_faces;
+    auto& active_faces = sweep_workspace.active_faces;
+    active_faces.clear();
     for (std::size_t face_index = 0; face_index < patch_geometry.geometry.faces.size(); ++face_index) {
       const hydro::HydroFace& face = patch_geometry.geometry.faces[face_index];
       if (patchCellActive(face.owner_cell) ||
@@ -1796,13 +1978,20 @@ namespace {
       }
     }
 
-    std::vector<double> gravity_x(conserved_state.size(), 0.0);
-    std::vector<double> gravity_y(conserved_state.size(), 0.0);
-    std::vector<double> gravity_z(conserved_state.size(), 0.0);
-    std::vector<double> mass_density_physical_cgs(conserved_state.size(), 0.0);
-    std::vector<double> hydrogen(conserved_state.size(), 0.0);
-    std::vector<double> metallicity(conserved_state.size(), 0.0);
-    std::vector<double> temperature(conserved_state.size(), 0.0);
+    auto& gravity_x = sweep_workspace.source_fields[0];
+    gravity_x.assign(conserved_state.size(), 0.0);
+    auto& gravity_y = sweep_workspace.source_fields[1];
+    gravity_y.assign(conserved_state.size(), 0.0);
+    auto& gravity_z = sweep_workspace.source_fields[2];
+    gravity_z.assign(conserved_state.size(), 0.0);
+    auto& mass_density_physical_cgs = sweep_workspace.source_fields[3];
+    mass_density_physical_cgs.assign(conserved_state.size(), 0.0);
+    auto& hydrogen = sweep_workspace.source_fields[4];
+    hydrogen.assign(conserved_state.size(), 0.0);
+    auto& metallicity = sweep_workspace.source_fields[5];
+    metallicity.assign(conserved_state.size(), 0.0);
+    auto& temperature = sweep_workspace.source_fields[6];
+    temperature.assign(conserved_state.size(), 0.0);
     constexpr double k_hydrogen_mass_fraction = 0.76;
     constexpr double k_proton_mass_g = 1.67262192369e-24;
     for (std::size_t local_cell = 0; local_cell < patch_geometry.real_cells.size(); ++local_cell) {
@@ -1868,7 +2057,8 @@ namespace {
         .pressure_floor = options.pressure_floor,
         .enable_muscl_hancock_predictor = true,
         .adiabatic_index = options.adiabatic_index});
-    hydro::HydroScratchBuffers scratch;
+    auto& scratch = sweep_workspace.scratch;
+    const std::uint64_t scratch_capacity_before = scratch.ownedCapacityBytes();
     hydro::HydroProfileEvent profile;
     solver.advancePatchActiveSetBatchedWithScratch(
         conserved_state,
@@ -1884,8 +2074,19 @@ namespace {
         options.active_batch_policy,
         &profile,
         &flux_registers);
-    scatterAmrHydroConservedState(
-        state, patch_geometry, conserved_state, options.adiabatic_index);
+    if (scratch.ownedCapacityBytes() != scratch_capacity_before) {
+      throw std::logic_error("AMR solver scratch grew after physical admission: before=" +
+          std::to_string(scratch_capacity_before) + " after=" +
+          std::to_string(scratch.ownedCapacityBytes()) + " touched=" +
+          std::to_string(scratch.touched_cells.capacity()) + " delta=" +
+          std::to_string(scratch.cell_delta.capacity()) + " full=" +
+          std::to_string(scratch.full_active_cells.capacity()) + " stencil=" +
+          std::to_string(scratch.primitive_stencil_cells.capacity()) + " faces=" +
+          std::to_string(active_faces.size()));
+    }
+    scatterAmrHydroConservedStateWithIndex(
+        state, patch_geometry, conserved_state, options.adiabatic_index,
+        parent_mirror_index);
     diagnostics.advanced_patch_count += 1U;
     diagnostics.active_cell_count += active_patch_cells.size();
     diagnostics.active_face_count += active_faces.size();

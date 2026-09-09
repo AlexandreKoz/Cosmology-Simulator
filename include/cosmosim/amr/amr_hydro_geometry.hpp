@@ -126,6 +126,14 @@ struct AmrHydroGeometryCapacity {
     const AmrHydroGeometryOptions& options = {},
     std::span<const std::uint8_t> available_real_cells = {});
 
+// Refill an already admitted SoA. Production reuses one allocation across
+// patches; the original returning overload remains for standalone callers.
+void loadAmrHydroConservedStateInto(
+    const core::SimulationState& state,
+    const AmrHydroPatchGeometry& patch_geometry,
+    double adiabatic_index,
+    hydro::HydroConservedStateSoa& conserved);
+
 [[nodiscard]] hydro::HydroConservedStateSoa loadAmrHydroConservedState(
     const core::SimulationState& state,
     const AmrHydroPatchGeometry& patch_geometry,

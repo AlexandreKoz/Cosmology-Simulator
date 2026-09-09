@@ -1,4 +1,6 @@
 #include "cosmosim/hydro/hydro_core_solver.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -631,6 +633,96 @@ HydroCoreSolver::HydroCoreSolver(double adiabatic_index) : m_adiabatic_index(adi
 }
 
 double HydroCoreSolver::adiabaticIndex() const { return m_adiabatic_index; }
+
+namespace {
+struct HydroScratchCapacityPlan {
+  std::size_t touched_staging = 0;
+  std::size_t touched_unique = 0;
+  std::size_t source_active = 0;
+  std::size_t full_active = 0;
+  std::size_t face_batch = 0;
+  std::size_t stencil_staging = 0;
+  std::size_t stencil_unique = 0;
+};
+
+[[nodiscard]] HydroScratchCapacityPlan planHydroScratch(
+    std::size_t active_cells, std::size_t active_faces,
+    std::size_t real_cells, std::size_t total_cells,
+    const HydroActiveBatchPolicy& policy) {
+  if (real_cells > total_cells || active_cells > real_cells) {
+    throw std::invalid_argument("hydro scratch extent is inconsistent with geometry");
+  }
+  // The solver appends raw face incidences before sorting/deduplicating.
+  // Reserve their raw cardinality, not the smaller unique-cell cardinality.
+  const std::size_t touched = core::checkedSizeAdd(
+      active_cells, core::checkedSizeMultiply(active_faces, 2U,
+          "hydro touched-cell bound"), "hydro touched-cell bound");
+  const std::size_t face_batch = hydroFaceBatchLimit(policy, active_faces);
+  const std::size_t stencil = core::checkedSizeMultiply(face_batch, 4U,
+      "hydro primitive stencil bound");
+  return {touched, std::min(total_cells, touched), active_cells,
+      std::min(total_cells, touched), face_batch, stencil,
+      std::min(total_cells, stencil)};
+}
+
+template <typename T>
+void reserveHydroVector(std::vector<T>& values, std::size_t count) {
+  if (count > values.max_size()) throw std::length_error("hydro scratch capacity exceeds max_size");
+  if (count > values.capacity()) {
+    values.reserve(count);
+    if (values.capacity() > count) {
+      throw std::length_error("hydro scratch allocator exceeded admitted capacity");
+    }
+  }
+}
+
+[[nodiscard]] std::uint64_t scratchPlanBytes(const HydroScratchCapacityPlan& plan) {
+  std::uint64_t bytes = 0U;
+  const auto add = [&bytes](std::size_t count, std::size_t width) {
+    bytes = core::checkedMemoryBytesAdd(bytes,
+        static_cast<std::uint64_t>(core::checkedSizeMultiply(count, width,
+            "hydro scratch physical bound")), "hydro scratch physical bound");
+  };
+  add(plan.touched_unique, sizeof(HydroConservedState));
+  add(plan.face_batch, 2U * sizeof(HydroPrimitiveState) + sizeof(HydroConservedState));
+  add(plan.touched_staging, sizeof(std::size_t));
+  add(plan.source_active, sizeof(std::size_t));
+  add(plan.stencil_staging, sizeof(std::size_t));
+  add(plan.stencil_staging, sizeof(HydroPrimitiveState));
+  add(plan.full_active, sizeof(std::size_t));
+  return bytes;
+}
+}  // namespace
+
+std::uint64_t HydroScratchBuffers::workspaceBytes(
+    std::size_t active_cell_count, std::size_t active_face_count,
+    std::size_t real_cell_count, std::size_t total_cell_count,
+    const HydroActiveBatchPolicy& batch_policy) {
+  return scratchPlanBytes(planHydroScratch(active_cell_count, active_face_count,
+      real_cell_count, total_cell_count, batch_policy));
+}
+
+std::uint64_t HydroScratchBuffers::prepareForActiveSet(
+    std::size_t active_cell_count, std::size_t active_face_count,
+    std::size_t real_cell_count, std::size_t total_cell_count,
+    const HydroActiveBatchPolicy& batch_policy) {
+  const auto plan = planHydroScratch(active_cell_count, active_face_count,
+      real_cell_count, total_cell_count, batch_policy);
+  reserveHydroVector(cell_delta, plan.touched_unique);
+  reserveHydroVector(left_states, plan.face_batch);
+  reserveHydroVector(right_states, plan.face_batch);
+  reserveHydroVector(fluxes, plan.face_batch);
+  reserveHydroVector(touched_cells, plan.touched_staging);
+  reserveHydroVector(source_active_cells, plan.source_active);
+  reserveHydroVector(primitive_stencil_cells, plan.stencil_staging);
+  reserveHydroVector(primitive_stencil_states, plan.stencil_staging);
+  reserveHydroVector(full_active_cells, plan.full_active);
+  // full_active_faces is a compatibility lane unused by the sparse solver.
+  // Its pre-existing capacity is still included in ownedCapacityBytes().
+  const std::uint64_t actual = ownedCapacityBytes();
+  high_water.capacity_bytes = std::max(high_water.capacity_bytes, actual);
+  return actual;
+}
 
 void HydroScratchBuffers::resizeFaceBatch(
     std::size_t active_cell_batch_count,

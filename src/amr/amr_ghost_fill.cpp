@@ -6,6 +6,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory_resource>
+
+#include "cosmosim/core/governed_scratch_arena.hpp"
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -28,7 +31,8 @@ struct SelectedSourceCell {
 };
 
 struct CellSelection {
-  std::vector<SelectedSourceCell> cells;
+  std::pmr::vector<SelectedSourceCell> cells;
+  explicit CellSelection(std::pmr::memory_resource* resource) : cells(resource) {}
 };
 
 [[nodiscard]] const PatchDescriptor& sourcePatch(const SelectedSourceCell& source) {
@@ -204,12 +208,13 @@ struct CellSelection {
   return bounds;
 }
 
-[[nodiscard]] std::vector<std::size_t> fineSourceCellsIntersectingGhost(
+template <class TVisit>
+void forEachFineSourceCellIntersectingGhost(
     const PatchDescriptor& target_patch,
     const hydro::HydroGhostCell& ghost,
-    const PatchDescriptor& source_patch) {
+    const PatchDescriptor& source_patch, TVisit&& visit) {
   if (source_patch.level <= target_patch.level) {
-    return {};
+    return;
   }
   const auto bounds = ghostCellBounds(target_patch, ghost);
   const auto source_widths = patchCellWidths(source_patch);
@@ -222,7 +227,7 @@ struct CellSelection {
     const double upper = std::min(bounds[1][axis], source_upper);
     const double scale = std::max({1.0, std::abs(lower), std::abs(upper)});
     if (upper - lower <= k_geometry_tol * scale) {
-      return {};
+      return;
     }
     const std::size_t dim = source_patch.cell_dims[axis];
     begin[axis] = alignedGhostBoundaryIndex(
@@ -230,25 +235,22 @@ struct CellSelection {
     end[axis] = alignedGhostBoundaryIndex(
         upper, source_lower, source_widths[axis], dim, true);
     if (end[axis] <= begin[axis]) {
-      return {};
+      return;
     }
   }
 
   const std::size_t nx = source_patch.cell_dims[0];
   const std::size_t ny = source_patch.cell_dims[1];
-  const std::size_t expected_count = core::checkedSizeProduct3(
+  (void)core::checkedSizeProduct3(
       end[0] - begin[0], end[1] - begin[1], end[2] - begin[2],
       "fillAmrHydroGhostCells fine-source patch intersection count");
-  std::vector<std::size_t> cells;
-  cells.reserve(expected_count);
   for (std::size_t k = begin[2]; k < end[2]; ++k) {
     for (std::size_t j = begin[1]; j < end[1]; ++j) {
       for (std::size_t i = begin[0]; i < end[0]; ++i) {
-        cells.push_back(i + nx * (j + ny * k));
+        visit(i + nx * (j + ny * k));
       }
     }
   }
-  return cells;
 }
 
 void validateAndOrderFineSourceCoverage(
@@ -285,7 +287,6 @@ void validateAndOrderFineSourceCoverage(
   const std::size_t expected_count = core::checkedSizeProduct3(
       refinement_ratio[0], refinement_ratio[1], refinement_ratio[2],
       "fillAmrHydroGhostCells complete fine-source stencil size");
-  std::vector<std::uint8_t> coverage(expected_count, 0U);
   const auto bounds = ghostCellBounds(target_patch, ghost);
 
   for (SelectedSourceCell& selected : selection.cells) {
@@ -319,24 +320,38 @@ void validateAndOrderFineSourceCoverage(
     }
     const std::size_t linear = ordinal[0] + refinement_ratio[0] *
         (ordinal[1] + refinement_ratio[1] * ordinal[2]);
-    if (linear >= coverage.size() || coverage[linear] != 0U) {
+    if (linear >= expected_count) {
       throw std::runtime_error(
-          "fillAmrHydroGhostCells: fine source patches overlap within a coarse ghost stencil");
+          "fillAmrHydroGhostCells: fine source cell is outside the aligned coarse ghost stencil");
     }
-    coverage[linear] = 1U;
     selected.fine_stencil_ordinal = linear;
   }
 
-  if (selection.cells.size() != expected_count ||
-      std::find(coverage.begin(), coverage.end(), 0U) != coverage.end()) {
-    throw std::runtime_error(
-        "fillAmrHydroGhostCells: fine source patches do not cover the complete coarse ghost volume");
-  }
+  // Sorting the already-required selection replaces a second coverage bitmap.
+  // Contiguous ordinals prove both completeness and non-overlap, including
+  // multi-patch fine coverage, without allocating the theoretical stencil.
   std::sort(
       selection.cells.begin(), selection.cells.end(),
       [](const SelectedSourceCell& lhs, const SelectedSourceCell& rhs) {
         return lhs.fine_stencil_ordinal < rhs.fine_stencil_ordinal;
       });
+  for (std::size_t i = 1U; i < selection.cells.size(); ++i) {
+    if (selection.cells[i - 1U].fine_stencil_ordinal ==
+        selection.cells[i].fine_stencil_ordinal) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: fine source patches overlap within a coarse ghost stencil");
+    }
+  }
+  if (selection.cells.size() != expected_count) {
+    throw std::runtime_error(
+        "fillAmrHydroGhostCells: fine source patches do not cover the complete coarse ghost volume");
+  }
+  for (std::size_t i = 0U; i < selection.cells.size(); ++i) {
+    if (selection.cells[i].fine_stencil_ordinal != i) {
+      throw std::runtime_error(
+          "fillAmrHydroGhostCells: fine source patches do not cover the complete coarse ghost volume");
+    }
+  }
 }
 
 void validatePatchView(const AmrHydroGhostFillPatch& patch) {
@@ -387,10 +402,11 @@ void requireSourceCellAvailable(
     const hydro::HydroGhostCell& ghost,
     AmrHydroBoundaryClass boundary_class,
     std::span<AmrHydroGhostFillPatch> patches,
-    std::span<const AmrHydroSparseGhostSource> remote_sources) {
+    std::span<const AmrHydroSparseGhostSource> remote_sources,
+    CellSelection& selection) {
   const auto probe = ghostProbePoint(*target.geometry, ghost);
   const PatchDescriptor& target_patch = target.geometry->patch;
-  CellSelection selection;
+  selection.cells.clear();
 
   // Same-level and coarse-to-fine ghost fills resolve one source cell by the
   // ghost probe point. Fine-to-coarse is handled separately below because one
@@ -463,14 +479,13 @@ void requireSourceCellAvailable(
         source_patch.level <= target_patch.level) {
       continue;
     }
-    const std::vector<std::size_t> cells = fineSourceCellsIntersectingGhost(
-        target_patch, ghost, source_patch);
-    for (const std::size_t cell : cells) {
+    forEachFineSourceCellIntersectingGhost(
+        target_patch, ghost, source_patch, [&](std::size_t cell) {
       requireSourceCellAvailable(candidate, cell);
       selection.cells.push_back(SelectedSourceCell{
           .patch = &candidate,
           .cell = cell});
-    }
+    });
   }
 
   for (const AmrHydroSparseGhostSource& candidate : remote_sources) {
@@ -482,9 +497,8 @@ void requireSourceCellAvailable(
         source_patch.level <= target_patch.level) {
       continue;
     }
-    const std::vector<std::size_t> cells = fineSourceCellsIntersectingGhost(
-        target_patch, ghost, source_patch);
-    for (const std::size_t cell : cells) {
+    forEachFineSourceCellIntersectingGhost(
+        target_patch, ghost, source_patch, [&](std::size_t cell) {
       if (findSparseRemoteCell(candidate, cell) == nullptr) {
         throw std::runtime_error(
             "fillAmrHydroGhostCells: sparse remote fine-to-coarse payload is missing a required source cell");
@@ -492,7 +506,7 @@ void requireSourceCellAvailable(
       selection.cells.push_back(SelectedSourceCell{
           .sparse_remote = &candidate,
           .cell = cell});
-    }
+    });
   }
 
   validateAndOrderFineSourceCoverage(target_patch, ghost, selection);
@@ -678,11 +692,11 @@ void fillAmrGhost(
     std::span<AmrHydroGhostFillPatch> patches,
     std::span<const AmrHydroSparseGhostSource> remote_sources,
     double adiabatic_index,
-    AmrHydroGhostFillDiagnostics& diagnostics) {
+    AmrHydroGhostFillDiagnostics& diagnostics,
+    CellSelection& selection) {
   const hydro::HydroGhostCell& ghost =
       target.geometry->geometry.ghost_cells.at(descriptor.ghost_slot);
-  const CellSelection selection =
-      selectSourceCells(target, ghost, descriptor.boundary_class, patches, remote_sources);
+  selectSourceCells(target, ghost, descriptor.boundary_class, patches, remote_sources, selection);
   if (selection.cells.empty()) {
     descriptor.fill_status = AmrHydroGhostFillStatus::kMissingSource;
     ++diagnostics.missing_source_records;
@@ -967,10 +981,38 @@ void retireAmrTemporalBoundaryHistory(core::SimulationState& state) {
   state.amr_temporal_boundary_history.clear();
 }
 
+std::uint64_t amrGhostFillScratchBytes(
+    std::span<const AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources) {
+  std::size_t source_cells = 0U;
+  for (const auto& patch : patches) {
+    if (patch.geometry != nullptr) {
+      source_cells = core::checkedSizeAdd(source_cells,
+          patch.geometry->geometry.cellCount(), "AMR ghost local source extent");
+    }
+  }
+  for (const auto& source : remote_sources) {
+    source_cells = core::checkedSizeAdd(source_cells, source.cells.size(),
+                                      "AMR ghost remote source extent");
+  }
+  return core::checkedMemoryBytesAdd(
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          source_cells, sizeof(SelectedSourceCell), "AMR ghost selection capacity")),
+      256U, "AMR ghost selection alignment");
+}
+
 AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
     std::span<AmrHydroGhostFillPatch> patches,
     std::span<const AmrHydroSparseGhostSource> remote_sources,
-    double adiabatic_index) {
+    double adiabatic_index, core::MemoryGovernor* governor) {
+  const std::uint64_t scratch_bytes = amrGhostFillScratchBytes(patches, remote_sources);
+  core::GovernedScratchArena arena(governor, core::MemoryClass::kScratchArena,
+                                   scratch_bytes, "amr.ghost_fill.selection");
+  CellSelection selection(arena.resource());
+  const std::size_t source_capacity = static_cast<std::size_t>(
+      (scratch_bytes - 256U) / sizeof(SelectedSourceCell));
+  selection.cells.reserve(source_capacity);
+
   AmrHydroGhostFillDiagnostics diagnostics;
   for (const AmrHydroGhostFillPatch& patch : patches) {
     validatePatchView(patch);
@@ -1021,10 +1063,17 @@ AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
         continue;
       }
       fillAmrGhost(
-          patch, ghost, patches, remote_sources, adiabatic_index, diagnostics);
+          patch, ghost, patches, remote_sources, adiabatic_index, diagnostics, selection);
     }
   }
   return diagnostics;
+}
+
+AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
+    std::span<AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources,
+    double adiabatic_index) {
+  return fillAmrHydroGhostCells(patches, remote_sources, adiabatic_index, nullptr);
 }
 
 AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(

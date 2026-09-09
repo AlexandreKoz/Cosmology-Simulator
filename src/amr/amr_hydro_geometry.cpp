@@ -597,14 +597,15 @@ AmrHydroPatchGeometry buildRemoteAmrHydroPatchGeometry(
   return result;
 }
 
-hydro::HydroConservedStateSoa loadAmrHydroConservedState(
+void loadAmrHydroConservedStateInto(
     const core::SimulationState& state,
     const AmrHydroPatchGeometry& patch_geometry,
-    double adiabatic_index) {
+    double adiabatic_index,
+    hydro::HydroConservedStateSoa& conserved) {
   state.requireGasCellIdentityMapFresh(
       patch_geometry.source_gas_cell_identity_generation,
       "loadAmrHydroConservedState");
-  hydro::HydroConservedStateSoa conserved(patch_geometry.geometry.totalCellStorageCount());
+  conserved.resize(patch_geometry.geometry.totalCellStorageCount());
   for (std::size_t patch_cell = 0; patch_cell < patch_geometry.real_cells.size(); ++patch_cell) {
     const std::uint32_t row = patch_geometry.real_cells[patch_cell].local_cell_row;
     const hydro::HydroPrimitiveState primitive{
@@ -622,6 +623,14 @@ hydro::HydroConservedStateSoa loadAmrHydroConservedState(
         patch_cell,
         hydro::HydroCoreSolver::conservedFromPrimitive(primitive, adiabatic_index));
   }
+}
+
+hydro::HydroConservedStateSoa loadAmrHydroConservedState(
+    const core::SimulationState& state,
+    const AmrHydroPatchGeometry& patch_geometry,
+    double adiabatic_index) {
+  hydro::HydroConservedStateSoa conserved;
+  loadAmrHydroConservedStateInto(state, patch_geometry, adiabatic_index, conserved);
   return conserved;
 }
 

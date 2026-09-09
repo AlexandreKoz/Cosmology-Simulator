@@ -88,6 +88,18 @@ void captureAmrTemporalBoundaryHistoryEnd(
 void retireAmrTemporalBoundaryHistory(core::SimulationState& state);
 
 
+// A single reusable selection is sufficient: at most one record per source
+// cell can contribute to any ghost. No theoretical refinement-volume bitmap
+// or per-candidate cell-index vector is materialized.
+[[nodiscard]] std::uint64_t amrGhostFillScratchBytes(
+    std::span<const AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources);
+
+[[nodiscard]] AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
+    std::span<AmrHydroGhostFillPatch> patches,
+    std::span<const AmrHydroSparseGhostSource> remote_sources,
+    double adiabatic_index, core::MemoryGovernor* governor);
+
 [[nodiscard]] AmrHydroGhostFillDiagnostics fillAmrHydroGhostCells(
     std::span<AmrHydroGhostFillPatch> patches,
     double adiabatic_index);

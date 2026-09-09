@@ -418,6 +418,17 @@ struct HydroScratchBuffers {
   std::vector<std::size_t> full_active_faces;
   HydroScratchHighWater high_water{};
 
+  // Admit and physically prepare every vector used by the sparse solver before
+  // the first numerical update. The returned capacity is the physical charge;
+  // workspaceBytes is the checked upper bound for an initially empty scratch.
+  [[nodiscard]] static std::uint64_t workspaceBytes(
+      std::size_t active_cell_count, std::size_t active_face_count,
+      std::size_t real_cell_count, std::size_t total_cell_count,
+      const HydroActiveBatchPolicy& batch_policy);
+  [[nodiscard]] std::uint64_t prepareForActiveSet(
+      std::size_t active_cell_count, std::size_t active_face_count,
+      std::size_t real_cell_count, std::size_t total_cell_count,
+      const HydroActiveBatchPolicy& batch_policy);
   void resizeFaceBatch(std::size_t active_cell_batch_count, std::size_t active_face_batch_count);
   [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
 };

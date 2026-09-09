@@ -1652,14 +1652,16 @@ class SourceRuntimeImpl final : public SourceRuntime {
     };
     m_feedback_events.clear();
     if (required_event_capacity > m_feedback_events.capacity()) {
-      m_feedback_events.reserve(required_event_capacity);
+      replaceSourceVectorCapacity(m_feedback_events, required_event_capacity,
+                                  "sources.stellar_feedback.event_batch");
       if (m_memory_governor != nullptr) {
         m_feedback_event_reservation.release();
         m_feedback_event_reservation = std::move(replacement_event_reservation);
       }
     }
     if (required_event_capacity > m_contiguous_star_batch.capacity()) {
-      m_contiguous_star_batch.reserve(required_event_capacity);
+      replaceSourceVectorCapacity(m_contiguous_star_batch, required_event_capacity,
+                                  "sources.stellar_feedback.contiguous_star_batch");
       if (m_memory_governor != nullptr) {
         m_contiguous_star_batch_reservation.release();
         m_contiguous_star_batch_reservation =
