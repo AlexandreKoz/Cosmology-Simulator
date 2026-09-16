@@ -761,6 +761,220 @@ StellarFeedbackStepReport StellarFeedbackModel::applyEventsWithViews(
   return report;
 }
 
+void StellarFeedbackModel::applyEventsCountersOnly(
+    core::SimulationState& state,
+    StellarFeedbackModuleState& module_state,
+    const StellarFeedbackGeometryView& geometry_view,
+    const StellarFeedbackSpatialIndex* spatial_index,
+    StellarFeedbackDepositionView deposition_view,
+    std::span<const StellarFeedbackEvent> events,
+    double dt_code,
+    StellarFeedbackStepReport& report_out) const {
+  const std::size_t cell_count = geometry_view.cell_center_x_comoving.size();
+  if (!m_config.enabled || dt_code <= 0.0 || state.star_particles.size() == 0U) {
+    return;
+  }
+  if (!state.star_particles.isConsistent() ||
+      state.star_particles.enrichment_carry_mass_code.size() !=
+          state.star_particles.size()) {
+    throw std::runtime_error(
+        "stellar-feedback persistent star sidecar is inconsistent");
+  }
+  module_state.ensureStarCapacity(state.star_particles.size());
+  const std::uint64_t step_seed = state.metadata.step_index;
+
+  for (const StellarFeedbackEvent& event : events) {
+    const std::uint32_t star_index = event.star_index;
+    ++report_out.counters.scanned_stars;
+    if (star_index >= state.star_particles.size()) {
+      continue;
+    }
+    const std::uint32_t particle_index =
+        state.star_particles.particle_index[star_index];
+    if (particle_index >= state.particles.size()) {
+      continue;
+    }
+
+    const double returned_mass = event.returned_mass_code;
+    const double returned_metals = event.returned_metals_code;
+    const double source_mass = m_config.use_returned_mass_budget
+        ? returned_mass
+        : std::max(state.star_particles.birth_mass_code[star_index] * dt_code, 0.0);
+    const double energy = event.feedback_energy_erg;
+
+    StellarFeedbackStarReport star_report;
+    star_report.star_index = star_index;
+    star_report.particle_index = particle_index;
+    star_report.budget = computeBudgetFromEnergy(
+        source_mass, returned_mass, returned_metals, energy);
+
+    const double carry_mass =
+        state.star_particles.enrichment_carry_mass_code[star_index];
+    const double carry_metals =
+        state.star_particles.enrichment_carry_metals_code[star_index];
+    const double carry_energy =
+        state.star_particles.enrichment_carry_feedback_energy_erg[star_index];
+    const double carry_momentum =
+        state.star_particles.enrichment_carry_momentum_code[star_index];
+
+    star_report.budget.returned_mass_code += carry_mass;
+    star_report.budget.returned_metals_code += carry_metals;
+    const double thermal_fraction = star_report.budget.total_energy_erg > 0.0
+        ? star_report.budget.thermal_energy_erg /
+              star_report.budget.total_energy_erg : 1.0;
+    star_report.budget.total_energy_erg += carry_energy;
+    star_report.budget.thermal_energy_erg += carry_energy * thermal_fraction;
+    star_report.budget.kinetic_energy_erg += carry_energy * (1.0 - thermal_fraction);
+    star_report.budget.momentum_budget_code += carry_momentum;
+    if (star_report.budget.returned_metals_code >
+        star_report.budget.returned_mass_code +
+            64.0 * std::numeric_limits<double>::epsilon() *
+                std::max(1.0, star_report.budget.returned_mass_code)) {
+      throw std::runtime_error(
+          "stellar-feedback carried metals exceed carried returned mass");
+    }
+
+    state.star_particles.enrichment_carry_mass_code[star_index] = 0.0;
+    state.star_particles.enrichment_carry_metals_code[star_index] = 0.0;
+    state.star_particles.enrichment_carry_feedback_energy_erg[star_index] = 0.0;
+    state.star_particles.enrichment_carry_momentum_code[star_index] = 0.0;
+
+    if (star_report.budget.returned_mass_code <= k_mass_floor &&
+        star_report.budget.thermal_energy_erg <= k_energy_floor &&
+        star_report.budget.kinetic_energy_erg <= k_energy_floor &&
+        star_report.budget.momentum_budget_code <= k_mass_floor) {
+      continue;
+    }
+
+    star_report.stochastic_event_fired =
+        m_config.variant != StellarFeedbackVariant::kStochastic ||
+        stochasticEventFires(star_index, step_seed);
+    std::vector<StellarFeedbackTarget> targets = spatial_index != nullptr
+        ? selectTargets(geometry_view, *spatial_index, particle_index)
+        : selectTargets(geometry_view, particle_index);
+    report_out.counters.target_cells_visited += targets.size();
+
+    if (!star_report.stochastic_event_fired || targets.empty()) {
+      star_report.unresolved_mass_code = star_report.budget.returned_mass_code;
+      star_report.unresolved_metals_code = star_report.budget.returned_metals_code;
+      star_report.unresolved_thermal_energy_erg =
+          star_report.budget.thermal_energy_erg;
+      star_report.unresolved_kinetic_energy_erg =
+          star_report.budget.kinetic_energy_erg;
+      star_report.unresolved_momentum_code =
+          star_report.budget.momentum_budget_code;
+    } else {
+      star_report.unresolved_momentum_code =
+          star_report.budget.momentum_budget_code;
+      for (const StellarFeedbackTarget& target : targets) {
+        const std::uint32_t cell_index = target.cell_index;
+        const double weight = target.weight;
+        if (cell_index >= cell_count || !(weight >= 0.0) || !std::isfinite(weight)) {
+          throw std::runtime_error("stellar-feedback produced an invalid target");
+        }
+
+        const double mass_add =
+            star_report.budget.returned_mass_code * weight;
+        const double metals_add =
+            star_report.budget.returned_metals_code * weight;
+        const double thermal_add =
+            star_report.budget.thermal_energy_erg * weight;
+        const double kinetic_add =
+            star_report.budget.kinetic_energy_erg * weight;
+        const double old_mass = deposition_view.cell_mass_code[cell_index];
+        const double old_density = deposition_view.gas_density_code[cell_index];
+        const double old_u = deposition_view.gas_internal_energy_code[cell_index];
+        double volume = 0.0;
+        if (!deposition_view.cell_volume_code.empty()) {
+          volume = deposition_view.cell_volume_code[cell_index];
+        } else if (deposition_view.cell_volume_provider != nullptr) {
+          volume = deposition_view.cell_volume_provider->cellVolumeCode(cell_index);
+        } else {
+          volume = old_density > 0.0 ? old_mass / old_density : 0.0;
+        }
+        if (!(volume > 0.0) || !std::isfinite(volume) || !(old_mass >= 0.0) ||
+            !std::isfinite(old_u)) {
+          throw std::runtime_error(
+              "stellar-feedback target lacks a valid cell volume or energy state");
+        }
+        const double new_mass = old_mass + mass_add;
+        const double old_internal_total_code = old_mass * old_u;
+
+        deposition_view.cell_mass_code[cell_index] = new_mass;
+        deposition_view.gas_density_code[cell_index] = new_mass / volume;
+        deposition_view.gas_metal_mass_code[cell_index] += metals_add;
+        if (deposition_view.gas_metal_mass_code[cell_index] > new_mass +
+            64.0 * std::numeric_limits<double>::epsilon() *
+                std::max(1.0, new_mass)) {
+          throw std::runtime_error(
+              "stellar-feedback deposition would create metal mass above gas mass");
+        }
+
+        if (m_config.variant == StellarFeedbackVariant::kDelayedCooling) {
+          star_report.delayed_cooling_applied = true;
+          star_report.unresolved_thermal_energy_erg += thermal_add;
+        } else {
+          star_report.deposited_thermal_energy_erg += thermal_add;
+        }
+        star_report.deposited_kinetic_energy_erg += kinetic_add;
+        const double energy_deposited_erg =
+            (m_config.variant == StellarFeedbackVariant::kDelayedCooling
+                 ? kinetic_add
+                 : thermal_add + kinetic_add);
+        const double new_internal_total_code = old_internal_total_code +
+            energy_deposited_erg * m_config.total_energy_code_per_erg;
+        deposition_view.gas_internal_energy_code[cell_index] = new_mass > 0.0
+            ? new_internal_total_code / new_mass : 0.0;
+
+        star_report.deposited_mass_code += mass_add;
+        star_report.deposited_metals_code += metals_add;
+      }
+    }
+
+    const double unresolved_energy =
+        star_report.unresolved_thermal_energy_erg +
+        star_report.unresolved_kinetic_energy_erg;
+    state.star_particles.enrichment_carry_mass_code[star_index] =
+        star_report.unresolved_mass_code;
+    state.star_particles.enrichment_carry_metals_code[star_index] =
+        star_report.unresolved_metals_code;
+    state.star_particles.enrichment_carry_feedback_energy_erg[star_index] =
+        unresolved_energy;
+    state.star_particles.enrichment_carry_momentum_code[star_index] =
+        star_report.unresolved_momentum_code;
+    state.star_particles.stellar_deposited_mass_cumulative_code[star_index] +=
+        star_report.deposited_mass_code;
+    state.star_particles.stellar_deposited_metals_cumulative_code[star_index] +=
+        star_report.deposited_metals_code;
+    state.star_particles.stellar_deposited_feedback_energy_cumulative_erg[star_index] +=
+        star_report.deposited_thermal_energy_erg +
+        star_report.deposited_kinetic_energy_erg;
+
+    ++report_out.counters.feedback_stars;
+    report_out.counters.source_mass_code += star_report.budget.source_mass_code;
+    report_out.counters.deposited_mass_code += star_report.deposited_mass_code;
+    report_out.counters.deposited_metals_code += star_report.deposited_metals_code;
+    report_out.counters.deposited_thermal_energy_erg +=
+        star_report.deposited_thermal_energy_erg;
+    report_out.counters.deposited_kinetic_energy_erg +=
+        star_report.deposited_kinetic_energy_erg;
+    report_out.counters.deposited_momentum_code +=
+        star_report.deposited_momentum_code;
+    report_out.counters.unresolved_mass_code += star_report.unresolved_mass_code;
+    report_out.counters.unresolved_metals_code += star_report.unresolved_metals_code;
+    report_out.counters.unresolved_thermal_energy_erg +=
+        star_report.unresolved_thermal_energy_erg;
+    report_out.counters.unresolved_kinetic_energy_erg +=
+        star_report.unresolved_kinetic_energy_erg;
+    report_out.counters.unresolved_momentum_code +=
+        star_report.unresolved_momentum_code;
+    // No star_reports.push_back — this is the production path that avoids
+    // materializing a per-star report vector.
+  }
+
+  state.sidecars.upsert(buildMetadataSidecar(report_out));
+}
+
 StellarFeedbackStepReport StellarFeedbackModel::apply(
     core::SimulationState& state,
     StellarFeedbackModuleState& module_state,

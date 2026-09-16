@@ -1,5 +1,7 @@
 #include "cosmosim/physics/stellar_evolution.hpp"
 
+#include "cosmosim/core/checked_arithmetic.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -13,6 +15,13 @@
 #include <utility>
 
 namespace cosmosim::physics {
+
+std::uint64_t stellarEvolutionBatchStagingBytes(std::size_t batch_capacity) {
+  return static_cast<std::uint64_t>(core::checkedSizeMultiply(
+      batch_capacity, sizeof(StellarEvolutionStarBudget),
+      "stellar-evolution governed budget staging bytes"));
+}
+
 namespace {
 
 constexpr double k_mass_floor = 1.0e-20;
@@ -689,6 +698,125 @@ StellarEvolutionStepReport StellarEvolutionBookkeeper::evaluateElapsedYearsFromV
     report.budgets.push_back(std::move(budget));
   }
   return report;
+}
+
+StellarEvolutionStepCounters StellarEvolutionBookkeeper::evaluateElapsedYearsGoverned(
+    const core::SimulationState& state,
+    std::span<const std::uint32_t> active_star_indices,
+    double elapsed_years,
+    core::MemoryGovernor* governor,
+    StellarEvolutionBatchWorkspace& workspace) const {
+  // Physical owner: SourceRuntime's workspace.budgets owns the bytes.
+  // Capacity admitted via governor BEFORE growth; retained capacity()
+  // reconciled so the buffer is reused next batch. Growth occurs only after
+  // admission, tight headroom rejects before any ledger mutation, and retry
+  // with sufficient headroom reproduces identical budgets/counters because
+  // evaluation is a pure function of (state, active set, elapsed_years).
+  workspace.budgets.clear();
+  StellarEvolutionStepCounters counters;
+  if (!m_config.enabled || elapsed_years <= 0.0) {
+    return counters;
+  }
+  if (!std::isfinite(elapsed_years)) {
+    throw std::invalid_argument("stellar elapsed time must be finite");
+  }
+  if (active_star_indices.empty()) {
+    return counters;
+  }
+  const std::size_t required_capacity = active_star_indices.size();
+  const std::uint64_t required_bytes = stellarEvolutionBatchStagingBytes(required_capacity);
+  const std::uint64_t retained_bytes = stellarEvolutionBatchStagingBytes(workspace.budgets.capacity());
+  if (required_capacity > workspace.budgets.capacity()) {
+    // Admit growth BEFORE vector growth. Old/new coexistence: the old retained
+    // buffer stays live while the replacement is admitted.
+    core::MemoryReservation growth;
+    if (governor != nullptr && required_bytes > retained_bytes) {
+      // Reserve the full replacement (not just the delta) so old/new
+      // coexistence is charged during vector reallocation.
+      growth = governor->reserve(core::MemoryClass::kPhaseResident, required_bytes,
+                                 "sources.stellar_evolution.governed_budgets");
+      growth.commit();
+    } else if (governor != nullptr && required_bytes > 0U && workspace.admitted_bytes == 0U) {
+      growth = governor->reserve(core::MemoryClass::kPhaseResident, required_bytes,
+                                 "sources.stellar_evolution.governed_budgets");
+      growth.commit();
+    }
+    workspace.budgets.reserve(required_capacity);
+    if (governor != nullptr) {
+      growth.release();
+      workspace.reservation.release();
+      const std::uint64_t actual_bytes =
+          stellarEvolutionBatchStagingBytes(workspace.budgets.capacity());
+      if (actual_bytes > 0U) {
+        workspace.reservation = governor->reserve(core::MemoryClass::kPhaseResident,
+                                                  actual_bytes,
+                                                  "sources.stellar_evolution.governed_budgets");
+        workspace.reservation.commit();
+      }
+      workspace.admitted_bytes = actual_bytes;
+    }
+  }
+  // Fill within admitted capacity: no further allocation can occur because
+  // size <= capacity. Deterministic input order is preserved.
+  core::SimulationState& mutable_state = const_cast<core::SimulationState&>(state);
+  StellarEvolutionRuntimeView view = makeRuntimeView(mutable_state, active_star_indices);
+  if (view.particle_index.empty()) {
+    return counters;
+  }
+  for (const std::uint32_t star_index : view.active_star_indices) {
+    ++counters.scanned_stars;
+    if (star_index >= view.particle_index.size() || star_index >= view.birth_mass_code.size() ||
+        star_index >= view.birth_metallicity_mass_fraction.size() ||
+        star_index >= view.stellar_age_years_last.size()) {
+      continue;
+    }
+    const std::uint32_t particle_index = view.particle_index[star_index];
+    if (particle_index >= view.particle_mass_code.size()) continue;
+    const double birth_mass = view.birth_mass_code[star_index];
+    const double current_mass = view.particle_mass_code[particle_index];
+    if (!(birth_mass > k_mass_floor) || !(current_mass >= 0.0)) continue;
+    const double age_begin = std::max(view.stellar_age_years_last[star_index], 0.0);
+    const double age_end = age_begin + elapsed_years;
+    StellarEvolutionIntervalBudget interval = m_table.integrateInterval(
+        age_begin, age_end, birth_mass,
+        view.birth_metallicity_mass_fraction[star_index]);
+    const double returned_mass = std::min(interval.returned_mass_code, current_mass);
+    if (interval.returned_mass_code > 0.0 && returned_mass < interval.returned_mass_code) {
+      const double scale = returned_mass / interval.returned_mass_code;
+      interval.returned_mass_code = returned_mass;
+      interval.returned_metals_code *= scale;
+      interval.newly_synthesized_metals_code *= scale;
+      interval.feedback_energy_erg *= scale;
+      interval.event_count *= scale;
+      for (std::size_t channel = 0; channel < 3U; ++channel) {
+        interval.returned_mass_channel_code[channel] *= scale;
+        interval.returned_metals_channel_code[channel] *= scale;
+        interval.newly_synthesized_metals_channel_code[channel] *= scale;
+        interval.feedback_energy_channel_erg[channel] *= scale;
+        interval.event_count_channel[channel] *= scale;
+      }
+    }
+    if (interval.returned_metals_code > interval.returned_mass_code + k_validation_tolerance) {
+      throw std::runtime_error("stellar interval violates metal <= returned mass");
+    }
+    StellarEvolutionStarBudget budget{
+        .star_index = star_index,
+        .particle_index = particle_index,
+        .star_age_begin_years = age_begin,
+        .star_age_end_years = age_end,
+        .mass_old_code = current_mass,
+        .mass_new_code = std::max(current_mass - interval.returned_mass_code, 0.0),
+        .interval = interval,
+    };
+    ++counters.evolved_stars;
+    counters.returned_mass_code += interval.returned_mass_code;
+    counters.returned_metals_code += interval.returned_metals_code;
+    counters.newly_synthesized_metals_code += interval.newly_synthesized_metals_code;
+    counters.event_count += interval.event_count;
+    counters.feedback_energy_erg += interval.feedback_energy_erg;
+    workspace.budgets.push_back(std::move(budget));
+  }
+  return counters;
 }
 
 void StellarEvolutionBookkeeper::commitBudgets(

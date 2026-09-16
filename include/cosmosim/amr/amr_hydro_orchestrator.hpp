@@ -162,6 +162,33 @@ void scatterAmrHydroConservedState(
     std::span<const PatchDescriptor> all_patches,
     double adiabatic_index);
 
+// Gate-2 active-level row storage contract. coarse_rows and fine_rows coexist,
+// so admission must include BOTH physical capacities. The workspace owns both
+// buffers; capacity is admitted via the existing regrid governor before growth
+// and reconciled to real capacity() when retained across calls.
+struct AmrActiveLevelRowWorkspace {
+  std::vector<std::uint32_t> coarse_rows;
+  std::vector<std::uint32_t> fine_rows;
+  core::MemoryReservation reservation;
+  std::uint64_t admitted_bytes = 0U;
+};
+
+[[nodiscard]] std::uint64_t activeLevelRowStagingBytes(
+    std::size_t coarse_capacity,
+    std::size_t fine_capacity);
+void fillActiveRowsForLevelInto(
+    const core::SimulationState& state,
+    int level,
+    std::span<const std::uint32_t> requested_rows,
+    std::vector<std::uint32_t>& out_rows);
+void prepareAmrActiveLevelRows(
+    const core::SimulationState& state,
+    std::span<const std::uint32_t> requested_rows,
+    int min_level,
+    int max_level,
+    core::MemoryGovernor* governor,
+    AmrActiveLevelRowWorkspace& workspace);
+
 [[nodiscard]] ProductionAmrHydroDiagnostics advanceProductionAmrHydro(
     core::SimulationState& state,
     std::span<const std::uint32_t> active_cell_rows,

@@ -705,7 +705,9 @@ bool maybeWriteOutputs(
     io::writeRestartCheckpointHdf5(report.restart_path, restart_payload,
         io::RestartWritePolicy{.memory_governor = services.memory_governor});
     report.restart_roundtrip_executed = true;
-    const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(report.restart_path);
+    const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(
+        report.restart_path,
+        io::RestartReadPolicy{.memory_governor = services.memory_governor});
     const auto compatibility = parallel::evaluateDistributedRestartCompatibility(
         restart_read.distributed_gravity_state,
         gravity_state.runtimeTopology());

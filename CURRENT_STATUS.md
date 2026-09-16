@@ -145,3 +145,25 @@ claim that every source/AMR/output allocation has a complete peak contract, or
 that MPI/FFTW, whole-process memory, and topology acceptance have passed.
 Unrestricted full-physics overlap and production memory certification remain
 outside the accepted envelope pending those gates.
+
+## M2D surgical closure pass — 2026-09-13 (provisional, not certified)
+
+Focused source-level ownership repairs were applied on top of the prior dirty
+worktree without resetting it: failure-atomic pending reflux with prevalidation
+before canonical mutation, governed active-level row workspace with exact-count
+coexistence admission and retained-capacity reuse, allocation-free contiguous
+regrid ID-range checks with corrected coexisting scratch accounting, a
+caller-owned governed stellar-evolution budget buffer used by production
+(step-local, admitted before growth, moved not copied into commit), and a real
+restart-readback preflight/admission path via `RestartReadPolicy::memory_governor`
+with overflow and dimension-consistency rejection before allocation. Focused
+regressions (`unit_m2d_gate1_flux_staging`, `unit_m2d_gate2_reflux_atomic`,
+`unit_m2d_gate3_regrid`, `unit_m2d_gate4_evolution`, `unit_m2d_gate5_restart`)
+and the related AMR/source/restart suites pass; HDF5 roundtrip and AMR
+flux-register restart equivalence pass. Full M2D coding closure is NOT
+certified: remote flux peer-staging production governance and workflow
+duplicate reduction remain partial under the tight 1 GiB reference envelope,
+owner contracts stay `complete=false`, the `integration_reference_workflow`
+tight-envelope sweep admission and an MPI two-rank patch-migration scheduler
+mismatch remain outstanding, and dependency-complete distributed runtime
+acceptance remains pending. The dispatcher stays serial.

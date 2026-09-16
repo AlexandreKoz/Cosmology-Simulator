@@ -11,6 +11,7 @@
 #include "cosmosim/core/checked_arithmetic.hpp"
 
 namespace cosmosim::core {
+class MemoryGovernor;
 class ProfilerSession;
 }
 
@@ -349,7 +350,29 @@ planDirectedAmrPatchBoundaryCellRequests(
 [[nodiscard]] std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrFluxRegisterPayloadRecord> local_records,
-    std::uint64_t exchange_sequence = 0);
+    std::uint64_t exchange_sequence = 0,
+    core::MemoryGovernor* memory_governor = nullptr);
+
+// Gate-1 governed staging contract for the blocking flux-register exchange.
+// The blocking protocol retains, at peak:
+//   retained inbound result + one active peer outbound staging buffer +
+//   one active peer receive staging buffer + O(world_size) count metadata.
+// Peer buffers are sequential and mutually exclusive, so the peak charges only
+// the single largest peer buffer in each direction, never the sum over peers.
+struct AmrFluxExchangeStagingPlan {
+  std::size_t total_inbound_capacity = 0U;
+  std::size_t max_peer_send_count = 0U;
+  std::size_t max_peer_receive_count = 0U;
+  std::uint64_t peak_reservation_bytes = 0U;
+};
+
+[[nodiscard]] AmrFluxExchangeStagingPlan planAmrFluxExchangeStaging(
+    std::size_t total_inbound_capacity,
+    std::size_t max_peer_send_count,
+    std::size_t max_peer_receive_count,
+    std::size_t world_size);
+[[nodiscard]] std::uint64_t amrFluxExchangeStagingPeakBytes(
+    const AmrFluxExchangeStagingPlan& plan);
 
 [[nodiscard]] std::vector<HydroConservativeFluxCorrectionRecord> executeBlockingHydroConservativeFluxCorrectionExchange(
     const MpiContext& mpi_context,
