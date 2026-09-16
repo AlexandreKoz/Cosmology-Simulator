@@ -888,6 +888,8 @@ class SourceRuntimeImpl final : public SourceRuntime {
         "sources.stellar_feedback.event_batch",
         m_feedback_events,
         m_feedback_event_reservation.committed());
+    // Gate-4 step-local governed budgets are admitted per source execution and
+    // released at stage end; report the batch peak as governed transient.
     builder.addEntry(core::MemoryEntry{
         .subsystem = core::MemorySubsystem::kScratch,
         .lifetime = core::MemoryLifetime::kTransient,
@@ -1009,8 +1011,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
     if (m_stellar_evolution.config().enabled) {
       const std::uint64_t batch = std::min(star_count,
           static_cast<std::uint64_t>(k_feedback_event_batch_max));
+      // Gate-4: step-local governed budget buffer (admitted per execution,
+      // reused across batches within the execution, released at stage end).
+      // Counters-only feedback path avoids a second per-star report vector.
       std::uint64_t evolution = multiply(batch,
-          sizeof(physics::StellarEvolutionStarBudget), "source evolution batch");
+          sizeof(physics::StellarEvolutionStarBudget), "source evolution budgets");
       evolution = core::checkedMemoryBytesAdd(evolution,
           growth(batch, sizeof(physics::StellarFeedbackEvent),
                  m_feedback_events.capacity(), "source feedback events"),
@@ -1668,9 +1673,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
             std::move(replacement_contiguous_star_reservation);
       }
     }
+    physics::StellarEvolutionBatchWorkspace evolution_workspace;
     for (std::size_t batch_begin = 0U;
          batch_begin < active_star_count;
          batch_begin += feedback_batch_max) {
+      physics::StellarFeedbackStepReport feedback_step_report;
       const std::size_t batch_size = std::min<std::size_t>(
           feedback_batch_max, active_star_count - batch_begin);
       std::span<const std::uint32_t> star_batch;
@@ -1686,22 +1693,18 @@ class SourceRuntimeImpl final : public SourceRuntime {
         star_batch = std::span<const std::uint32_t>(*active_star_rows)
             .subspan(batch_begin, batch_size);
       }
-      core::MemoryReservation evolution_batch_reservation;
-      if (m_memory_governor != nullptr) {
-        evolution_batch_reservation = m_memory_governor->reserve(
-            core::MemoryClass::kPhaseResident,
-            static_cast<std::uint64_t>(core::checkedSizeMultiply(
-                batch_size, sizeof(physics::StellarEvolutionStarBudget),
-                "stellar-evolution bounded report batch")),
-            "sources.stellar_evolution.report_batch");
-        evolution_batch_reservation.commit();
-      }
-      const physics::StellarEvolutionStepReport evolution_report =
-          m_stellar_evolution.evaluateElapsedYears(
-              context.state, star_batch, elapsed_years);
+      // Gate-4 production: caller-owned reusable governed budget buffer.
+      // evaluateElapsedYearsGoverned admits capacity BEFORE growth, fills
+      // within admitted capacity, and reconciles actual capacity() for reuse.
+      // The old uncontrolled evaluateElapsedYears path is no longer used by
+      // production; it remains only for diagnostics/tests.
+      const physics::StellarEvolutionStepCounters evolution_counters =
+          m_stellar_evolution.evaluateElapsedYearsGoverned(
+              context.state, star_batch, elapsed_years, m_memory_governor,
+              evolution_workspace);
       m_feedback_events.clear();
       for (const physics::StellarEvolutionStarBudget& budget :
-           evolution_report.budgets) {
+           evolution_workspace.budgets) {
         m_feedback_events.push_back(physics::StellarFeedbackEvent{
             .star_index = budget.star_index,
             .returned_mass_code = budget.interval.returned_mass_code,
@@ -1710,20 +1713,28 @@ class SourceRuntimeImpl final : public SourceRuntime {
         });
       }
       if (!m_feedback_events.empty()) {
-        (void)m_stellar_feedback.applyEventsWithViews(
+        m_stellar_feedback.applyEventsCountersOnly(
             context.state,
             m_stellar_feedback_state,
             geometry_view,
             &m_feedback_spatial_index,
             deposition_view,
             m_feedback_events,
-            context.integrator_state.dt_time_code);
+            context.integrator_state.dt_time_code,
+            feedback_step_report);
       }
 
       // Each bounded event batch is deposited or durably carried before its
       // matching stellar-evolution ledger advances. No processed event history
-      // survives beyond this batch.
-      m_stellar_evolution.commitBudgets(context.state, evolution_report);
+      // survives beyond this batch. Commit moves (not copies) the governed
+      // workspace budgets into the report so no second population-scale copy
+      // coexists with the admitted buffer; ownership moves back afterwards to
+      // preserve retained capacity for the next batch.
+      physics::StellarEvolutionStepReport commit_report;
+      commit_report.counters = evolution_counters;
+      commit_report.budgets = std::move(evolution_workspace.budgets);
+      m_stellar_evolution.commitBudgets(context.state, commit_report);
+      evolution_workspace.budgets = std::move(commit_report.budgets);
     }
     internal::synchronizeParentParticleCompatibilityMirrors(
         context.state, m_world_rank,
@@ -2079,6 +2090,11 @@ class SourceRuntimeImpl final : public SourceRuntime {
   std::vector<physics::StarFormationCellInput> m_star_formation_inputs;
   std::vector<std::uint32_t> m_contiguous_star_batch;
   std::vector<physics::StellarFeedbackEvent> m_feedback_events;
+  // Gate-4: step-local governed budget workspace is created per source
+  // execution (not retained across stages) so the retained budget capacity
+  // does not compete with the hydro sweep workspace under the tight process
+  // envelope. Within one execution the buffer is reused across batches with
+  // admission-before-growth and actual-capacity reconciliation.
   physics::StellarFeedbackSpatialIndex m_feedback_spatial_index;
   std::vector<std::uint8_t> m_owned_leaf_mask;
   std::vector<double> m_diffusion_rho_kappa_code;

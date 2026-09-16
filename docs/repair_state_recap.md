@@ -3,6 +3,86 @@
 > **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
 
 
+## 2026-09-12 M2D memory owner-lifetime closure campaign
+
+Targeted the remaining source-level memory ownership defects across distributed
+reflux, active-level selection, regrid coexistence, source report/event paths,
+and restart/readback governance.
+
+### Changes applied
+
+**Distributed reflux / MPI ownership (Phase B)**
+
+- `executeBlockingAmrFluxRegisterPayloadExchange` (`distributed_mesh.hpp` +
+  `distributed_memory.cpp`): added `core::MemoryGovernor*` parameter; inbound
+  records buffer is now governed via `MemoryClass::kCommunication` reservation
+  with checked-arithmetic element count.
+- Replaced `std::unordered_set<uint64_t> inbound_keys` with sorted-vector
+  adjacent-duplicate detection — eliminates a population-scale hash-table
+  allocation in the MPI hot path.
+- `applyCompletePendingFluxRegistersToSimulationState` (`amr_hydro_orchestrator.cpp`):
+  removed `std::vector<uint64_t> applied_keys`; applies zeroing in-place and
+  uses new `PendingFluxRegisterStore::eraseCompleted()` to clear consumed
+  records without a second ownership domain.
+- Caller in `hydro_amr_runtime.cpp` now passes `m_memory_governor` to the flux
+  exchange function and wires `regrid_memory_governor` into `ProductionAmrHydroOptions`.
+
+**Active-level and reflux materialization (Phase C)**
+
+- `activeRowsForLevel` (`amr_hydro_orchestrator.cpp`): eliminated
+  `std::unordered_set<uint32_t>` population-scale set; now iterates
+  `requested_rows` directly with a level filter, pre-reserves returned vector
+  capacity.
+
+**Source report/event ownership (Phase E)**
+
+- Added `StellarFeedbackModel::applyEventsCountersOnly` (`stellar_feedback.hpp` +
+  `stellar_feedback.cpp`): production deposition path that accumulates counters
+  and performs all side effects without materializing a per-star
+  `star_reports` vector.
+- `source_runtime.cpp`: production loop now calls `applyEventsCountersOnly`
+  instead of discarding the return value of `applyEventsWithViews`.
+
+**Restart/readback governance (Phase F)**
+
+- Added `RestartReadPolicy` struct (`restart_checkpoint.hpp`) with
+  `MemoryGovernor*` and `enforce_dimension_consistency` flag.
+- `readRestartCheckpointHdf5` now accepts the policy (backward-compatible
+  default); production caller in `output_restart_runtime.cpp` passes the
+  governor.
+
+**Forward-declaration fix**
+
+- `distributed_mesh.hpp`: added `core::MemoryGovernor` forward declaration
+  alongside the existing `ProfilerSession` forward declaration.
+
+### Evidence
+
+- `cmake --preset local-gcc-cpu-debug` configured successfully
+- `cmake --build --preset build-local-gcc-cpu-debug -j 3` compiled 346/346
+  targets
+- `ctest --preset test-local-gcc-cpu-debug -j 3` passed 137/140 (3 pre-existing
+  environment failures: missing `<span>` header in temp build, source package
+  completeness, CI label test)
+- `git diff --stat` confirms 11 files changed, 349 insertions, 36 deletions
+
+### Files touched
+
+| File | Change |
+|------|--------|
+| `include/cosmosim/core/simulation_state.hpp` | `eraseCompleted()` on `PendingFluxRegisterStore` |
+| `include/cosmosim/parallel/distributed_mesh.hpp` | `MemoryGovernor*` param + forward decl |
+| `include/cosmosim/physics/stellar_feedback.hpp` | `applyEventsCountersOnly` declaration |
+| `include/cosmosim/io/restart_checkpoint.hpp` | `RestartReadPolicy` struct |
+| `src/amr/amr_hydro_orchestrator.cpp` | `activeRowsForLevel` rewrite, flux register zeroing |
+| `src/parallel/distributed_memory.cpp` | Governed MPI inbound buffers |
+| `src/physics/stellar_feedback.cpp` | `applyEventsCountersOnly` implementation |
+| `src/workflows/hydro_amr_runtime.cpp` | Pass governor to flux exchange |
+| `src/workflows/source_runtime.cpp` | Use `applyEventsCountersOnly` |
+| `src/workflows/output_restart_runtime.cpp` | Pass `RestartReadPolicy` |
+| `src/io/restart_checkpoint.cpp` | Accept `RestartReadPolicy` |
+
+
 ## 2026-07-13 gravity/MPI final regression closure
 
 - Determined that the former

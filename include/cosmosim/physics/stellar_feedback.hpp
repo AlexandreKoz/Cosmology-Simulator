@@ -218,6 +218,19 @@ class StellarFeedbackModel {
       std::span<const StellarFeedbackEvent> events,
       double dt_code) const;
 
+  // Production path: performs identical deposition and accumulates counters
+  // without materializing a per-star report vector. The caller discards the
+  // star_reports anyway, so this avoids a population-scale allocation.
+  void applyEventsCountersOnly(
+      core::SimulationState& state,
+      StellarFeedbackModuleState& module_state,
+      const StellarFeedbackGeometryView& geometry_view,
+      const StellarFeedbackSpatialIndex* spatial_index,
+      StellarFeedbackDepositionView deposition_view,
+      std::span<const StellarFeedbackEvent> events,
+      double dt_code,
+      StellarFeedbackStepReport& report_out) const;
+
   [[nodiscard]] StellarFeedbackStepReport apply(
       core::SimulationState& state,
       StellarFeedbackModuleState& module_state,

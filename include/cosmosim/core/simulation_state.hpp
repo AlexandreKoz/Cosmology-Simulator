@@ -628,6 +628,19 @@ class PendingFluxRegisterStore {
             }),
         m_records.end());
   }
+  // Erase records whose register_key has been zeroed (successfully applied).
+  // This avoids materializing a separate keys vector during pending reflux
+  // application.
+  void eraseCompleted() noexcept {
+    m_records.erase(
+        std::remove_if(
+            m_records.begin(),
+            m_records.end(),
+            [](const PendingFluxRegisterRecord& record) {
+              return record.register_key == 0U;
+            }),
+        m_records.end());
+  }
 
  private:
   std::vector<PendingFluxRegisterRecord> m_records;

@@ -1093,6 +1093,27 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME unit_amr_pending_flux_registers COMMAND test_unit_amr_pending_flux_registers)
   cosmosim_mark_runtime_truth_test(unit_amr_pending_flux_registers amr hydro gas unit pending_flux)
 
+  add_executable(test_unit_m2d_gate1_flux_staging tests/unit/test_m2d_gate1_flux_staging.cpp)
+  target_link_libraries(test_unit_m2d_gate1_flux_staging PRIVATE cosmosim_parallel cosmosim_core)
+  add_test(NAME unit_m2d_gate1_flux_staging COMMAND test_unit_m2d_gate1_flux_staging)
+
+  add_executable(test_unit_m2d_gate2_reflux_atomic tests/unit/test_m2d_gate2_reflux_atomic.cpp)
+  target_link_libraries(test_unit_m2d_gate2_reflux_atomic PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_test(NAME unit_m2d_gate2_reflux_atomic COMMAND test_unit_m2d_gate2_reflux_atomic)
+
+  add_executable(test_unit_m2d_gate3_regrid tests/unit/test_m2d_gate3_regrid.cpp)
+  target_link_libraries(test_unit_m2d_gate3_regrid PRIVATE cosmosim_amr cosmosim_hydro cosmosim_core)
+  add_test(NAME unit_m2d_gate3_regrid COMMAND test_unit_m2d_gate3_regrid)
+
+  add_executable(test_unit_m2d_gate4_evolution tests/unit/test_m2d_gate4_evolution.cpp)
+  target_link_libraries(test_unit_m2d_gate4_evolution PRIVATE cosmosim_physics cosmosim_core)
+  target_compile_definitions(test_unit_m2d_gate4_evolution PRIVATE COSMOSIM_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  add_test(NAME unit_m2d_gate4_evolution COMMAND test_unit_m2d_gate4_evolution)
+
+  add_executable(test_unit_m2d_gate5_restart tests/unit/test_m2d_gate5_restart.cpp)
+  target_link_libraries(test_unit_m2d_gate5_restart PRIVATE cosmosim_io cosmosim_core)
+  add_test(NAME unit_m2d_gate5_restart COMMAND test_unit_m2d_gate5_restart)
+
   add_executable(test_unit_hydro_core_solver tests/unit/test_hydro_core_solver.cpp)
   target_link_libraries(test_unit_hydro_core_solver PRIVATE cosmosim_hydro)
   add_test(NAME unit_hydro_core_solver COMMAND test_unit_hydro_core_solver)

@@ -9,6 +9,7 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/cosmology.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 
 namespace cosmosim::physics {
@@ -147,6 +148,19 @@ struct StellarEvolutionStepReport {
   std::vector<StellarEvolutionStarBudget> budgets;
 };
 
+// Gate-4 physical ownership: production fills a caller-owned reusable governed
+// budget buffer. The buffer capacity is admitted via the process
+// MemoryGovernor BEFORE growth; the callee never grows beyond admitted
+// capacity without a new admission. Actual retained capacity() is reconciled
+// so the buffer is reused across batches.
+struct StellarEvolutionBatchWorkspace {
+  std::vector<StellarEvolutionStarBudget> budgets;
+  core::MemoryReservation reservation;
+  std::uint64_t admitted_bytes = 0U;
+};
+
+[[nodiscard]] std::uint64_t stellarEvolutionBatchStagingBytes(std::size_t batch_capacity);
+
 struct StellarEvolutionRuntimeView {
   std::span<const std::uint32_t> active_star_indices;
   std::span<const std::uint32_t> particle_index;
@@ -188,6 +202,17 @@ class StellarEvolutionBookkeeper {
   [[nodiscard]] StellarEvolutionStepReport evaluateElapsedYearsFromView(
       StellarEvolutionRuntimeView view,
       double elapsed_years) const;
+  // Gate-4 production path: fills the caller-owned workspace budgets buffer
+  // (admitted via governor before growth) and returns only counters. The
+  // detailed budgets remain available in workspace.budgets for event
+  // construction within the same admitted capacity; no hidden heap vector is
+  // grown. Diagnostic callers may keep using evaluateElapsedYears.
+  [[nodiscard]] StellarEvolutionStepCounters evaluateElapsedYearsGoverned(
+      const core::SimulationState& state,
+      std::span<const std::uint32_t> active_star_indices,
+      double elapsed_years,
+      core::MemoryGovernor* governor,
+      StellarEvolutionBatchWorkspace& workspace) const;
   void commitBudgets(
       core::SimulationState& state,
       const StellarEvolutionStepReport& report) const;

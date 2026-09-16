@@ -35,6 +35,37 @@ struct RestartWritePolicy {
   core::MemoryGovernor* memory_governor = nullptr;
 };
 
+// Production restart reader controls: memory governance and dimension validation
+// for the read side.  The writer already reserves owning-state capacity via
+// RestartWritePolicy; the reader needs the same optional authority plus a flag
+// that forces the strictest cross-rank dimension consistency check before any
+// allocation is committed.
+struct RestartReadPolicy {
+  // Optional governor for read-side scratch (candidate buffers, dimension
+  // preflight reservations).  When nullptr the reader falls back to
+  // unmeasured heap allocation.
+  core::MemoryGovernor* memory_governor = nullptr;
+  // When true the reader verifies that per-rank particle/cell counts are
+  // consistent with the restart's own global metadata and throws on
+  // mismatch rather than silently truncating.
+  bool enforce_dimension_consistency = true;
+};
+
+// Gate-5 physical readback ownership: preflight dimensions checked BEFORE any
+// population allocation, admitted via policy.memory_governor as incremental
+// candidate memory coexisting with the already-live canonical state. The live
+// state is NOT double-charged; only the candidate is reserved.
+struct RestartReadCandidateDimensions {
+  std::uint64_t particle_count = 0U;
+  std::uint64_t cell_count = 0U;
+  std::uint64_t patch_count = 0U;
+  std::uint64_t pending_flux_count = 0U;
+  std::uint64_t temporal_cell_count = 0U;
+};
+
+[[nodiscard]] std::uint64_t restartReadCandidateStagingBytes(
+    const RestartReadCandidateDimensions& dimensions);
+
 struct RestartPersistentStateView {
   // Narrow restart-serialization root: persistent-only state ownership path.
   // TransientStepWorkspace/HydroScratch/PM/MPI/output scratch are intentionally
@@ -173,6 +204,8 @@ void writeRestartCheckpointHdf5(
     const RestartWritePayload& payload,
     const RestartWritePolicy& policy = {});
 
-[[nodiscard]] RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_path);
+[[nodiscard]] RestartReadResult readRestartCheckpointHdf5(
+    const std::filesystem::path& input_path,
+    const RestartReadPolicy& policy = {});
 
 }  // namespace cosmosim::io

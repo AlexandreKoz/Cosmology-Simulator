@@ -541,13 +541,13 @@ void validatePatchIdRangeAvailable(
   if (idRangeOverflows(first_patch_id, count)) {
     throw std::invalid_argument("production AMR regrid patch-id range is zero or overflows");
   }
-  std::unordered_set<std::uint64_t> requested;
-  requested.reserve(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    requested.insert(first_patch_id + static_cast<std::uint64_t>(i));
-  }
+  // Gate-3: the requested IDs are a single contiguous interval
+  // [first, first+count). No O(N) hash set is needed: an existing ID collides
+  // iff it lies in that half-open interval. Deterministic, allocation-free.
+  const std::uint64_t last_exclusive = first_patch_id + static_cast<std::uint64_t>(count);
   for (const std::uint64_t patch_id : state.patches.patch_id) {
-    if (patch_id != allowed_existing_patch_id && requested.contains(patch_id)) {
+    if (patch_id != allowed_existing_patch_id && patch_id >= first_patch_id &&
+        patch_id < last_exclusive) {
       throw std::invalid_argument("production AMR regrid patch-id range collides with existing state");
     }
   }
@@ -560,18 +560,16 @@ void validateGasCellIdRangeAvailable(
   if (idRangeOverflows(first_gas_cell_id, count)) {
     throw std::invalid_argument("production AMR regrid gas-cell-id range is zero or overflows");
   }
-  std::unordered_set<std::uint64_t> requested;
-  requested.reserve(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    requested.insert(first_gas_cell_id + static_cast<std::uint64_t>(i));
-  }
+  // Gate-3: same contiguous-interval check as patch IDs. Eliminates the
+  // population-scale unordered_set without changing collision semantics.
+  const std::uint64_t last_exclusive = first_gas_cell_id + static_cast<std::uint64_t>(count);
   for (const std::uint64_t gas_cell_id : state.gas_cells.gas_cell_id) {
-    if (requested.contains(gas_cell_id)) {
+    if (gas_cell_id >= first_gas_cell_id && gas_cell_id < last_exclusive) {
       throw std::invalid_argument("production AMR regrid gas-cell-id range collides with existing state");
     }
   }
   for (const core::GasCellIdentityRecord& record : state.gas_cell_identity.records()) {
-    if (requested.contains(record.gas_cell_id)) {
+    if (record.gas_cell_id >= first_gas_cell_id && record.gas_cell_id < last_exclusive) {
       throw std::invalid_argument("production AMR regrid gas-cell-id range collides with identity map");
     }
   }
@@ -1043,6 +1041,48 @@ RefluxDiagnostics applyFluxRegistersToSimulationState(
     std::span<const FluxRegisterEntry> entries,
     std::span<const PatchDescriptor> all_patches,
     double adiabatic_index) {
+  // Gate-2 failure atomicity: phase 1 fully validates every record that would
+  // be committed before ANY conserved-state mutation. The stale-mapping throw
+  // below is the only throwing rejection; all other rejections are counted as
+  // skips. Validating first guarantees a later record cannot throw after
+  // earlier records already mutated canonical gas state.
+  for (const FluxRegisterEntry& entry : entries) {
+    if (!entry.isComplete()) {
+      continue;
+    }
+    const double area_scale = std::max({1.0, std::abs(entry.coarse_area_comov), std::abs(entry.fine_area_comov)});
+    if (entry.coarse_area_comov <= 0.0 || entry.fine_area_comov <= 0.0 ||
+        std::abs(entry.coarse_area_comov - entry.fine_area_comov) > 1.0e-10 * area_scale) {
+      continue;
+    }
+    if (entry.coarse_gas_cell_id == 0U) {
+      continue;
+    }
+    const auto patch_it = std::find_if(
+        all_patches.begin(),
+        all_patches.end(),
+        [&entry](const PatchDescriptor& patch) { return patch.patch_id == entry.coarse_patch_id; });
+    if (patch_it == all_patches.end()) {
+      continue;
+    }
+    const auto row_opt = state.gas_cell_identity.rowForGasCellId(entry.coarse_gas_cell_id);
+    if (!row_opt.has_value()) {
+      continue;
+    }
+    const std::uint32_t row = *row_opt;
+    const auto* record = state.gas_cell_identity.findByGasCellId(entry.coarse_gas_cell_id);
+    if (record == nullptr || record->owning_patch_id != entry.coarse_patch_id) {
+      continue;
+    }
+    const auto patch_index = patchIndexById(state, entry.coarse_patch_id);
+    if (!patch_index.has_value() || row >= state.cells.patch_index.size() ||
+        state.cells.patch_index[row] != *patch_index ||
+        state.gas_cells.gas_cell_id[row] != entry.coarse_gas_cell_id ||
+        entry.coarse_cell_index >= product(patch_it->cell_dims) ||
+        patchLocalCellForRow(state, *patch_it, row, "applyFluxRegistersToSimulationState").linear_index != entry.coarse_cell_index) {
+      throw std::runtime_error("applyFluxRegistersToSimulationState rejected a stale AMR reflux target mapping");
+    }
+  }
   RefluxDiagnostics diagnostics;
   ProductionAmrHydroOptions options;
   options.adiabatic_index = adiabatic_index;
@@ -1333,25 +1373,185 @@ void accumulateDiagnostics(ProductionAmrHydroDiagnostics& lhs, const ProductionA
     const core::SimulationState& state,
     int level,
     std::span<const std::uint32_t> requested_rows) {
-  std::unordered_set<std::uint32_t> requested_lookup(requested_rows.begin(), requested_rows.end());
   const bool all_requested = requested_rows.empty();
   std::vector<std::uint32_t> rows;
-  for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
-    if (!all_requested && !requested_lookup.contains(row)) {
-      continue;
+  if (!all_requested) {
+    // When a specific active set is requested, iterate the requested rows
+    // directly and filter by patch level. This avoids constructing a
+    // population-scale hash set; the scan cost is O(|requested_rows|).
+    rows.reserve(requested_rows.size());
+    for (const std::uint32_t row : requested_rows) {
+      if (row >= state.cells.patch_index.size()) {
+        continue;
+      }
+      const std::uint32_t patch_index = state.cells.patch_index[row];
+      if (patch_index < state.patches.size() && state.patches.level[patch_index] == level) {
+        rows.push_back(row);
+      }
     }
-    if (row >= state.cells.patch_index.size()) {
-      continue;
-    }
-    const std::uint32_t patch_index = state.cells.patch_index[row];
-    if (patch_index < state.patches.size() && state.patches.level[patch_index] == level) {
-      rows.push_back(row);
+  } else {
+    // When all cells are active, scan once without a hash set.
+    rows.reserve(state.cells.size());
+    for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+      if (row >= state.cells.patch_index.size()) {
+        continue;
+      }
+      const std::uint32_t patch_index = state.cells.patch_index[row];
+      if (patch_index < state.patches.size() && state.patches.level[patch_index] == level) {
+        rows.push_back(row);
+      }
     }
   }
   return rows;
 }
 
 }  // namespace
+
+std::uint64_t activeLevelRowStagingBytes(
+    std::size_t coarse_capacity,
+    std::size_t fine_capacity) {
+  const std::size_t coarse_bytes = core::checkedSizeMultiply(
+      coarse_capacity, sizeof(std::uint32_t), "AMR active coarse row staging bytes");
+  const std::size_t fine_bytes = core::checkedSizeMultiply(
+      fine_capacity, sizeof(std::uint32_t), "AMR active fine row staging bytes");
+  return core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeAdd(coarse_bytes, fine_bytes, "AMR active level row staging peak"),
+      "AMR active level row staging width");
+}
+
+void fillActiveRowsForLevelInto(
+    const core::SimulationState& state,
+    int level,
+    std::span<const std::uint32_t> requested_rows,
+    std::vector<std::uint32_t>& out_rows) {
+  out_rows.clear();
+  const bool all_requested = requested_rows.empty();
+  if (!all_requested) {
+    for (const std::uint32_t row : requested_rows) {
+      if (row >= state.cells.patch_index.size()) {
+        continue;
+      }
+      const std::uint32_t patch_index = state.cells.patch_index[row];
+      if (patch_index < state.patches.size() && state.patches.level[patch_index] == level) {
+        out_rows.push_back(row);
+      }
+    }
+  } else {
+    for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+      if (row >= state.cells.patch_index.size()) {
+        continue;
+      }
+      const std::uint32_t patch_index = state.cells.patch_index[row];
+      if (patch_index < state.patches.size() && state.patches.level[patch_index] == level) {
+        out_rows.push_back(row);
+      }
+    }
+  }
+}
+
+void prepareAmrActiveLevelRows(
+    const core::SimulationState& state,
+    std::span<const std::uint32_t> requested_rows,
+    int min_level,
+    int max_level,
+    core::MemoryGovernor* governor,
+    AmrActiveLevelRowWorkspace& workspace) {
+  // Exact-count admission: scan (allocation-free) to determine per-level
+  // needs, then admit EXACTLY coarse_need+fine_need. Both lists coexist, so
+  // admission includes BOTH physical capacities. This is tighter than the
+  // 2x worst-case bound and preserves headroom for the sweep workspace below.
+  std::size_t coarse_need = 0U;
+  std::size_t fine_need = 0U;
+  if (requested_rows.empty()) {
+    for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
+      if (row >= state.cells.patch_index.size()) {
+        continue;
+      }
+      const std::uint32_t patch_index = state.cells.patch_index[row];
+      if (patch_index >= state.patches.size()) {
+        continue;
+      }
+      const int row_level = static_cast<int>(state.patches.level[patch_index]);
+      if (row_level == min_level) {
+        ++coarse_need;
+      }
+      if (row_level == max_level) {
+        ++fine_need;
+      }
+    }
+  } else {
+    for (const std::uint32_t row : requested_rows) {
+      if (row >= state.cells.patch_index.size()) {
+        continue;
+      }
+      const std::uint32_t patch_index = state.cells.patch_index[row];
+      if (patch_index >= state.patches.size()) {
+        continue;
+      }
+      const int row_level = static_cast<int>(state.patches.level[patch_index]);
+      if (row_level == min_level) {
+        ++coarse_need;
+      }
+      if (row_level == max_level) {
+        ++fine_need;
+      }
+    }
+  }
+  const std::uint64_t required_bytes =
+      activeLevelRowStagingBytes(coarse_need, fine_need);
+  const std::uint64_t retained_bytes = core::checkedMemoryBytesAdd(
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          workspace.coarse_rows.capacity(), sizeof(std::uint32_t),
+          "AMR active coarse retained bytes")),
+      static_cast<std::uint64_t>(core::checkedSizeMultiply(
+          workspace.fine_rows.capacity(), sizeof(std::uint32_t),
+          "AMR active fine retained bytes")),
+      "AMR active level retained bytes");
+  // Reuse retained capacity when sufficient: no new admission, no growth.
+  if (retained_bytes >= required_bytes && required_bytes > 0U) {
+    fillActiveRowsForLevelInto(state, min_level, requested_rows, workspace.coarse_rows);
+    fillActiveRowsForLevelInto(state, max_level, requested_rows, workspace.fine_rows);
+    return;
+  }
+  // Otherwise admit growth BEFORE vector growth. The reservation covers both
+  // physical capacities simultaneously.
+  core::MemoryReservation growth;
+  if (governor != nullptr && required_bytes > 0U) {
+    growth = governor->reserve(
+        core::MemoryClass::kPhaseResident, required_bytes,
+        "amr.active_level_rows.coarse_fine");
+    growth.commit();
+  }
+  if (workspace.coarse_rows.capacity() < coarse_need) {
+    workspace.coarse_rows.reserve(coarse_need);
+  }
+  if (workspace.fine_rows.capacity() < fine_need) {
+    workspace.fine_rows.reserve(fine_need);
+  }
+  fillActiveRowsForLevelInto(state, min_level, requested_rows, workspace.coarse_rows);
+  fillActiveRowsForLevelInto(state, max_level, requested_rows, workspace.fine_rows);
+  if (governor != nullptr) {
+    // Retain admission for the actual capacity so repeated subcycles reuse it.
+    // Release the transient growth lease and transfer to the workspace lease.
+    growth.release();
+    const std::uint64_t actual_bytes = core::checkedMemoryBytesAdd(
+        static_cast<std::uint64_t>(core::checkedSizeMultiply(
+            workspace.coarse_rows.capacity(), sizeof(std::uint32_t),
+            "AMR active coarse actual bytes")),
+        static_cast<std::uint64_t>(core::checkedSizeMultiply(
+            workspace.fine_rows.capacity(), sizeof(std::uint32_t),
+            "AMR active fine actual bytes")),
+        "AMR active level actual bytes");
+    workspace.reservation.release();
+    if (actual_bytes > 0U) {
+      workspace.reservation =
+          governor->reserve(core::MemoryClass::kPhaseResident, actual_bytes,
+                            "amr.active_level_rows.retained");
+      workspace.reservation.commit();
+    }
+    workspace.admitted_bytes = actual_bytes;
+  }
+}
 
 std::size_t mergeFluxRegistersIntoPendingStore(
     core::SimulationState& state,
@@ -1446,9 +1646,21 @@ RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
     std::span<const PatchDescriptor> all_patches,
     double adiabatic_index) {
   RefluxDiagnostics diagnostics;
-  std::vector<std::uint64_t> applied_keys;
-  applied_keys.reserve(state.pending_flux_registers.size());
-  for (const core::PendingFluxRegisterRecord& pending : state.pending_flux_registers.records()) {
+  // Gate-2 atomicity: phase 1 determines complete records, phase 2 fully
+  // validates every convertible target (including stale mappings and invalid
+  // axis/side metadata that fluxEntryFromPendingRecord can throw on) BEFORE
+  // any conserved-state mutation, phase 3 applies, phase 4 erases. Validation
+  // failure leaves canonical gas state AND pending register state unchanged so
+  // retry remains possible. No second SimulationState is created.
+  struct PendingCandidate {
+    std::size_t pending_index = 0U;
+    FluxRegisterEntry entry{};
+  };
+  std::vector<PendingCandidate> candidates;
+  candidates.reserve(state.pending_flux_registers.size());
+  auto mutable_records = state.pending_flux_registers.mutableRecords();
+  for (std::size_t index = 0; index < mutable_records.size(); ++index) {
+    const core::PendingFluxRegisterRecord& pending = mutable_records[index];
     if (!pending.isComplete()) {
       ++diagnostics.skipped_incomplete_register_count;
       continue;
@@ -1457,7 +1669,56 @@ RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
       ++diagnostics.skipped_missing_target_count;
       continue;
     }
-    const FluxRegisterEntry entry = fluxEntryFromPendingRecord(pending);
+    // Conversion can throw on invalid axis/side metadata. Doing it here,
+    // before any mutation, keeps the operation atomic.
+    FluxRegisterEntry entry = fluxEntryFromPendingRecord(pending);
+    candidates.push_back(PendingCandidate{.pending_index = index, .entry = entry});
+  }
+  // Phase 2: validate all candidate targets before mutating any canonical row.
+  // Pure validation pass (no mutation): replicate the throwing stale-mapping
+  // check for every candidate. This is the atomicity gate.
+  for (const auto& candidate : candidates) {
+    const FluxRegisterEntry& entry = candidate.entry;
+    if (!entry.isComplete()) {
+      continue;
+    }
+    const double area_scale = std::max({1.0, std::abs(entry.coarse_area_comov), std::abs(entry.fine_area_comov)});
+    if (entry.coarse_area_comov <= 0.0 || entry.fine_area_comov <= 0.0 ||
+        std::abs(entry.coarse_area_comov - entry.fine_area_comov) > 1.0e-10 * area_scale) {
+      continue;
+    }
+    if (entry.coarse_gas_cell_id == 0U) {
+      continue;
+    }
+    const auto patch_it = std::find_if(
+        all_patches.begin(), all_patches.end(),
+        [&entry](const PatchDescriptor& patch) { return patch.patch_id == entry.coarse_patch_id; });
+    if (patch_it == all_patches.end()) {
+      continue;
+    }
+    const auto row_opt = state.gas_cell_identity.rowForGasCellId(entry.coarse_gas_cell_id);
+    if (!row_opt.has_value()) {
+      continue;
+    }
+    const std::uint32_t row = *row_opt;
+    const auto* record = state.gas_cell_identity.findByGasCellId(entry.coarse_gas_cell_id);
+    if (record == nullptr || record->owning_patch_id != entry.coarse_patch_id) {
+      continue;
+    }
+    const auto patch_index = patchIndexById(state, entry.coarse_patch_id);
+    if (!patch_index.has_value() || row >= state.cells.patch_index.size() ||
+        state.cells.patch_index[row] != *patch_index ||
+        state.gas_cells.gas_cell_id[row] != entry.coarse_gas_cell_id ||
+        entry.coarse_cell_index >= product(patch_it->cell_dims) ||
+        patchLocalCellForRow(state, *patch_it, row, "applyFluxRegistersToSimulationState").linear_index != entry.coarse_cell_index) {
+      throw std::runtime_error("applyFluxRegistersToSimulationState rejected a stale AMR reflux target mapping");
+    }
+  }
+  // Phase 3: validation succeeded, so apply all corrections. Each single-entry
+  // apply re-validates but cannot hit the stale-mapping throw because phase 2
+  // already proved every target. Phase 4 marks/erases only truly applied rows.
+  for (const auto& candidate : candidates) {
+    const FluxRegisterEntry& entry = candidate.entry;
     RefluxDiagnostics one = applyFluxRegistersToSimulationState(state, std::span<const FluxRegisterEntry>(&entry, 1), all_patches, adiabatic_index);
     diagnostics.complete_register_count += one.complete_register_count;
     diagnostics.skipped_incomplete_register_count += one.skipped_incomplete_register_count;
@@ -1473,10 +1734,14 @@ RefluxDiagnostics applyCompletePendingFluxRegistersToSimulationState(
     diagnostics.corrected_energy_code += one.corrected_energy_code;
     diagnostics.corrected_internal_energy_code += one.corrected_internal_energy_code;
     if (one.complete_register_count == 1U) {
-      applied_keys.push_back(pending.register_key);
+      // Mark as consumed by zeroing the key so eraseCompleted is a no-op
+      // for already-applied records. The register_key==0 sentinel is already
+      // skipped by mergeFluxRegistersIntoPendingStore.
+      mutable_records[candidate.pending_index].register_key = 0U;
     }
   }
-  state.pending_flux_registers.eraseCompletedByKey(std::span<const std::uint64_t>(applied_keys.data(), applied_keys.size()));
+  // Erase records whose key was zeroed (successfully applied).
+  state.pending_flux_registers.eraseCompleted();
   return diagnostics;
 }
 
@@ -2285,8 +2550,16 @@ ProductionAmrHydroDiagnostics advanceProductionAmrHydroSubcycled(
   diagnostics.max_level_advanced = static_cast<std::size_t>(std::max(0, max_level));
   diagnostics.substeps_by_level.assign(static_cast<std::size_t>(max_level + 1), 0U);
 
-  const std::vector<std::uint32_t> coarse_rows = activeRowsForLevel(state, min_level, active_cell_rows);
-  const std::vector<std::uint32_t> fine_rows = activeRowsForLevel(state, max_level, active_cell_rows);
+  // Gate-2B: coarse_rows and fine_rows coexist. Admit BOTH capacities via the
+  // existing regrid governor BEFORE growth, reuse capacity across the fine
+  // substep loop (allocated once here), and reconcile actual capacity().
+  // Tight-headroom rejection happens here, before any solver mutation below.
+  AmrActiveLevelRowWorkspace level_rows;
+  prepareAmrActiveLevelRows(
+      state, active_cell_rows, min_level, max_level,
+      options.regrid_memory_governor, level_rows);
+  const std::vector<std::uint32_t>& coarse_rows = level_rows.coarse_rows;
+  const std::vector<std::uint32_t>& fine_rows = level_rows.fine_rows;
   const double coarse_start_code = options.state_time_code;
   const double coarse_end_code = coarse_start_code + coarse_update.dt_code;
   captureAmrTemporalBoundaryHistoryStart(state, descriptors, coarse_start_code, options.adiabatic_index, options.regrid_memory_governor);
@@ -2443,12 +2716,21 @@ ProductionAmrRegridDiagnostics refineProductionPatchInSimulationState(
       "production AMR refine new cell count");
   const std::size_t new_patch_count = core::checkedSizeAdd(
       state.patches.size() - 1U, 8U, "production AMR refine new patch count");
-  const std::size_t scratch_bytes = core::checkedSizeMultiply(
-      child_cell_count, sizeof(std::uint32_t),
-      "production AMR refine diagnostic row scratch bytes");
+  // Gate-3 live-set: parent_rows (parent_cell_count u32) and new_child_rows
+  // (child_cell_count u32) coexist with the candidate hierarchy (new_cell /
+  // new_patch state) before commit. Admission includes BOTH row buffers plus
+  // candidate state; unrelated phase maxima are NOT summed.
+  const std::size_t refine_row_scratch_bytes = core::checkedSizeAdd(
+      core::checkedSizeMultiply(
+          parent_cell_count, sizeof(std::uint32_t),
+          "production AMR refine parent-row scratch bytes"),
+      core::checkedSizeMultiply(
+          child_cell_count, sizeof(std::uint32_t),
+          "production AMR refine diagnostic row scratch bytes"),
+      "production AMR refine row scratch bytes");
   ProductionAmrRegridAdmission admission = admitProductionAmrRegrid(
       state, options,
-      productionAmrCandidateReservationBytes(new_cell_count, new_patch_count, scratch_bytes),
+      productionAmrCandidateReservationBytes(new_cell_count, new_patch_count, refine_row_scratch_bytes),
       "amr.production_refine.transaction");
 
   const std::vector<std::uint32_t> parent_rows =
@@ -2622,6 +2904,10 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
   const std::size_t kept_patch_count = core::checkedSizeAdd(
       state.patches.size() - 8U, 1U,
       "production AMR derefine kept patch count");
+  // Gate-3 live-set: child_rows (child u32) + restricted triple (parent
+  // Conserved/u64/u8) + one transient per-child row buffer (parent u32, reused
+  // sequentially) coexist with the kept-cell/kept-patch candidate before
+  // commit. Admission includes all simultaneously-live scratch.
   std::size_t scratch_bytes = core::checkedSizeMultiply(
       parent_cell_count,
       sizeof(ConservedState) + sizeof(std::uint64_t) + sizeof(std::uint8_t),
@@ -2631,6 +2917,12 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
       core::checkedSizeMultiply(
           child_cell_count, sizeof(std::uint32_t),
           "production AMR derefine child-row scratch bytes"),
+      "production AMR derefine scratch bytes");
+  scratch_bytes = core::checkedSizeAdd(
+      scratch_bytes,
+      core::checkedSizeMultiply(
+          parent_cell_count, sizeof(std::uint32_t),
+          "production AMR derefine transient per-child row scratch bytes"),
       "production AMR derefine scratch bytes");
   ProductionAmrRegridAdmission admission = admitProductionAmrRegrid(
       state, options,
@@ -2751,11 +3043,25 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
     }
   }
 
-  std::unordered_set<std::uint64_t> child_patch_ids;
-  child_patch_ids.reserve(8U);
-  for (const PatchDescriptor& child : children) {
-    child_patch_ids.insert(child.patch_id);
+  // Gate-3: exactly eight child IDs; sorted adjacent comparison replaces the
+  // small hash set with deterministic allocation-free duplicate detection.
+  std::array<std::uint64_t, 8U> child_patch_ids{};
+  for (std::size_t i = 0; i < children.size() && i < child_patch_ids.size(); ++i) {
+    child_patch_ids[i] = children[i].patch_id;
   }
+  {
+    std::array<std::uint64_t, 8U> sorted_ids = child_patch_ids;
+    std::sort(sorted_ids.begin(), sorted_ids.end());
+    for (std::size_t i = 1; i < sorted_ids.size(); ++i) {
+      if (sorted_ids[i - 1U] == sorted_ids[i]) {
+        throw std::runtime_error("production AMR derefine detected duplicate child patch id");
+      }
+    }
+  }
+  auto isChildPatch = [&child_patch_ids](std::uint64_t patch_id) {
+    return std::find(child_patch_ids.begin(), child_patch_ids.end(), patch_id) !=
+        child_patch_ids.end();
+  };
   const std::uint64_t identity_generation = nextIdentityGeneration(state);
   core::SimulationState candidate;
   candidate.resizeCells(kept_cell_count);
@@ -2768,7 +3074,7 @@ ProductionAmrRegridDiagnostics derefineProductionPatchInSimulationState(
   std::uint64_t next_parent_gas_cell_id = replacement_gas_cell_id;
   for (std::size_t old_patch_index = 0; old_patch_index < state.patches.size(); ++old_patch_index) {
     const std::uint64_t old_patch_id = state.patches.patch_id[old_patch_index];
-    if (child_patch_ids.contains(old_patch_id)) {
+    if (isChildPatch(old_patch_id)) {
       if (!inserted_parent) {
         writePatchDescriptorToStateRow(candidate, write_patch, parent_patch);
         candidate.patches.first_cell[write_patch] = core::checkedIntegralNarrow<std::uint32_t>(

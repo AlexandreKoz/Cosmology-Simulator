@@ -24,6 +24,7 @@
 #include <utility>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "parallel/internal/memory_constrained_sfc.hpp"
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
@@ -5549,10 +5550,57 @@ std::vector<AmrPatchCellPayloadRecord> executeBlockingAmrPatchCellPayloadExchang
   return std::vector<AmrPatchCellPayloadRecord>(local_records.begin(), local_records.end());
 }
 
+AmrFluxExchangeStagingPlan planAmrFluxExchangeStaging(
+    std::size_t total_inbound_capacity,
+    std::size_t max_peer_send_count,
+    std::size_t max_peer_receive_count,
+    std::size_t world_size) {
+  // Peak physical staging for the sequential blocking protocol:
+  //   retained inbound result
+  //   + one active peer outbound staging buffer (max over peers)
+  //   + one active peer receive staging buffer (max over peers)
+  //   + O(world_size) count metadata (send/recv u64 + active-peer int).
+  // Peer buffers are mutually exclusive across loop iterations, so only the
+  // single largest buffer in each direction is charged.
+  const std::size_t inbound_bytes = core::checkedSizeMultiply(
+      total_inbound_capacity, sizeof(AmrFluxRegisterPayloadRecord),
+      "AMR flux-register inbound staging bytes");
+  const std::size_t outbound_bytes = core::checkedSizeMultiply(
+      max_peer_send_count, sizeof(AmrFluxRegisterPayloadRecord),
+      "AMR flux-register peak outbound staging bytes");
+  const std::size_t receive_bytes = core::checkedSizeMultiply(
+      max_peer_receive_count, sizeof(AmrFluxRegisterPayloadRecord),
+      "AMR flux-register peak receive staging bytes");
+  const std::size_t send_counts_bytes = core::checkedSizeMultiply(
+      world_size, sizeof(std::uint64_t), "AMR flux-register send count metadata");
+  const std::size_t recv_counts_bytes = core::checkedSizeMultiply(
+      world_size, sizeof(std::uint64_t), "AMR flux-register recv count metadata");
+  const std::size_t peer_list_bytes = core::checkedSizeMultiply(
+      world_size, sizeof(int), "AMR flux-register active-peer metadata");
+  std::size_t peak = core::checkedSizeAdd(
+      inbound_bytes, outbound_bytes, "AMR flux-register staging peak");
+  peak = core::checkedSizeAdd(peak, receive_bytes, "AMR flux-register staging peak");
+  peak = core::checkedSizeAdd(peak, send_counts_bytes, "AMR flux-register staging peak");
+  peak = core::checkedSizeAdd(peak, recv_counts_bytes, "AMR flux-register staging peak");
+  peak = core::checkedSizeAdd(peak, peer_list_bytes, "AMR flux-register staging peak");
+  AmrFluxExchangeStagingPlan plan;
+  plan.total_inbound_capacity = total_inbound_capacity;
+  plan.max_peer_send_count = max_peer_send_count;
+  plan.max_peer_receive_count = max_peer_receive_count;
+  plan.peak_reservation_bytes =
+      core::checkedIntegralNarrow<std::uint64_t>(peak, "AMR flux-register staging peak width");
+  return plan;
+}
+
+std::uint64_t amrFluxExchangeStagingPeakBytes(const AmrFluxExchangeStagingPlan& plan) {
+  return plan.peak_reservation_bytes;
+}
+
 std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadExchange(
     const MpiContext& mpi_context,
     std::span<const AmrFluxRegisterPayloadRecord> local_records,
-    std::uint64_t exchange_sequence) {
+    std::uint64_t exchange_sequence,
+    core::MemoryGovernor* memory_governor) {
 #if !defined(COSMOSIM_ENABLE_MPI) || !COSMOSIM_ENABLE_MPI
   (void)exchange_sequence;
 #endif
@@ -5627,15 +5675,26 @@ std::vector<AmrFluxRegisterPayloadRecord> executeBlockingAmrFluxRegisterPayloadE
   mpi_context.rethrowCollectivePreparationFailure(
       local_preparation_failure, "AMR flux-register active-peer preparation");
 
+  const std::size_t local_owner_count = static_cast<std::size_t>(std::count_if(
+      local_records.begin(), local_records.end(),
+      [world_rank](const AmrFluxRegisterPayloadRecord& record) {
+        return record.owner_rank == world_rank;
+      }));
+  const std::size_t total_inbound_capacity = core::checkedSizeAdd(
+      total_inbound_records, local_owner_count,
+      "AMR flux-register inbound reserve");
+  const std::uint64_t inbound_bytes = core::checkedSizeMultiply(
+      total_inbound_capacity, sizeof(AmrFluxRegisterPayloadRecord),
+      "AMR flux-register inbound bytes");
+  core::MemoryReservation inbound_reservation;
+  if (memory_governor != nullptr && inbound_bytes > 0U) {
+    inbound_reservation = memory_governor->reserve(
+        core::MemoryClass::kCommunication, inbound_bytes,
+        "amr.flux_exchange.inbound_records");
+    inbound_reservation.commit();
+  }
   std::vector<AmrFluxRegisterPayloadRecord> inbound_records;
-  inbound_records.reserve(core::checkedSizeAdd(
-      total_inbound_records,
-      static_cast<std::size_t>(std::count_if(
-          local_records.begin(), local_records.end(),
-          [world_rank](const AmrFluxRegisterPayloadRecord& record) {
-            return record.owner_rank == world_rank;
-          })),
-      "AMR flux-register inbound reserve"));
+  inbound_records.reserve(total_inbound_capacity);
   for (const int peer_rank : active_peers) {
     const std::size_t peer = static_cast<std::size_t>(peer_rank);
     const std::size_t peer_send_count = core::checkedIntegralNarrow<std::size_t>(

@@ -1569,7 +1569,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         .state_time_code = context.integrator_state.current_time_code,
         .ghost_fill_time_code = context.integrator_state.current_time_code,
         .active_batch_policy = active_batch_policy,
-        .physical_density_cgs_per_density_code = physical_density_cgs_per_density_code};
+        .physical_density_cgs_per_density_code = physical_density_cgs_per_density_code,
+        .regrid_memory_governor = m_memory_governor};
     amr::ProductionAmrHydroDiagnostics amr_diagnostics;
     std::size_t remote_patch_count = 0;
     std::size_t remote_flux_register_count = 0;
@@ -1921,7 +1922,8 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         local_flux_payloads.push_back(record);
       }
       const auto global_flux_payloads = parallel::executeBlockingAmrFluxRegisterPayloadExchange(
-          m_mpi_context, local_flux_payloads, context.integrator_state.step_index);
+          m_mpi_context, local_flux_payloads, context.integrator_state.step_index,
+          m_memory_governor);
       directed_amr_diagnostics.outbound_reflux_count = static_cast<std::uint64_t>(local_flux_payloads.size());
       directed_amr_diagnostics.inbound_reflux_count = static_cast<std::uint64_t>(global_flux_payloads.size());
       directed_amr_diagnostics.directed_flux_records_sent = static_cast<std::uint64_t>(local_flux_payloads.size());
@@ -1930,13 +1932,10 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
           (static_cast<std::uint64_t>(local_flux_payloads.size()) + static_cast<std::uint64_t>(global_flux_payloads.size())) *
           sizeof(parallel::AmrFluxRegisterPayloadRecord);
       std::vector<amr::FluxRegisterEntry> inbound_entries;
-      std::unordered_set<std::uint64_t> inbound_keys;
+      inbound_entries.reserve(global_flux_payloads.size());
       for (const auto& payload : global_flux_payloads) {
         if (payload.owner_rank != m_mpi_context.worldRank()) {
           continue;
-        }
-        if (!inbound_keys.insert(payload.register_key).second) {
-          throw std::runtime_error("distributed AMR hydro received duplicate reflux register key for local owner");
         }
         inbound_entries.push_back(amr::FluxRegisterEntry{
             .register_key = payload.register_key,
@@ -1966,6 +1965,21 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
             .dt_code = payload.dt_code,
             .coarse_face_count = payload.coarse_face_count,
             .fine_face_count = payload.fine_face_count});
+      }
+      // Validate duplicate keys via sorted adjacent comparison instead of
+      // a population-scale hash set.
+      if (inbound_entries.size() > 1U) {
+        std::vector<std::uint64_t> sort_keys;
+        sort_keys.reserve(inbound_entries.size());
+        for (const auto& entry : inbound_entries) {
+          sort_keys.push_back(entry.register_key);
+        }
+        std::sort(sort_keys.begin(), sort_keys.end());
+        for (std::size_t i = 1; i < sort_keys.size(); ++i) {
+          if (sort_keys[i - 1U] == sort_keys[i]) {
+            throw std::runtime_error("distributed AMR hydro received duplicate reflux register key for local owner");
+          }
+        }
       }
       inbound_flux_register_count = inbound_entries.size();
       remote_flux_register_count = local_flux_payloads.size();

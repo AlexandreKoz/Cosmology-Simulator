@@ -3295,9 +3295,121 @@ void writeRestartCheckpointHdf5(
 #endif
 }
 
-RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_path) {
+std::uint64_t restartReadCandidateStagingBytes(
+    const RestartReadCandidateDimensions& dimensions) {
+  // Conservative per-row widths for the dominant candidate families. These are
+  // physical capacity upper bounds admitted BEFORE any population vector is
+  // constructed. Checked arithmetic rejects overflow before allocation.
+  const auto mul = [](std::uint64_t count, std::uint64_t width, std::string_view label) {
+    if (width != 0U && count > std::numeric_limits<std::uint64_t>::max() / width) {
+      throw std::overflow_error(std::string(label) + ": restart candidate extent overflows uint64");
+    }
+    return count * width;
+  };
+  // Particles: 7x f64 SoA + 1x u8 time_bin + sidecar (2x u64 + 2x u32 + 3x f64).
+  constexpr std::uint64_t k_particle_bytes =
+      7U * sizeof(double) + sizeof(std::uint8_t) + 2U * sizeof(std::uint64_t) +
+      2U * sizeof(std::uint32_t) + 3U * sizeof(double);
+  // Cells: 4x f64 + u8 + u32 + gas sidecar (2x u64 + 9x f64).
+  constexpr std::uint64_t k_cell_bytes =
+      4U * sizeof(double) + sizeof(std::uint8_t) + sizeof(std::uint32_t) +
+      2U * sizeof(std::uint64_t) + 9U * sizeof(double);
+  // Patches: coarse patch SoA estimate.
+  constexpr std::uint64_t k_patch_bytes =
+      3U * sizeof(std::uint64_t) + sizeof(std::int32_t) + 3U * sizeof(std::uint32_t) +
+      6U * sizeof(double) + 3U * sizeof(std::uint16_t) + sizeof(std::uint32_t);
+  // Pending flux register record + temporal cell record estimates.
+  constexpr std::uint64_t k_pending_bytes = 32U * sizeof(double) + 8U * sizeof(std::uint64_t);
+  constexpr std::uint64_t k_temporal_bytes = 16U * sizeof(double) + 4U * sizeof(std::uint64_t);
+  std::uint64_t total = mul(dimensions.particle_count, k_particle_bytes, "restart particle candidate");
+  total = core::checkedMemoryBytesAdd(
+      total, mul(dimensions.cell_count, k_cell_bytes, "restart cell candidate"),
+      "restart candidate cells");
+  total = core::checkedMemoryBytesAdd(
+      total, mul(dimensions.patch_count, k_patch_bytes, "restart patch candidate"),
+      "restart candidate patches");
+  total = core::checkedMemoryBytesAdd(
+      total, mul(dimensions.pending_flux_count, k_pending_bytes, "restart pending candidate"),
+      "restart candidate pending flux");
+  total = core::checkedMemoryBytesAdd(
+      total,
+      mul(dimensions.temporal_cell_count, k_temporal_bytes, "restart temporal candidate"),
+      "restart candidate temporal history");
+  return total;
+}
+
+#if COSMOSIM_ENABLE_HDF5
+[[nodiscard]] std::uint64_t hdf5DatasetLength1dChecked(hid_t loc, const char* path, std::string_view label) {
+  Hdf5Handle dataset(H5Dopen2(loc, path, H5P_DEFAULT));
+  if (!dataset.valid()) {
+    throw std::runtime_error("restart preflight missing dataset: " + std::string(path));
+  }
+  Hdf5Handle space(H5Dget_space(dataset.get()));
+  if (!space.valid() || H5Sget_simple_extent_ndims(space.get()) != 1) {
+    throw std::runtime_error("restart preflight expected 1D dataset: " + std::string(path));
+  }
+  hsize_t dims[1] = {0};
+  if (H5Sget_simple_extent_dims(space.get(), dims, nullptr) != 1) {
+    throw std::runtime_error("restart preflight cannot read extent: " + std::string(path));
+  }
+  // hsize_t is 64-bit; reject values that cannot fit size_t allocation.
+  const std::uint64_t length = static_cast<std::uint64_t>(dims[0]);
+  if (length > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+    throw std::length_error(std::string(label) + ": restart dimension exceeds addressable size_t");
+  }
+  // Impossible-dimension guard before any allocation: cap at 2^40 rows (~1T).
+  constexpr std::uint64_t k_max_plausible_rows = std::uint64_t{1} << 40U;
+  if (length > k_max_plausible_rows) {
+    throw std::length_error(std::string(label) + ": restart dimension is implausible before allocation");
+  }
+  return length;
+}
+
+[[nodiscard]] RestartReadCandidateDimensions preflightRestartCandidateDimensions(
+    hid_t file, const RestartReadPolicy& policy) {
+  RestartReadCandidateDimensions dims;
+  dims.particle_count =
+      hdf5DatasetLength1dChecked(file, "/state/particles/position_x_comoving", "particles");
+  dims.cell_count =
+      hdf5DatasetLength1dChecked(file, "/state/cells/center_x_comoving", "cells");
+  dims.patch_count =
+      hdf5DatasetLength1dChecked(file, "/state/patches/patch_id", "patches");
+  // Optional groups: missing links mean zero count (older schemas).
+  if (H5Lexists(file, "/state/amr_pending_flux_registers/register_key", H5P_DEFAULT) > 0) {
+    dims.pending_flux_count = hdf5DatasetLength1dChecked(
+        file, "/state/amr_pending_flux_registers/register_key", "pending flux");
+  }
+  if (H5Lexists(file, "/state/amr_temporal_boundary_history/cell_count", H5P_DEFAULT) > 0) {
+    // Temporal history cell count is per-record cells; use record count as bound.
+    dims.temporal_cell_count = hdf5DatasetLength1dChecked(
+        file, "/state/amr_temporal_boundary_history/patch_id", "temporal history");
+  }
+  if (policy.enforce_dimension_consistency) {
+    // Cross-dataset consistency BEFORE allocation: all lanes of a family must
+    // agree, otherwise reject instead of truncating.
+    const std::uint64_t py =
+        hdf5DatasetLength1dChecked(file, "/state/particles/position_y_comoving", "particles.y");
+    const std::uint64_t pid =
+        hdf5DatasetLength1dChecked(file, "/state/particle_sidecar/particle_id", "particle_id");
+    if (py != dims.particle_count || pid != dims.particle_count) {
+      throw std::runtime_error("restart dimension inconsistency: particle lanes disagree");
+    }
+    const std::uint64_t gas =
+        hdf5DatasetLength1dChecked(file, "/state/gas_cells/gas_cell_id", "gas_cells");
+    if (gas != dims.cell_count) {
+      throw std::runtime_error("restart dimension inconsistency: cell/gas-cell lanes disagree");
+    }
+  }
+  return dims;
+}
+#endif
+
+RestartReadResult readRestartCheckpointHdf5(
+    const std::filesystem::path& input_path,
+    const RestartReadPolicy& policy) {
 #if !COSMOSIM_ENABLE_HDF5
   (void)input_path;
+  (void)policy;
   throw std::runtime_error("restart checkpoint requires COSMOSIM_ENABLE_HDF5=ON");
 #else
   Hdf5Handle file(H5Fopen(input_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT));
@@ -3338,6 +3450,25 @@ RestartReadResult readRestartCheckpointHdf5(const std::filesystem::path& input_p
         ", expected='" + restartSchema().name + "' v" + std::to_string(restartSchema().version));
   }
   validateRestartCheckpointSchema(file.get(), schema_version);
+
+  // Gate-5 real readback transaction: preflight HDF5 dimensions BEFORE any
+  // population allocation, reject overflow/implausible extents, then admit the
+  // ACTUAL candidate storage via policy.memory_governor. The live simulation
+  // already occupies committed memory; the candidate is incremental and
+  // coexists with it. The reader is the physical owner of this reservation
+  // (workflow does NOT double-reserve). Candidate vectors below read directly
+  // into final storage (no temp-then-copy) and verification runs before the
+  // candidate could ever become canonical (caller decides publication).
+  const RestartReadCandidateDimensions candidate_dims =
+      preflightRestartCandidateDimensions(file.get(), policy);
+  const std::uint64_t candidate_bytes = restartReadCandidateStagingBytes(candidate_dims);
+  core::MemoryReservation readback_reservation;
+  if (policy.memory_governor != nullptr && candidate_bytes > 0U) {
+    readback_reservation = policy.memory_governor->reserve(
+        core::MemoryClass::kPhaseResident, candidate_bytes,
+        "restart.readback.candidate");
+    readback_reservation.commit();
+  }
 
   RestartReadResult result;
   result.normalized_config_hash_hex = readScalarStringAttribute(file.get(), "normalized_config_hash_hex");
