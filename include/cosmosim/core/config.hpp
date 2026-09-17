@@ -82,7 +82,10 @@ enum class InitialConditionCoordinateFrame {
 enum class InitialConditionVelocityConvention {
   kUnspecified,
   kPhysicalPeculiar,
+  // Legacy/custom convention: stored = sqrt(a) * peculiar, so import multiplies by 1/sqrt(a).
   kSqrtAScaledPeculiar,
+  // Standard GADGET/AREPO cosmological snapshot convention: peculiar = stored * sqrt(a).
+  kGadgetArepoStoredPeculiar,
   kComovingCoordinateRate,
 };
 

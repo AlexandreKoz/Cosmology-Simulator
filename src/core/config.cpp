@@ -540,13 +540,16 @@ parseInitialConditionVelocityConvention(const std::string& value) {
   if (lower == "sqrt_a_scaled_peculiar") {
     return InitialConditionVelocityConvention::kSqrtAScaledPeculiar;
   }
+  if (lower == "gadget_arepo_stored_peculiar") {
+    return InitialConditionVelocityConvention::kGadgetArepoStoredPeculiar;
+  }
   if (lower == "comoving_coordinate_rate") {
     return InitialConditionVelocityConvention::kComovingCoordinateRate;
   }
   throw ConfigError(
       "key 'mode.ic_bridge_velocity_convention': invalid value '" + value +
       "' (supported: physical_peculiar, sqrt_a_scaled_peculiar, "
-      "comoving_coordinate_rate)");
+      "gadget_arepo_stored_peculiar, comoving_coordinate_rate)");
 }
 
 [[nodiscard]] InitialConditionSpeciesPolicy parseInitialConditionSpeciesPolicy(
@@ -1544,6 +1547,15 @@ void validateConfig(const SimulationConfig& config) {
   }
   if (config.cosmology.omega_baryon > config.cosmology.omega_matter) {
     throw ConfigError("cosmology.omega_baryon must be <= cosmology.omega_matter");
+  }
+  constexpr double k_cosmology_closure_tolerance = 1.0e-10;
+  const double flat_density_sum =
+      config.cosmology.omega_matter + config.cosmology.omega_lambda;
+  if (!std::isfinite(flat_density_sum) ||
+      std::abs(flat_density_sum - 1.0) > k_cosmology_closure_tolerance) {
+    throw ConfigError(
+        "cosmology currently supports a flat radiation-free matter+Lambda background; "
+        "omega_matter + omega_lambda must equal 1 within 1e-10 so H(a=1) == H0");
   }
   auto requireOptionalPositiveSoftening = [](double value, const char* key) {
     if (value == 0.0) {
@@ -3633,6 +3645,8 @@ std::string initialConditionVelocityConventionToString(
       return "physical_peculiar";
     case InitialConditionVelocityConvention::kSqrtAScaledPeculiar:
       return "sqrt_a_scaled_peculiar";
+    case InitialConditionVelocityConvention::kGadgetArepoStoredPeculiar:
+      return "gadget_arepo_stored_peculiar";
     case InitialConditionVelocityConvention::kComovingCoordinateRate:
       return "comoving_coordinate_rate";
   }

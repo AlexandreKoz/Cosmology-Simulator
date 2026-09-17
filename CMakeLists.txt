@@ -1604,6 +1604,8 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_restart_equivalence_${stage8_case}
       COMMAND test_integration_restart_equivalence_${stage8_case})
   endforeach()
+  target_include_directories(
+    test_integration_restart_equivalence_dm_only PRIVATE ${PROJECT_SOURCE_DIR}/src)
   add_custom_target(integration_restart_equivalence_amr_hydro DEPENDS test_integration_restart_equivalence_amr_hydro)
   add_custom_target(integration_restart_equivalence_amr_flux_registers DEPENDS test_integration_restart_equivalence_amr_flux_registers)
   add_executable(

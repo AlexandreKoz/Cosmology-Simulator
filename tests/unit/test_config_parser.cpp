@@ -169,7 +169,7 @@ void testTypedInitialConditionConfiguration() {
       "ic_bridge_source_mass_unit_to_si = 1.98847e30\n"
       "ic_bridge_source_velocity_unit_to_si = 1000\n"
       "ic_bridge_coordinate_frame = comoving\n"
-      "ic_bridge_velocity_convention = physical_peculiar\n"
+      "ic_bridge_velocity_convention = gadget_arepo_stored_peculiar\n"
       "ic_bridge_length_hubble_exponent = 0\n"
       "ic_bridge_length_scale_factor_exponent = 0\n"
       "ic_bridge_mass_hubble_exponent = 0\n"
@@ -211,6 +211,11 @@ void testTypedInitialConditionConfiguration() {
       std::string::npos);
   assert(bridge.normalized_text.find(
              "ic_bridge_coordinate_frame = comoving") != std::string::npos);
+  assert(bridge.config.mode.ic_bridge_velocity_convention ==
+         cosmosim::core::InitialConditionVelocityConvention::kGadgetArepoStoredPeculiar);
+  assert(bridge.normalized_text.find(
+             "ic_bridge_velocity_convention = gadget_arepo_stored_peculiar") !=
+         std::string::npos);
 
   bool incomplete_bridge_rejected = false;
   try {
@@ -1347,6 +1352,38 @@ void testPowerSpectrumMeshMatchesCompiledFftBackend() {
   assert(valid.config.analysis.power_spectrum_mesh_n == 8);
 }
 
+void testFlatCosmologyClosureContract() {
+  const auto fiducial = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[cosmology]\n"
+      "omega_matter = 0.3\n"
+      "omega_lambda = 0.7\n",
+      "flat_lcdm_closure");
+  assert(fiducial.config.cosmology.omega_matter == 0.3);
+  assert(fiducial.config.cosmology.omega_lambda == 0.7);
+  assert(fiducial.normalized_text.find("omega_matter = 0.3") != std::string::npos);
+  assert(fiducial.normalized_text.find("omega_lambda = 0.7") != std::string::npos);
+
+  const auto eds = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[cosmology]\n"
+      "omega_matter = 1\n"
+      "omega_lambda = 0\n",
+      "eds_closure");
+  assert(eds.config.cosmology.omega_matter == 1.0);
+  assert(eds.config.cosmology.omega_lambda == 0.0);
+
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[cosmology]\n"
+        "omega_matter = 0.3\n"
+        "omega_lambda = 0\n",
+        "inconsistent_cosmology_closure");
+  } catch (const cosmosim::core::ConfigError&) {
+    rejected = true;
+  }
+  assert(rejected);
+}
+
 void testOutputCodeTimeCadenceValidationAndRoundtrip() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[output]\n"
@@ -1409,6 +1446,7 @@ int main() {
   testTracerConfigKeysAndValidation();
   testZoomLongRangeStrategyValidationAndRoundtrip();
   testCosmologyScaleFactorRedshiftCanonicalizationAndValidation();
+  testFlatCosmologyClosureContract();
   testIntegratorTimeVariableIsTypedAndCanonical();
   testAdversarialPhysicsAndCosmologyDependenciesFail();
   testFiniteNumericAndForwardCosmologyContract();

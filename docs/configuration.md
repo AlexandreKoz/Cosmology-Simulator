@@ -111,7 +111,12 @@ External initial conditions are never selected by filename alone. The typed
 - `gadget_arepo_bridge_v1`: requires a complete direct-bridge scientific
   convention. The source length, mass, and velocity SI scales, coordinate frame,
   velocity convention, and all length/mass/velocity h and scale-factor exponents
-  are mandatory. There are no kpc/Msun/km/s or frame defaults.
+  are mandatory. There are no kpc/Msun/km/s or frame defaults. Standard
+  GADGET/AREPO cosmological snapshot velocities must declare
+  `gadget_arepo_stored_peculiar`, which applies
+  `v_peculiar = v_stored * sqrt(a)`. The legacy/custom
+  `sqrt_a_scaled_peculiar` convention is intentionally distinct and retains its
+  existing inverse-`sqrt(a)` import semantic.
 - `manifest_v1`: loads the strict versioned audit manifest named by
   `mode.ic_manifest_file`; relative source paths are resolved from the manifest.
   `mode.ic_file` is not required. If it is supplied, it is only a compatibility
@@ -142,7 +147,7 @@ ic_bridge_source_length_unit_to_si = 3.0856775814913673e22
 ic_bridge_source_mass_unit_to_si = 1.98847e30
 ic_bridge_source_velocity_unit_to_si = 1000
 ic_bridge_coordinate_frame = comoving
-ic_bridge_velocity_convention = physical_peculiar
+ic_bridge_velocity_convention = gadget_arepo_stored_peculiar
 ic_bridge_length_hubble_exponent = -1
 ic_bridge_length_scale_factor_exponent = 0
 ic_bridge_mass_hubble_exponent = -1
@@ -181,6 +186,12 @@ ic_manifest_file = ../ics/cube.ic_manifest.json
 
 - `omega_matter`, `omega_lambda`, `omega_baryon`
 - `hubble_param`, `sigma8`, `scalar_index_ns`
+
+The production `.param.txt` cosmology is currently a flat, radiation-free
+matter-plus-Lambda model. Validation therefore requires
+`omega_matter + omega_lambda = 1` within `1e-10`. This makes the configured
+`hubble_param` the actual present-day Hubble constant, i.e. `H(a=1) = H0`.
+Einstein-de Sitter (`omega_matter=1`, `omega_lambda=0`) is accepted.
 - canonical axis-aware box lengths:
   - `box_size_x`, `box_size_y`, `box_size_z` (recommended; normalized output always emits these keys)
 - backward-compatible scalar input:

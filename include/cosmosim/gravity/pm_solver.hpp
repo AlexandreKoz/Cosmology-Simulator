@@ -232,6 +232,8 @@ struct PmProfileEvent {
   std::uint64_t routed_combined_buffer_high_water_bytes = 0;
   std::uint64_t routed_workspace_high_water_bytes = 0;
   std::uint64_t force_halo_cache_hits = 0;
+  // Counts reconstruction of the scale-free Poisson/gradient operator arrays.
+  std::uint64_t spectral_operator_rebuilds = 0;
   std::uint64_t isolated_open_root_workspace_estimate_bytes = 0;
   std::uint64_t isolated_open_root_workspace_limit_bytes = 0;
   std::uint64_t isolated_open_gather_bytes = 0;

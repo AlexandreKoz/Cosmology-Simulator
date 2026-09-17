@@ -21,6 +21,17 @@ contracts remain mandatory. See `docs/repair/m2d_final_coding_closure_20260908.m
 
 The new authoritative source includes the prior M2D patch plus bounded retained source-cell staging, fixed-key AMR flux accumulation, contiguous admitted step-start ghost snapshots, and streamed distributed restart metadata/HDF5 writing/integrity hashing. See `docs/repair/m2d_owner_lifetime_continuation_20260909.md`. Focused CPU and HDF5 source/scientific/restart tests pass. Full stage-wide source, AMR, and I/O owner-lifetime contracts remain incomplete; this continuation is not a certification of M2D or of a 48 GiB workstation envelope. The dispatcher stays serial and incomplete tasks remain non-overlappable. Real MPI and FFTW configuration is blocked by missing development dependencies in the repair environment. Full build and package-completeness inventories are not yet accepted.
 
+## DMO first-light correctness closure — 2026-09-16
+
+The current repair closes four first-run DMO hazards: flat cosmology density
+normalization is validated so `H(a=1)=H0`; standard GADGET/AREPO cosmological
+stored velocities have an explicit `gadget_arepo_stored_peculiar` convention
+with `v_peculiar=v_stored*sqrt(a)` while the legacy custom convention is
+preserved; restart exact-equivalence covers authoritative particle drift
+history; and invariant PM spectral operators no longer rebuild solely because
+`scale_factor` changes. This is DMO first-light closure, not full-physics
+scientific certification.
+
 ## Configuration policy
 
 Simulation inputs, examples, release profiles, fixtures, and normalized copies

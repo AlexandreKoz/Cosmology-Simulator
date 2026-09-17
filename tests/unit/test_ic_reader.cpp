@@ -11,6 +11,7 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/io/ic_reader.hpp"
+#include "io/internal/snapshot_conversion.hpp"
 #include "io/internal/ic_canonical_limits.hpp"
 #include "io/internal/ic_reader_session.hpp"
 
@@ -120,6 +121,9 @@ void testManifestValidationAndConversions() {
              cosmosim::io::IcVelocityConvention::kSqrtAScaledPeculiar,
              0.25) == 2.0);
   assert(cosmosim::io::icVelocityConventionMultiplier(
+             cosmosim::io::IcVelocityConvention::kGadgetArepoStoredPeculiar,
+             0.25) == 0.5);
+  assert(cosmosim::io::icVelocityConventionMultiplier(
              cosmosim::io::IcVelocityConvention::kComovingCoordinateRate,
              0.25) == 0.25);
   const std::string json = cosmosim::io::serializeIcManifestJson(manifest);
@@ -180,6 +184,34 @@ void testManifestValidationAndConversions() {
     rejected_dimension_drift = true;
   }
   assert(rejected_dimension_drift);
+}
+
+void testGadgetArepoVelocityConventionMatchesSnapshotPath() {
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.units.length_unit = "mpc";
+  config.units.mass_unit = "msun";
+  config.units.velocity_unit = "km_s";
+  config.cosmology.hubble_param = 0.674;
+
+  for (const double scale_factor : {0.25, 0.5}) {
+    const auto snapshot_conversion = cosmosim::io::internal::makeSnapshotConversionContext(
+        cosmosim::io::SnapshotDialect::kArepoFormat3, config, scale_factor);
+    const double stored_velocity = 8.0;
+    const double expected_peculiar = stored_velocity * std::sqrt(scale_factor);
+    const double ic_peculiar = stored_velocity * cosmosim::io::icVelocityConventionMultiplier(
+        cosmosim::io::IcVelocityConvention::kGadgetArepoStoredPeculiar,
+        scale_factor);
+    assert(std::abs(ic_peculiar - expected_peculiar) < 1.0e-12);
+    assert(std::abs(snapshot_conversion.velocityFromStored(stored_velocity) -
+                    expected_peculiar) < 1.0e-12);
+    assert(std::abs(snapshot_conversion.velocityToStored(expected_peculiar) -
+                    stored_velocity) < 1.0e-12);
+    assert(std::abs(
+               cosmosim::io::icVelocityConventionMultiplier(
+                   cosmosim::io::IcVelocityConvention::kGadgetArepoStoredPeculiar,
+                   scale_factor) -
+               snapshot_conversion.velocityFromStored(1.0)) < 1.0e-12);
+  }
 }
 
 void testGeneratedIsolatedIcSpeciesAndOwnership() {
@@ -1227,6 +1259,16 @@ void testSharedDimensionalConversionContract() {
   assert(manifest_driven.state.black_holes.accretion_rate_code ==
          direct.state.black_holes.accretion_rate_code);
 
+  auto gadget_velocity_config = config;
+  gadget_velocity_config.mode.ic_bridge_velocity_convention =
+      cosmosim::core::InitialConditionVelocityConvention::kGadgetArepoStoredPeculiar;
+  const auto gadget_velocity = cosmosim::io::readGadgetArepoHdf5Ic(
+      path, gadget_velocity_config, cosmosim::io::IcImportOptions{
+          .validate_runtime_cosmology = false});
+  assert(std::abs(
+      gadget_velocity.state.particles.velocity_x_peculiar[0] -
+      std::sqrt(0.5)) < 1.0e-12);
+
   auto physical_velocity_config = config;
   physical_velocity_config.mode.ic_bridge_velocity_convention =
       cosmosim::core::InitialConditionVelocityConvention::kPhysicalPeculiar;
@@ -1741,6 +1783,7 @@ void testHdf5MalformedSchemaSafety() {
 int main() {
   testCanonicalSingleFileCountLimit();
   testManifestValidationAndConversions();
+  testGadgetArepoVelocityConventionMatchesSnapshotPath();
   testGeneratedIsolatedIcSpeciesAndOwnership();
   testGeneratedConverterDefaultAudit();
   testHdf5GateBehavior();

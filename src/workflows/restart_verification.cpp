@@ -42,6 +42,8 @@ namespace {
       restored.particle_sidecar.species_tag == reference.particle_sidecar.species_tag &&
       restored.particle_sidecar.particle_flags == reference.particle_sidecar.particle_flags &&
       restored.particle_sidecar.owning_rank == reference.particle_sidecar.owning_rank &&
+      restored.particle_sidecar.last_drift_time_code == reference.particle_sidecar.last_drift_time_code &&
+      restored.particle_sidecar.last_drift_scale_factor == reference.particle_sidecar.last_drift_scale_factor &&
       restored.particle_sidecar.gravity_softening_comoving == reference.particle_sidecar.gravity_softening_comoving &&
       restored.particle_sidecar.has_gravity_softening_override == reference.particle_sidecar.has_gravity_softening_override &&
       restored.cells.center_x_comoving == reference.cells.center_x_comoving &&

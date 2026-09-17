@@ -406,3 +406,12 @@ The public hash helpers retain their one-argument compatibility surface and
 accept an optional governor for this scratch. This is not a complete restart
 readback admission certificate; full result ownership and verification-time
 scheduler/metadata coexistence remain separately tracked M2D gaps.
+
+### DMO exact-equivalence coverage
+
+The internal `restartRuntimeStateExactlyEquivalent(...)` verification contract
+includes the authoritative particle drift-history sidecar lanes
+`last_drift_time_code` and `last_drift_scale_factor`. These lanes were already
+serialized in the restart schema; this is comparator coverage only and does not
+change the restart schema version. Mutation-sensitivity coverage in the DMO
+restart-equivalence test requires either lane to make exact comparison fail.

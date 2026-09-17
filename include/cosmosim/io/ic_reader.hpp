@@ -48,6 +48,7 @@ enum class IcVelocityConvention : std::uint8_t {
   kPhysicalPeculiar = 1,
   kSqrtAScaledPeculiar = 2,
   kComovingCoordinateRate = 3,
+  kGadgetArepoStoredPeculiar = 4,
 };
 
 enum class IcFieldSemantics : std::uint8_t {

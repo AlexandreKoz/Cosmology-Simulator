@@ -25,6 +25,8 @@ IcVelocityConvention mapBridgeVelocityConvention(
       return IcVelocityConvention::kPhysicalPeculiar;
     case core::InitialConditionVelocityConvention::kSqrtAScaledPeculiar:
       return IcVelocityConvention::kSqrtAScaledPeculiar;
+    case core::InitialConditionVelocityConvention::kGadgetArepoStoredPeculiar:
+      return IcVelocityConvention::kGadgetArepoStoredPeculiar;
     case core::InitialConditionVelocityConvention::kComovingCoordinateRate:
       return IcVelocityConvention::kComovingCoordinateRate;
     case core::InitialConditionVelocityConvention::kUnspecified:

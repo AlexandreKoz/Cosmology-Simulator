@@ -578,3 +578,12 @@ geometry/ghost and I/O metadata allocation ownership must be completed before
 claiming a whole-task certificate. Full CPU/HDF5 inventories, extracted-source
 completeness, distributed fault/restart/science equivalence, and measured
 whole-process/topology evidence remain separate acceptance gates.
+
+### DMO first-light closure regressions (2026-09-16)
+
+Focused CPU/HDF5 regressions cover: flat cosmology normalization and
+`H(a=1)=H0`; explicit standard GADGET/AREPO `sqrt(a)` stored-velocity semantics
+at `a=0.25` and `a=0.5` with cross-check against snapshot conversion; DMO
+restart mutation sensitivity for particle drift-history state; and PM
+spectral-operator cache reuse when only cosmological scale factor changes.
+The PM scale factor remains in distributed collective consensus.

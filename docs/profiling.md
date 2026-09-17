@@ -269,3 +269,13 @@ measurement authority. Compare identical numerical configurations and thread
 counts; do not equate a declared reservation with measured RSS. A required
 health preflight is owner-managed and does not constitute a second physical
 allocation.
+
+### PM spectral-operator cache telemetry
+
+`PmProfileEvent::spectral_operator_rebuilds` counts reconstructions of the
+scale-free periodic PM Poisson/gradient operator arrays. Cosmological
+`scale_factor` remains part of PM collective-entry consensus and force-state
+coordination, but it is not an invariant spectral-operator cache dependency.
+Changing only `scale_factor` therefore must leave this counter at zero after an
+operator has already been built for the same mesh, box, split scale, gravity
+constant, assignment scheme, and deconvolution policy.

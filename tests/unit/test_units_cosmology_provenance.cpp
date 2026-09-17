@@ -35,6 +35,38 @@ void testHubbleAndCriticalDensityAtAOne() {
   assert(std::abs((rho_crit - expected_rho) / expected_rho) < k_tolerance);
 }
 
+void testCosmologyDensityClosureContract() {
+  cosmosim::core::CosmologyBackgroundConfig eds;
+  eds.hubble_param = 0.7;
+  eds.omega_matter = 1.0;
+  eds.omega_lambda = 0.0;
+  eds.omega_radiation = 0.0;
+  eds.omega_curvature = 0.0;
+  const cosmosim::core::LambdaCdmBackground eds_background(eds);
+  assert(std::abs(eds_background.hubbleSi(1.0) - eds_background.hubble0Si()) /
+             eds_background.hubble0Si() < k_tolerance);
+
+  cosmosim::core::CosmologyBackgroundConfig with_radiation;
+  with_radiation.hubble_param = 0.67;
+  with_radiation.omega_matter = 0.30;
+  with_radiation.omega_lambda = 0.68;
+  with_radiation.omega_radiation = 0.02;
+  with_radiation.omega_curvature = 0.0;
+  const cosmosim::core::LambdaCdmBackground radiation_background(with_radiation);
+  assert(std::abs(radiation_background.hubbleSi(1.0) - radiation_background.hubble0Si()) /
+             radiation_background.hubble0Si() < k_tolerance);
+
+  auto inconsistent = eds;
+  inconsistent.omega_matter = 0.3;
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::LambdaCdmBackground(inconsistent);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
+}
+
 void testScaleFactorDependence() {
   cosmosim::core::CosmologyBackgroundConfig cfg;
   cfg.hubble_param = 0.67;
@@ -299,6 +331,7 @@ void testInvalidUnitsCosmologyAndProvenanceFailClosed() {
 
 int main() {
   testHubbleAndCriticalDensityAtAOne();
+  testCosmologyDensityClosureContract();
   testScaleFactorDependence();
   testEinsteinDeSitterCosmicTimeIntegral();
   testComovingPhysicalConversions();

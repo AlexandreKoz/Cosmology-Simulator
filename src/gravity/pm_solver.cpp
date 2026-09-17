@@ -1486,7 +1486,6 @@ class PmSolver::Impl {
     double cached_ly = 0.0;
     double cached_lz = 0.0;
     double cached_split_scale = -1.0;
-    double cached_scale_factor = -1.0;
     double cached_gravitational_constant_code = -1.0;
     bool cached_window_deconvolution = false;
     PmAssignmentScheme cached_assignment_scheme = PmAssignmentScheme::kCic;
@@ -1959,7 +1958,7 @@ class PmSolver::Impl {
   [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return activePlan().potential_k; }
   [[nodiscard]] std::span<std::complex<double>> workingScratch() { return activePlan().working_k; }
 
-  void ensureSpectralOperators(
+  [[nodiscard]] bool ensureSpectralOperators(
       PlanResources& plan,
       const BoxLengths& lengths,
       const PmSolveOptions& options,
@@ -1969,11 +1968,10 @@ class PmSolver::Impl {
         plan.cached_ly == lengths.ly &&
         plan.cached_lz == lengths.lz &&
         plan.cached_split_scale == options.tree_pm_split_scale_comoving &&
-        plan.cached_scale_factor == options.scale_factor &&
         plan.cached_gravitational_constant_code == options.gravitational_constant_code &&
         plan.cached_window_deconvolution == options.enable_window_deconvolution &&
         plan.cached_assignment_scheme == options.assignment_scheme) {
-      return;
+      return false;
     }
 
     std::fill(plan.poisson_kernel.begin(), plan.poisson_kernel.end(), 0.0);
@@ -2080,10 +2078,10 @@ class PmSolver::Impl {
     plan.cached_ly = lengths.ly;
     plan.cached_lz = lengths.lz;
     plan.cached_split_scale = options.tree_pm_split_scale_comoving;
-    plan.cached_scale_factor = options.scale_factor;
     plan.cached_gravitational_constant_code = options.gravitational_constant_code;
     plan.cached_window_deconvolution = options.enable_window_deconvolution;
     plan.cached_assignment_scheme = options.assignment_scheme;
+    return true;
   }
 
   double forwardFft() {
@@ -2705,6 +2703,7 @@ void PmProfiler::append(const PmProfileEvent& event) {
   m_totals.routed_workspace_high_water_bytes = std::max(
       m_totals.routed_workspace_high_water_bytes, event.routed_workspace_high_water_bytes);
   m_totals.force_halo_cache_hits += event.force_halo_cache_hits;
+  m_totals.spectral_operator_rebuilds += event.spectral_operator_rebuilds;
   m_totals.isolated_open_root_workspace_estimate_bytes =
       std::max(m_totals.isolated_open_root_workspace_estimate_bytes,
                event.isolated_open_root_workspace_estimate_bytes);
@@ -3704,7 +3703,11 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 
   const auto poisson_start = std::chrono::steady_clock::now();
   const BoxLengths lengths = effectiveBoxLengths(options);
-  m_impl->ensureSpectralOperators(plan, lengths, options, m_shape);
+  const bool spectral_operator_rebuilt =
+      m_impl->ensureSpectralOperators(plan, lengths, options, m_shape);
+  if (profile != nullptr && spectral_operator_rebuilt) {
+    ++profile->spectral_operator_rebuilds;
+  }
   for (std::size_t i = 0; i < fourier.size(); ++i) {
     fourier[i] *= plan.poisson_kernel[i];
   }

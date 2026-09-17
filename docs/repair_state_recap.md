@@ -2408,3 +2408,16 @@ numerical execution are preserved. The source report
 limitations. Do not mark M2D fully accepted until remaining owner-local
 allocation contracts and dependency-complete distributed/whole-process gates
 are established; historical full-suite results are not fresh evidence.
+
+## 2026-09-16 — DMO first-light correctness closure
+
+The current source closes the DMO first-light audit leads for cosmological
+normalization, standard GADGET/AREPO stored-velocity semantics, authoritative
+particle drift-history restart equivalence, and invariant PM spectral-operator
+cache reuse. The legacy custom `sqrt_a_scaled_peculiar` IC convention remains
+unchanged, restart schema v23 is unchanged because the drift lanes were already
+persisted, and PM scale factor remains part of collective epoch consensus even
+though it no longer invalidates scale-free spectral arrays. Focused CPU and
+HDF5 regressions pass in the available environment; FFTW/MPI PM validation
+remains dependency-blocked. See
+`docs/repair/dmo_first_light_correctness_20260916.md`.

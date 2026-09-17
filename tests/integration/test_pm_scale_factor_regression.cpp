@@ -23,11 +23,13 @@ int main() {
   opts.assignment_scheme = cosmosim::gravity::PmAssignmentScheme::kCic;
   opts.boundary_condition = cosmosim::gravity::PmBoundaryCondition::kPeriodic;
 
-  auto solve_and_norm = [&](cosmosim::gravity::PmGridStorage& grid, double scale_factor) {
+  auto solve_and_norm = [&](cosmosim::gravity::PmGridStorage& grid,
+                            double scale_factor,
+                            cosmosim::gravity::PmProfileEvent* profile) {
     opts.scale_factor = scale_factor;
     grid.clear();
-    solver.assignDensity(grid, x, y, z, m, opts);
-    solver.solvePoissonPeriodic(grid, opts);
+    solver.assignDensity(grid, x, y, z, m, opts, profile);
+    solver.solvePoissonPeriodic(grid, opts, profile);
     double accum = 0.0;
     for (double v : grid.force_x()) accum += v * v;
     for (double v : grid.force_y()) accum += v * v;
@@ -35,8 +37,12 @@ int main() {
     return std::sqrt(accum);
   };
 
-  const double norm_a1 = solve_and_norm(grid_a1, 1.0);
-  const double norm_a05 = solve_and_norm(grid_a05, 0.5);
+  cosmosim::gravity::PmProfileEvent profile_a1{};
+  cosmosim::gravity::PmProfileEvent profile_a05{};
+  const double norm_a1 = solve_and_norm(grid_a1, 1.0, &profile_a1);
+  const double norm_a05 = solve_and_norm(grid_a05, 0.5, &profile_a05);
+  assert(profile_a1.spectral_operator_rebuilds == 1U);
+  assert(profile_a05.spectral_operator_rebuilds == 0U);
   assert(norm_a1 > 0.0);
   const double ratio = norm_a05 / norm_a1;
   // PM returns the scale-free comoving particle kernel. Cosmological

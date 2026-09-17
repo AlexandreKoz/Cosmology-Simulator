@@ -78,6 +78,7 @@ constexpr std::size_t kMaxManifestJsonCollectionEntries = 1U << 20U;
     case IcVelocityConvention::kNotVelocity: return "not_velocity";
     case IcVelocityConvention::kPhysicalPeculiar: return "physical_peculiar";
     case IcVelocityConvention::kSqrtAScaledPeculiar: return "sqrt_a_scaled_peculiar";
+    case IcVelocityConvention::kGadgetArepoStoredPeculiar: return "gadget_arepo_stored_peculiar";
     case IcVelocityConvention::kComovingCoordinateRate: return "comoving_coordinate_rate";
   }
   throw std::invalid_argument("unknown IC velocity convention");
@@ -86,6 +87,7 @@ constexpr std::size_t kMaxManifestJsonCollectionEntries = 1U << 20U;
   if (value == "not_velocity") return IcVelocityConvention::kNotVelocity;
   if (value == "physical_peculiar") return IcVelocityConvention::kPhysicalPeculiar;
   if (value == "sqrt_a_scaled_peculiar") return IcVelocityConvention::kSqrtAScaledPeculiar;
+  if (value == "gadget_arepo_stored_peculiar") return IcVelocityConvention::kGadgetArepoStoredPeculiar;
   if (value == "comoving_coordinate_rate") return IcVelocityConvention::kComovingCoordinateRate;
   throw std::invalid_argument("unsupported IC velocity convention: " + std::string(value));
 }
@@ -982,6 +984,8 @@ double icVelocityConventionMultiplier(
       return 1.0;
     case IcVelocityConvention::kSqrtAScaledPeculiar:
       return 1.0 / std::sqrt(scale_factor);
+    case IcVelocityConvention::kGadgetArepoStoredPeculiar:
+      return std::sqrt(scale_factor);
     case IcVelocityConvention::kComovingCoordinateRate:
       return scale_factor;
   }

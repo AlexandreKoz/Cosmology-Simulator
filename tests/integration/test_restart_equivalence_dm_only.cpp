@@ -5,6 +5,7 @@
 #include "cosmosim/core/build_config.hpp"
 #include "restart_equivalence_harness.hpp"
 #include "restart_equivalence_scenarios.hpp"
+#include "workflows/internal/output_verification.hpp"
 
 int main() {
 #if COSMOSIM_ENABLE_HDF5
@@ -15,10 +16,33 @@ int main() {
   auto output_state = cosmosim::tests::makeStage8OutputCadenceState(false);
   auto scenario = cosmosim::tests::makeStage8Scenario(
       std::move(state), integrator_state, std::move(scheduler), std::move(output_state), restart_path, 100, 40);
-  const auto result = cosmosim::tests::runRestartEquivalenceScenario(std::move(scenario));
+  auto result = cosmosim::tests::runRestartEquivalenceScenario(std::move(scenario));
   assert(result.direct_integrator_state.step_index == 100);
   assert(result.restarted_integrator_state.step_index == 100);
   assert(result.direct_state.particles.size() == result.restarted_state.particles.size());
+  assert(cosmosim::workflows::internal::restartRuntimeStateExactlyEquivalent(
+      result.restarted_state, result.direct_state));
+  assert(!result.restarted_state.particle_sidecar.last_drift_time_code.empty());
+  assert(!result.restarted_state.particle_sidecar.last_drift_scale_factor.empty());
+
+  const double saved_drift_time =
+      result.restarted_state.particle_sidecar.last_drift_time_code.front();
+  result.restarted_state.particle_sidecar.last_drift_time_code.front() =
+      saved_drift_time + 0.125;
+  assert(!cosmosim::workflows::internal::restartRuntimeStateExactlyEquivalent(
+      result.restarted_state, result.direct_state));
+  result.restarted_state.particle_sidecar.last_drift_time_code.front() = saved_drift_time;
+
+  const double saved_drift_scale_factor =
+      result.restarted_state.particle_sidecar.last_drift_scale_factor.front();
+  result.restarted_state.particle_sidecar.last_drift_scale_factor.front() =
+      saved_drift_scale_factor + 0.03125;
+  assert(!cosmosim::workflows::internal::restartRuntimeStateExactlyEquivalent(
+      result.restarted_state, result.direct_state));
+  result.restarted_state.particle_sidecar.last_drift_scale_factor.front() =
+      saved_drift_scale_factor;
+  assert(cosmosim::workflows::internal::restartRuntimeStateExactlyEquivalent(
+      result.restarted_state, result.direct_state));
   std::filesystem::remove(restart_path);
 #endif
   return 0;

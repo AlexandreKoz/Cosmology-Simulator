@@ -75,6 +75,14 @@ LambdaCdmBackground::LambdaCdmBackground(CosmologyBackgroundConfig config) : m_c
   if (m_config.omega_matter < 0.0 || m_config.omega_lambda < 0.0 || m_config.omega_radiation < 0.0) {
     throw std::invalid_argument("matter, lambda, and radiation density parameters must be non-negative");
   }
+  constexpr double k_density_closure_tolerance = 1.0e-10;
+  const double density_sum = m_config.omega_radiation + m_config.omega_matter +
+      m_config.omega_curvature + m_config.omega_lambda;
+  if (!std::isfinite(density_sum) ||
+      std::abs(density_sum - 1.0) > k_density_closure_tolerance) {
+    throw std::invalid_argument(
+        "cosmology density parameters must sum to 1 within 1e-10 so H(a=1) == H0");
+  }
 }
 
 const CosmologyBackgroundConfig& LambdaCdmBackground::config() const { return m_config; }
