@@ -359,7 +359,7 @@ void testRoundtripMixedSpeciesSnapshot() {
   bool missing_integrity_rejected = false;
   try {
     cosmosim::io::writeSnapshotSetCompletionMarker(
-        snapshot_directory, pending_single.generation_id, 1U,
+        snapshot_path, pending_single.generation_id, 1U,
         pending_single.global_part_count, false);
   } catch (const std::runtime_error&) {
     missing_integrity_rejected = true;
@@ -368,13 +368,52 @@ void testRoundtripMixedSpeciesSnapshot() {
   cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path, payload, policy);
   assert(std::filesystem::is_regular_file(single_integrity_path));
   cosmosim::io::writeSnapshotSetCompletionMarker(
-      snapshot_directory, pending_single.generation_id, 1U,
+      snapshot_path, pending_single.generation_id, 1U,
       pending_single.global_part_count, false);
-  const auto complete_single = cosmosim::io::inspectSnapshotSet(snapshot_directory);
+  const std::filesystem::path completion_path = snapshot_directory / "snap_000.complete";
+  const auto complete_single = cosmosim::io::inspectSnapshotSet(completion_path);
   assert(complete_single.complete);
-  assert(std::filesystem::is_regular_file(
-      snapshot_directory / (pending_single.generation_id + ".complete")));
-  cosmosim::io::validateSnapshotSetHdf5(snapshot_directory).requireValid();
+  assert(std::filesystem::is_regular_file(completion_path));
+  cosmosim::io::validateSnapshotSetHdf5(completion_path).requireValid();
+
+  // A flat snapshots/ directory may contain many committed sets. Selecting one
+  // completion marker must never discover members from another snapshot index.
+  const std::filesystem::path snapshot_path_1 = snapshot_directory / "snap_001.hdf5";
+  cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path_1, payload, policy);
+  const auto pending_second = cosmosim::io::inspectSnapshotSet(snapshot_path_1);
+  cosmosim::io::writeSnapshotSetCompletionMarker(
+      snapshot_path_1, pending_second.generation_id, 1U,
+      pending_second.global_part_count, false);
+  const std::filesystem::path completion_path_1 = snapshot_directory / "snap_001.complete";
+  const auto complete_second = cosmosim::io::inspectSnapshotSet(completion_path_1);
+  assert(complete_second.complete);
+  assert(complete_second.member_paths.size() == 1U);
+  assert(complete_second.member_paths.front().filename() == "snap_001.hdf5");
+  const auto complete_first_again = cosmosim::io::inspectSnapshotSet(completion_path);
+  assert(complete_first_again.member_paths.size() == 1U);
+  assert(complete_first_again.member_paths.front().filename() == "snap_000.hdf5");
+
+  const std::filesystem::path stale_marker = snapshot_directory / "snap_999.complete";
+  std::filesystem::copy_file(
+      completion_path, stale_marker,
+      std::filesystem::copy_options::overwrite_existing);
+  bool stale_marker_rejected = false;
+  try {
+    static_cast<void>(cosmosim::io::inspectSnapshotSet(stale_marker));
+  } catch (const std::exception&) {
+    stale_marker_rejected = true;
+  }
+  assert(stale_marker_rejected);
+  std::filesystem::remove(stale_marker);
+
+  std::filesystem::remove(snapshot_path_1);
+  bool missing_member_rejected = false;
+  try {
+    static_cast<void>(cosmosim::io::inspectSnapshotSet(completion_path_1));
+  } catch (const std::exception&) {
+    missing_member_rejected = true;
+  }
+  assert(missing_member_rejected);
 
   hid_t inspect_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
   assert(inspect_file >= 0);

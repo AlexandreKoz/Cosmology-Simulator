@@ -330,7 +330,6 @@ void requireOrThrow(bool condition, const std::string& message) {
   stream << "a_begin = " << k_initial_scale_factor << "\n";
   stream << "a_end = 0.2\n";
   stream << "t_code_begin = 0.0\n";
-  stream << "t_code_end = 0.001\n";
   stream << "integrator_time_variable = scale_factor\n";
   stream << "cosmology_max_delta_ln_a = 0.02\n";
   stream << "cosmology_max_hubble_time_fraction = 0.02\n";
@@ -1250,6 +1249,61 @@ void compareSerialAndSingleRankMpiPhysicalStateArtifacts() {
   return drift;
 }
 
+void runConfigDrivenFirstLightSmoke(
+    const ParallelRuntime& runtime,
+    const std::filesystem::path& root) {
+  const cosmosim::core::SimulationState state = makeSparseEmptyRankState();
+  std::string config = configText(
+      runtime.world_size, "dmo_config_driven_firstlight_smoke", true);
+  const std::string original_endpoint = "a_end = 0.2";
+  const auto endpoint_pos = config.find(original_endpoint);
+  requireOrThrow(endpoint_pos != std::string::npos, "DMO smoke could not locate scale-factor endpoint");
+  config.replace(endpoint_pos, original_endpoint.size(), "a_end = 0.11");
+  const std::string original_step_cap = "max_global_steps = 2";
+  const auto step_cap_pos = config.find(original_step_cap);
+  requireOrThrow(step_cap_pos != std::string::npos, "DMO smoke could not locate global step cap");
+  config.replace(step_cap_pos, original_step_cap.size(), "max_global_steps = 64");
+
+  const cosmosim::core::FrozenConfig frozen = cosmosim::core::loadFrozenConfigFromString(
+      config, "test_dmo_config_driven_firstlight_smoke");
+  requireOrThrow(
+      frozen.config.numerics.integrator_time_variable ==
+          cosmosim::core::IntegratorTimeVariable::kScaleFactor,
+      "DMO smoke did not freeze scale factor as the active time authority");
+  requireOrThrow(
+      frozen.config.numerics.t_code_end > frozen.config.numerics.t_code_begin,
+      "DMO smoke did not derive a positive FLRW code-time interval");
+
+  const cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
+  const auto report = runner.run(
+      root / ("rank_" + std::to_string(runtime.world_rank) + "_config_driven"),
+      cosmosim::workflows::ReferenceWorkflowOptions{
+          .step_index = 0U,
+          .write_outputs = false,
+          .initial_state_override = &state,
+          .restart_state_override = nullptr,
+          .initial_particle_scheduler_identity_records = {},
+      });
+
+  requireOrThrow(
+      report.completed_steps > 1U && report.completed_steps < 64U,
+      "config-driven DMO smoke did not use adaptive physical steps before the safety cap");
+  requireOrThrow(
+      std::abs(report.final_scale_factor - 0.11) <= 1.0e-10,
+      "config-driven DMO smoke did not land on the authoritative scale-factor endpoint; final_a=" +
+          std::to_string(report.final_scale_factor) +
+          "; steps=" + std::to_string(report.completed_steps));
+  requireOrThrow(
+      report.final_scale_factor >= k_initial_scale_factor && report.final_scale_factor <= 0.11 + 1.0e-10,
+      "config-driven DMO smoke crossed or reversed its scale-factor endpoint");
+  requireOrThrow(
+      std::abs(report.final_time_code - frozen.config.numerics.t_code_end) <=
+          1.0e-12 * std::max(1.0, std::abs(frozen.config.numerics.t_code_end)),
+      "config-driven DMO smoke did not land on the FLRW-derived code-time endpoint");
+  requireOrThrow(report.global_particle_count == 3U, "config-driven DMO smoke changed particle count");
+  requireOrThrow(report.global_cell_count == 0U, "config-driven DMO smoke manufactured gas cells");
+}
+
 void runEmptyRankSmoke(const ParallelRuntime& runtime, const std::filesystem::path& root) {
   const cosmosim::core::SimulationState state = makeSparseEmptyRankState();
   const cosmosim::core::FrozenConfig frozen = cosmosim::core::loadFrozenConfigFromString(
@@ -1713,6 +1767,18 @@ int main(int argc, char** argv) {
       throw std::runtime_error(
           "DMO serial/MPI artifact comparison requires COSMOSIM_ENABLE_HDF5=ON");
 #endif
+#if COSMOSIM_ENABLE_MPI
+      MPI_Finalize();
+#endif
+      return 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--config-driven-firstlight-smoke") {
+      requireOrThrow(
+          runtime.world_size == 1,
+          "config-driven DMO first-light smoke currently targets the serial production path");
+      auto smoke_workspace = cosmosim::test_support::TestTempWorkspace::createProcessLocal(
+          "dmo_config_driven_firstlight_smoke_" + std::string(currentExecutionBackend()));
+      runConfigDrivenFirstLightSmoke(runtime, smoke_workspace.root());
 #if COSMOSIM_ENABLE_MPI
       MPI_Finalize();
 #endif

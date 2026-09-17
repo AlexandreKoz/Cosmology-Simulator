@@ -118,6 +118,26 @@ workflow because per-element kick/drift epochs required for mixed-rung KDK are
 not yet authoritative. The scheduler interfaces below remain infrastructure
 for future multirate work, not an enabled production capability.
 
+### Rung-zero global physical timestep
+
+Rung zero does **not** mean fixed timestep. Before every KDK construction the
+production `TimeCoordinator` recomputes cosmology, gravity, hydro-CFL, and
+active source limits, coordinates local preparation failure, and reduces the
+rank-local minimum with MPI `MIN`. `+infinity` is the explicit no-limit sentinel
+for an inactive criterion; NaN, negative infinity, zero, and negative proposals
+fail closed. An explicit `ReferenceWorkflowOptions::dt_time_code` is a maximum
+step for testing/embedding and cannot bypass a tighter physical or endpoint
+limit. The accepted value is finally clipped to the next ordered output boundary
+and run endpoint before stage times are constructed. `max_global_steps` only
+limits how many committed steps a segment may execute.
+
+For cosmological scale-factor authority, every committed step additionally
+requires finite positive monotonic `a`, finite redshift, and
+`delta_ln(a) <= cosmology_max_delta_ln_a` within the documented floating-point
+tolerance. The terminal code-time interval is FLRW-derived from `a_end`, so the
+last timestep is endpoint-clipped instead of allowed to overshoot into the
+future.
+
 ### Scheduler authority and mirror policy
 
 - Authoritative live lanes: `HierarchicalTimeBinScheduler` hot metadata (`bin_index`, `next_activation_tick`, `active_flag`, `pending_bin_index`) and `PmSynchronizationState` cadence fields (`gravity_kick_opportunity`, cadence steps, field version, last refresh opportunity, field-built step/scale factor).

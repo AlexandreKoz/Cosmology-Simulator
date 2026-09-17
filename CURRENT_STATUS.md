@@ -32,6 +32,19 @@ history; and invariant PM spectral operators no longer rebuild solely because
 `scale_factor` changes. This is DMO first-light closure, not full-physics
 scientific certification.
 
+## DMO first-light runtime/I/O recovery — 2026-09-17
+
+The current source repairs the failed config-driven first-light path: rung-zero
+uses a collective physical timestep minimum before KDK construction;
+`integrator_time_variable` resolves the authoritative endpoint; scale-factor
+runs derive code time from FLRW and endpoint-clip the final step; periodic drift
+and external IC wrapping share modulo semantics; monofonIC-compatible uint64
+totals, extent-one scalar attributes, and checked zero-based IDs are accepted;
+and new science snapshots use one `snapshots/` directory with stem-scoped
+transactional completion markers. The native HDF5 science schema remains v6.
+Focused CPU and HDF5 tests pass in this repair environment. MPI and FFTW-backed
+production runtime acceptance remain dependency-blocked and are not promoted.
+
 ## Configuration policy
 
 Simulation inputs, examples, release profiles, fixtures, and normalized copies
@@ -43,8 +56,8 @@ The authoritative decision is
 ## Supported paths in this snapshot
 
 - C++20 CPU Debug and Release builds, with optional CMake-discovered OpenMP shared-memory execution.
-- Fixed-global-step scheduler-driven reference workflow
-  (`hierarchical_max_rung=0`).
+- Adaptive global physical timestep selection on the scheduler-driven rung-zero
+  reference workflow (`hierarchical_max_rung=0`); hierarchical local timesteps remain disabled.
 - CPU TreePM/hydrodynamics/AMR and current subgrid modules at the validation
   levels documented by their module pages.
 - HDF5-enabled canonical/multifile IC ingestion, science snapshots, and
@@ -63,8 +76,8 @@ The authoritative decision is
 
 ## Provisional or unavailable capabilities
 
-- Production hierarchical local timesteps and adaptive global timesteps are
-  unsupported in the reference workflow.
+- Production hierarchical local timesteps (`hierarchical_max_rung > 0`) remain
+  unsupported in the reference workflow; rung-zero adaptive global stepping is supported.
 - Rank-count-changing restart and asynchronous output are unsupported.
 - Distributed IC import is provisional when MPI+HDF5 are enabled and still
   requires its dependency-complete rank matrix.

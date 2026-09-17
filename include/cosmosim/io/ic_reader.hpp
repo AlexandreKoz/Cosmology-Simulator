@@ -228,6 +228,8 @@ struct IcSchemaSummary {
   double omega_lambda = 0.0;
   double hubble_param = 0.0;
   bool velocities_are_peculiar = true;
+  bool normalized_rank1_scalar_attributes = false;
+  bool normalized_uint64_total_counts = false;
 };
 
 // Build the explicit recognized direct-import contract. This helper does not
@@ -279,6 +281,7 @@ struct IcImportCounters {
   std::uint64_t bytes_read = 0;
   std::uint64_t records_read = 0;
   std::uint64_t records_converted = 0;
+  std::uint64_t periodic_coordinate_components_wrapped = 0;
   std::uint64_t records_routed = 0;
   std::uint64_t bytes_sent = 0;
   std::uint64_t bytes_received = 0;

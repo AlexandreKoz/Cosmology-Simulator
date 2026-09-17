@@ -587,3 +587,17 @@ at `a=0.25` and `a=0.5` with cross-check against snapshot conversion; DMO
 restart mutation sensitivity for particle drift-history state; and PM
 spectral-operator cache reuse when only cosmological scale factor changes.
 The PM scale factor remains in distributed collective consensus.
+
+### DMO first-light runtime/I/O recovery regressions (2026-09-17)
+
+First-light readiness now distinguishes kernel validation from the config-driven
+production path. `integration_dmo_config_driven_firstlight_smoke_single_rank`
+uses a tiny DMO state, `hierarchical_max_rung=0`, scale-factor authority, and
+`runner.run()` with no `dt_time_code` override; it must require multiple physical
+steps, remain below the configured safety step cap, and reach the FLRW-derived
+endpoint. HDF5 acceptance includes a monofonIC-like fixture with uint64 totals,
+rank-1 extent-one logical scalars, zero-based IDs, periodic-equivalent negative/
+upper-edge coordinates, and fixed DM mass. Snapshot HDF5 roundtrip acceptance
+uses two logical sets in one `snapshots/` directory and rejects missing members
+and stale/misnamed completion markers. MPI variants remain runtime evidence, not
+a pass, until executed with a real MPI C++ toolchain.

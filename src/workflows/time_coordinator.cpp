@@ -413,7 +413,7 @@ enum class SchedulerElementFamily {
   kGasCells,
 };
 
-void updateAdaptiveTimeBinsFromView(
+[[nodiscard]] double updateAdaptiveTimeBinsFromView(
     const core::AdaptiveTimeStepCriteriaView& view,
     core::HierarchicalTimeBinScheduler& scheduler,
     const core::IntegratorState& integrator_state,
@@ -604,6 +604,18 @@ void updateAdaptiveTimeBinsFromView(
     return std::max(
         1.0e-12, config.numerics.source_max_fractional_change * mass / mdot);
   };
+  double local_min_dt_time_code = std::numeric_limits<double>::infinity();
+  const auto consider_dt = [&](double value) {
+    if (std::isinf(value) && value > 0.0) {
+      return;  // Explicit no-limit sentinel; another criterion or endpoint must bound the step.
+    }
+    if (!std::isfinite(value) || value <= 0.0) {
+      throw std::runtime_error(
+          "adaptive timestep criterion produced an invalid value; expected finite positive or +infinity");
+    }
+    local_min_dt_time_code = std::min(local_min_dt_time_code, value);
+  };
+  if (cosmology_dt.has_value()) consider_dt(*cosmology_dt);
   const std::size_t expected_element_count =
       element_family == SchedulerElementFamily::kParticles ? particle_count : cell_count;
   if (scheduler.elementCount() != expected_element_count) {
@@ -647,6 +659,7 @@ void updateAdaptiveTimeBinsFromView(
       };
       const double cfl_dt =
           core::computeDirectionalCflTimeStep(hydro_cfl_input, 0.4);
+      consider_dt(cfl_dt);
       const double ax = (cell_index < view.gas_cells.accel_x_comoving.size()) ? view.gas_cells.accel_x_comoving[cell_index] : 0.0;
       const double ay = (cell_index < view.gas_cells.accel_y_comoving.size()) ? view.gas_cells.accel_y_comoving[cell_index] : 0.0;
       const double az = (cell_index < view.gas_cells.accel_z_comoving.size()) ? view.gas_cells.accel_z_comoving[cell_index] : 0.0;
@@ -660,6 +673,7 @@ void updateAdaptiveTimeBinsFromView(
            .scale_free_acceleration_magnitude_code = amag,
            .scale_factor = gravity_scale_factor},
           0.2);
+      consider_dt(gravity_dt);
       scheduler.submitCandidateTimeStep(
           cell_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_cell_hydro_cfl");
       scheduler.submitCandidateTimeStep(
@@ -669,18 +683,20 @@ void updateAdaptiveTimeBinsFromView(
             cell_index, *cosmology_dt, limits, core::TimeStepCandidateSource::kCosmologyExpansion, "gas_cell_cosmology_expansion");
       }
       if (const auto source_dt = star_formation_dt_for_cell(cell_index); source_dt.has_value()) {
+        consider_dt(*source_dt);
         scheduler.submitCandidateTimeStep(
             cell_index, *source_dt, limits, core::TimeStepCandidateSource::kSourceTerm, "gas_cell_star_formation_source");
       }
       const double diffusion_dt = view.gas_cells.metal_diffusion_dt_code[cell_index];
       if (config.physics.enable_metal_diffusion && std::isfinite(diffusion_dt) &&
           diffusion_dt > 0.0) {
+        consider_dt(diffusion_dt);
         scheduler.submitCandidateTimeStep(
             cell_index, diffusion_dt, limits, core::TimeStepCandidateSource::kSourceTerm,
             "gas_cell_metal_diffusion_parabolic");
       }
     });
-    return;
+    return local_min_dt_time_code;
   }
 
   for_each_requested_element([&](std::uint32_t particle_index) {
@@ -698,6 +714,7 @@ void updateAdaptiveTimeBinsFromView(
          .scale_free_acceleration_magnitude_code = amag,
          .scale_factor = gravity_scale_factor},
         0.2);
+    consider_dt(gravity_dt);
     scheduler.submitCandidateTimeStep(
         particle_index,
         gravity_dt,
@@ -713,6 +730,7 @@ void updateAdaptiveTimeBinsFromView(
           "particle_cosmology_expansion");
     }
     if (const auto source_dt = black_hole_dt_for_particle(particle_index); source_dt.has_value()) {
+      consider_dt(*source_dt);
       scheduler.submitCandidateTimeStep(
           particle_index,
           *source_dt,
@@ -721,9 +739,10 @@ void updateAdaptiveTimeBinsFromView(
           "particle_black_hole_source");
     }
   });
+  return local_min_dt_time_code;
 }
 
-void updateAdaptiveTimeBinFamilies(
+[[nodiscard]] double updateAdaptiveTimeBinFamilies(
     core::SimulationState& state,
     core::HierarchicalTimeBinScheduler& particle_scheduler,
     core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
@@ -751,7 +770,7 @@ void updateAdaptiveTimeBinFamilies(
       cell_accel_z,
       integrator_state.current_scale_factor,
       storage);
-  updateAdaptiveTimeBinsFromView(
+  const double particle_min_dt = updateAdaptiveTimeBinsFromView(
       view,
       particle_scheduler,
       integrator_state,
@@ -760,7 +779,7 @@ void updateAdaptiveTimeBinFamilies(
       SchedulerElementFamily::kParticles,
       active_particle_indices,
       update_all_elements);
-  updateAdaptiveTimeBinsFromView(
+  const double gas_min_dt = updateAdaptiveTimeBinsFromView(
       view,
       gas_cell_scheduler,
       integrator_state,
@@ -769,6 +788,7 @@ void updateAdaptiveTimeBinFamilies(
       SchedulerElementFamily::kGasCells,
       active_cell_indices,
       update_all_elements);
+  return std::min(particle_min_dt, gas_min_dt);
 }
 
 
@@ -879,11 +899,7 @@ RungZeroTimeState initializeRungZeroTimeState(
         : 0.0;
     integrator_state.dt_time_code = options.dt_time_code > 0.0
         ? options.dt_time_code
-        : std::max(
-              1.0e-6,
-              (config.numerics.t_code_end - config.numerics.t_code_begin) /
-                  static_cast<double>(
-                      std::max(config.numerics.max_global_steps, 1)));
+        : (config.numerics.t_code_end - config.numerics.t_code_begin);
     integrator_state.time_bins.hierarchical_enabled = true;
     integrator_state.time_bins.max_bin =
         time_state.m_particle_scheduler.maxBin();
@@ -947,7 +963,7 @@ void TimeCoordinator::runRungZeroSegment(
   core::IntegratorState& integrator_state = m_time_state.m_integrator_state;
   internal::PendingOutputBoundary& pending_output = m_time_state.m_pending_output;
   if (!restoring_from_restart) {
-    updateAdaptiveTimeBins(
+    static_cast<void>(updateAdaptiveTimeBins(
         state,
         particle_scheduler,
         gas_cell_scheduler,
@@ -961,7 +977,7 @@ void TimeCoordinator::runRungZeroSegment(
         {},
         {},
         {},
-        true);
+        true));
   }
   ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);
 
@@ -984,6 +1000,31 @@ void TimeCoordinator::runRungZeroSegment(
   core::TransientStepWorkspace workspace(m_services.memory_governor);
   while (integrator_state.step_index < target_step_index &&
          integrator_state.current_time_code < config.numerics.t_code_end) {
+    // Rung zero has one physical timestep authority. Re-evaluate all local
+    // criteria before constructing KDK stage times, then agree the minimum
+    // collectively so every rank advances the identical interval.
+    double local_physical_dt = std::numeric_limits<double>::infinity();
+    std::exception_ptr local_timestep_failure;
+    try {
+      local_physical_dt = updateAdaptiveTimeBins(
+          state, particle_scheduler, gas_cell_scheduler, integrator_state, config,
+          m_gravity.particleAccelX(), m_gravity.particleAccelY(), m_gravity.particleAccelZ(),
+          m_gravity.cellAccelX(), m_gravity.cellAccelY(), m_gravity.cellAccelZ(),
+          {}, {}, true);
+      const bool explicit_no_limit = std::isinf(local_physical_dt) && local_physical_dt > 0.0;
+      if ((!std::isfinite(local_physical_dt) && !explicit_no_limit) ||
+          local_physical_dt <= 0.0) {
+        throw std::runtime_error(
+            "local global-timestep candidate is invalid; expected finite positive or +infinity");
+      }
+    } catch (...) {
+      local_timestep_failure = std::current_exception();
+    }
+    m_services.mpi_context.rethrowCollectivePreparationFailure(
+        local_timestep_failure, "global timestep candidate selection");
+    double accepted_dt = m_services.mpi_context.allreduceMinDouble(local_physical_dt);
+    if (options.dt_time_code > 0.0) accepted_dt = std::min(accepted_dt, options.dt_time_code);
+    const double step_begin_scale_factor = integrator_state.current_scale_factor;
     const double remaining_time_code =
         config.numerics.t_code_end - integrator_state.current_time_code;
     if (!std::isfinite(remaining_time_code) || remaining_time_code <= 0.0) {
@@ -1003,10 +1044,10 @@ void TimeCoordinator::runRungZeroSegment(
     if (!std::isfinite(ordered_remaining_time_code) || ordered_remaining_time_code <= 0.0) {
       throw std::runtime_error("ReferenceWorkflow computed an invalid ordered timeline interval");
     }
-    if (integrator_state.dt_time_code > ordered_remaining_time_code) {
-      const double unclipped_dt_time_code = integrator_state.dt_time_code;
-      integrator_state.dt_time_code = ordered_remaining_time_code;
-      if (limited_by_output_event) {
+    if (accepted_dt > ordered_remaining_time_code) {
+      const double unclipped_dt_time_code = accepted_dt;
+      accepted_dt = ordered_remaining_time_code;
+      if (limited_by_output_event && std::isfinite(unclipped_dt_time_code)) {
         pending_output.restart_resume_dt_time_code = unclipped_dt_time_code;
       }
       profiler.recordEvent(core::RuntimeEvent{
@@ -1020,11 +1061,15 @@ void TimeCoordinator::runRungZeroSegment(
               ? "integration interval clipped to an ordered output event"
               : "integration interval clipped to the configured endpoint",
           .payload = {{"unclipped_dt_time_code", formatRuntimeDouble(unclipped_dt_time_code)},
-                      {"clipped_dt_time_code", formatRuntimeDouble(integrator_state.dt_time_code)},
+                      {"clipped_dt_time_code", formatRuntimeDouble(accepted_dt)},
                       {limited_by_output_event ? "output_event_time_code" : "endpoint_time_code",
                        formatRuntimeDouble(ordered_step_limit_time_code)}},
       });
     }
+    if (!std::isfinite(accepted_dt) || accepted_dt <= 0.0) {
+      throw std::runtime_error("ReferenceWorkflow global timestep selection produced an invalid dt");
+    }
+    integrator_state.dt_time_code = accepted_dt;
 
     const std::span<const std::uint32_t> active_particles =
         particle_scheduler.beginSubstep();
@@ -1097,6 +1142,22 @@ void TimeCoordinator::runRungZeroSegment(
         &profiler,
         particle_scheduler.currentTick(),
         requested_boundary);
+    if (cosmology_background != nullptr) {
+      const double a_next = integrator_state.current_scale_factor;
+      if (!std::isfinite(a_next) || a_next <= 0.0 || a_next + 1.0e-14 < step_begin_scale_factor) {
+        throw std::runtime_error("cosmological step violated finite positive monotonic scale-factor invariant");
+      }
+      const double delta_ln_a = std::log(a_next / step_begin_scale_factor);
+      const double allowed_delta = config.numerics.cosmology_max_delta_ln_a * (1.0 + 1.0e-10);
+      if (!std::isfinite(delta_ln_a) || delta_ln_a > allowed_delta) {
+        throw std::runtime_error("cosmological step exceeded numerics.cosmology_max_delta_ln_a");
+      }
+      if ((config.numerics.integrator_time_variable == core::IntegratorTimeVariable::kScaleFactor ||
+           config.numerics.integrator_time_variable == core::IntegratorTimeVariable::kLogScaleFactor) &&
+          a_next > config.numerics.a_end + 1.0e-12 * std::max(1.0, config.numerics.a_end)) {
+        throw std::runtime_error("cosmological step crossed the authoritative scale-factor endpoint");
+      }
+    }
     expected_global_particle_ids.insert(
         expected_global_particle_ids.end(),
         m_newly_created_particle_ids.begin(),
@@ -1129,7 +1190,7 @@ void TimeCoordinator::runRungZeroSegment(
     state.metadata.step_index = integrator_state.step_index;
     state.metadata.scale_factor = integrator_state.current_scale_factor;
     ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);
-    updateAdaptiveTimeBins(
+    static_cast<void>(updateAdaptiveTimeBins(
         state,
         particle_scheduler,
         gas_cell_scheduler,
@@ -1143,7 +1204,7 @@ void TimeCoordinator::runRungZeroSegment(
         m_gravity.cellAccelZ(),
         active_particles,
         active_cells,
-        false);
+        false));
     profiler.counters().addCount(
         "timestep_particle_criteria_evaluations",
         static_cast<std::uint64_t>(active_particles.size()));
@@ -1242,7 +1303,7 @@ void TimeCoordinator::executeOutputBoundary(
       requested_boundary_kind);
 }
 
-void TimeCoordinator::updateAdaptiveTimeBins(
+double TimeCoordinator::updateAdaptiveTimeBins(
     core::SimulationState& state,
     core::HierarchicalTimeBinScheduler& particle_scheduler,
     core::HierarchicalTimeBinScheduler& gas_cell_scheduler,
@@ -1268,7 +1329,7 @@ void TimeCoordinator::updateAdaptiveTimeBins(
         runtime_units,
         physics::makeEffectiveIsmReferenceCoolingProvider(config.physics));
   }
-  updateAdaptiveTimeBinFamilies(
+  return updateAdaptiveTimeBinFamilies(
       state,
       particle_scheduler,
       gas_cell_scheduler,

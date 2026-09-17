@@ -6,7 +6,7 @@ set(runtime_mpi_stderr "${runtime_mpi_root}/runtime_stderr.txt")
 set(runtime_mpi_shared_run_dir "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke")
 set(runtime_mpi_run_dir_rank0 "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke_rank000")
 set(runtime_mpi_run_dir_rank1 "${runtime_mpi_run_root}/runtime_app_mpi_treepm_smoke_rank001")
-set(runtime_mpi_snapshot_dir "${runtime_mpi_shared_run_dir}/snapdir_001")
+set(runtime_mpi_snapshot_dir "${runtime_mpi_shared_run_dir}/snapshots")
 
 file(REMOVE_RECURSE "${runtime_mpi_root}")
 file(MAKE_DIRECTORY "${runtime_mpi_root}")
@@ -48,7 +48,7 @@ foreach(required_path IN ITEMS
 endforeach()
 
 file(GLOB runtime_mpi_completion_markers
-     "${runtime_mpi_snapshot_dir}/snap_001_*.complete")
+     "${runtime_mpi_snapshot_dir}/snap_001.complete")
 list(LENGTH runtime_mpi_completion_markers runtime_mpi_completion_marker_count)
 if(NOT runtime_mpi_completion_marker_count EQUAL 1)
   message(FATAL_ERROR
@@ -60,7 +60,7 @@ file(READ "${runtime_mpi_completion_marker}" runtime_mpi_completion_text)
 foreach(required_manifest_contract IN ITEMS
     "schema=chui_snapshot_set_v2"
     "schema_name=chui_science_snapshot_v6"
-    "file_kind=chui_science_snapshot"
+    "file_kind=science_snapshot"
     "num_files_per_snapshot=2"
     "member_count=2"
     "member.0.filename=snap_001.0.hdf5"

@@ -1,6 +1,7 @@
 #include "workflows/internal/reference_runtime_composition.hpp"
 
 #include <array>
+#include <cmath>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -8,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "cosmosim/core/periodic_domain.hpp"
 #include "cosmosim/hydro/hydro_core_solver.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
 #include "cosmosim/workflows/analysis_runtime.hpp"
@@ -31,8 +33,17 @@ struct CompositionAssembly {
 
 class DriftRuntime final {
  public:
-  explicit DriftRuntime(const RuntimeServices& services) noexcept
-      : m_services(services) {}
+  DriftRuntime(
+      const RuntimeServices& services,
+      bool periodic,
+      double box_size_x,
+      double box_size_y,
+      double box_size_z) noexcept
+      : m_services(services),
+        m_periodic(periodic),
+        m_box_size_x(box_size_x),
+        m_box_size_y(box_size_y),
+        m_box_size_z(box_size_z) {}
 
   void execute(DriftParticleStageView& view) const {
     view.requireFresh();
@@ -68,12 +79,34 @@ class DriftRuntime final {
           context.state.particles.velocity_y_peculiar[particle_index] * drift_factor;
       context.state.particles.position_z_comoving[particle_index] +=
           context.state.particles.velocity_z_peculiar[particle_index] * drift_factor;
+
+      // Canonical particle coordinates in a periodic cosmological domain must
+      // remain in [0,L). Gravity/decomposition already use periodic-equivalent
+      // coordinates internally; keep the authoritative state canonical too.
+      if (m_periodic) {
+        context.state.particles.position_x_comoving[particle_index] =
+            core::canonicalPeriodicPosition(
+                context.state.particles.position_x_comoving[particle_index],
+                m_box_size_x);
+        context.state.particles.position_y_comoving[particle_index] =
+            core::canonicalPeriodicPosition(
+                context.state.particles.position_y_comoving[particle_index],
+                m_box_size_y);
+        context.state.particles.position_z_comoving[particle_index] =
+            core::canonicalPeriodicPosition(
+                context.state.particles.position_z_comoving[particle_index],
+                m_box_size_z);
+      }
     }
     context.state.requireGasCellIdentityMapCoversDenseRows("drift task");
   }
 
  private:
   const RuntimeServices& m_services;
+  bool m_periodic = false;
+  double m_box_size_x = 0.0;
+  double m_box_size_y = 0.0;
+  double m_box_size_z = 0.0;
 };
 
 namespace {
@@ -225,7 +258,18 @@ namespace {
   };
 }
 
-[[nodiscard]] RuntimeModuleDescriptor makeDriftDescriptor() {
+[[nodiscard]] RuntimeModuleDescriptor makeDriftDescriptor(
+    const ReferenceRuntimeCompositionInputs& inputs) {
+  const bool periodic =
+      inputs.mode_policy.gravity_boundary ==
+      core::GravityBoundaryModel::kPeriodicPoisson;
+  const double box_size_x =
+      inputs.config.cosmology.box_size_x_mpc_comoving;
+  const double box_size_y =
+      inputs.config.cosmology.box_size_y_mpc_comoving;
+  const double box_size_z =
+      inputs.config.cosmology.box_size_z_mpc_comoving;
+
   return RuntimeModuleDescriptor{
       .module_id = "drift",
       .schema_version = 1,
@@ -245,8 +289,14 @@ namespace {
               0U, RuntimeTaskPressureClass::kModerate, RuntimeTaskPressureClass::kHigh,
               RuntimeTaskPressureClass::kLow),
       }},
-      .factory = [](const RuntimeModuleFactoryContext& context) {
-        auto owner = std::make_shared<DriftRuntime>(context.services);
+      .factory = [periodic, box_size_x, box_size_y, box_size_z](
+                     const RuntimeModuleFactoryContext& context) {
+        auto owner = std::make_shared<DriftRuntime>(
+            context.services,
+            periodic,
+            box_size_x,
+            box_size_y,
+            box_size_z);
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
@@ -513,7 +563,7 @@ ReferenceRuntimeComposition buildReferenceRuntimeComposition(
   }
   RuntimeModuleRegistry registry;
   registry.registerModule(makeAnalysisDescriptor(inputs, assembly));
-  registry.registerModule(makeDriftDescriptor());
+  registry.registerModule(makeDriftDescriptor(inputs));
   registry.registerModule(makeGravityDescriptor(inputs, assembly));
   registry.registerModule(makeHydroAmrDescriptor(inputs, assembly));
   registry.registerModule(makeSourceDescriptor(inputs, assembly));

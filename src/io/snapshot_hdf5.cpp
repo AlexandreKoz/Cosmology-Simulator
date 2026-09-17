@@ -15,6 +15,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "cosmosim/core/periodic_domain.hpp"
+#include "cosmosim/core/simulation_mode.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/version.hpp"
@@ -736,12 +738,28 @@ void readScalarStringAttribute(
   out_value = std::move(buffer);
 }
 
+void requireLogicalScalarAttributeShape(hid_t attribute, const std::string& key) {
+  Hdf5Handle space(H5Aget_space(attribute));
+  if (!space.valid()) throw std::runtime_error("failed reading attribute dataspace: " + key);
+  const int rank = H5Sget_simple_extent_ndims(space.get());
+  if (rank == 0) return;
+  if (rank == 1) {
+    hsize_t extent = 0;
+    if (H5Sget_simple_extent_dims(space.get(), &extent, nullptr) < 0 || extent != 1U) {
+      throw std::runtime_error("logical scalar attribute must have rank 0 or shape [1]: " + key);
+    }
+    return;
+  }
+  throw std::runtime_error("logical scalar attribute must have rank 0 or shape [1]: " + key);
+}
+
 [[nodiscard]] bool readScalarUint32Attribute(hid_t location, const std::string& key, std::uint32_t& out_value) {
   if (H5Aexists(location, key.c_str()) <= 0) return false;
   Hdf5Handle attr(H5Aopen(location, key.c_str(), H5P_DEFAULT));
   if (!attr.valid()) {
     return false;
   }
+  requireLogicalScalarAttributeShape(attr.get(), key);
   if (H5Aread(attr.get(), H5T_NATIVE_UINT32, &out_value) < 0) {
     throw std::runtime_error("failed reading attribute: " + key);
   }
@@ -754,6 +772,7 @@ void readScalarStringAttribute(
   if (!attr.valid()) {
     return false;
   }
+  requireLogicalScalarAttributeShape(attr.get(), key);
   if (H5Aread(attr.get(), H5T_NATIVE_UINT64, &out_value) < 0) {
     throw std::runtime_error("failed reading attribute: " + key);
   }
@@ -766,6 +785,7 @@ void readScalarStringAttribute(
   if (!attr.valid()) {
     return false;
   }
+  requireLogicalScalarAttributeShape(attr.get(), key);
   if (H5Aread(attr.get(), H5T_NATIVE_DOUBLE, &out_value) < 0) {
     throw std::runtime_error("failed reading attribute: " + key);
   }
@@ -874,8 +894,11 @@ void readOptionalHeaderDouble(hid_t header_group, const std::string& key, double
   out_value = default_value;
   if (H5Aexists(header_group, key.c_str()) <= 0) return;
   Hdf5Handle attr(H5Aopen(header_group, key.c_str(), H5P_DEFAULT));
-  if (attr.valid() && H5Aread(attr.get(), H5T_NATIVE_DOUBLE, &out_value) < 0) {
-    throw std::runtime_error("failed reading optional Header attribute: " + key);
+  if (attr.valid()) {
+    requireLogicalScalarAttributeShape(attr.get(), key);
+    if (H5Aread(attr.get(), H5T_NATIVE_DOUBLE, &out_value) < 0) {
+      throw std::runtime_error("failed reading optional Header attribute: " + key);
+    }
   }
 }
 
@@ -1777,6 +1800,12 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   }
   const std::size_t total_count = checkedSnapshotCountToSize(total_count_u64, "snapshot reader");
   result.state.resizeParticles(total_count);
+  const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
+  const bool periodic_external_positions = !chui_authored &&
+      mode_policy.gravity_boundary == core::GravityBoundaryModel::kPeriodicPoisson;
+  bool source_id_policy_decided = chui_authored || total_count == 0U;
+  bool source_id_affine_plus_one = false;
+  std::uint64_t periodically_wrapped_components = 0U;
   std::vector<std::uint32_t> tracer_particle_index;
   std::vector<std::uint64_t> tracer_parent_particle_id;
   std::vector<std::uint64_t> tracer_injection_step;
@@ -2229,9 +2258,9 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
 
     for (std::size_t i = 0; i < local_count; ++i) {
       const std::size_t global_i = global_offset + i;
-      const double position_x = conversion.positionFromStored(coords_chunk[i * 3 + 0]);
-      const double position_y = conversion.positionFromStored(coords_chunk[i * 3 + 1]);
-      const double position_z = conversion.positionFromStored(coords_chunk[i * 3 + 2]);
+      double position_x = conversion.positionFromStored(coords_chunk[i * 3 + 0]);
+      double position_y = conversion.positionFromStored(coords_chunk[i * 3 + 1]);
+      double position_z = conversion.positionFromStored(coords_chunk[i * 3 + 2]);
       const double velocity_x = conversion.velocityFromStored(vel_chunk[i * 3 + 0]);
       const double velocity_y = conversion.velocityFromStored(vel_chunk[i * 3 + 1]);
       const double velocity_z = conversion.velocityFromStored(vel_chunk[i * 3 + 2]);
@@ -2239,9 +2268,34 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
       if (!std::isfinite(position_x) || !std::isfinite(position_y) ||
           !std::isfinite(position_z) || !std::isfinite(velocity_x) ||
           !std::isfinite(velocity_y) || !std::isfinite(velocity_z) ||
-          !std::isfinite(mass_code) || mass_code < 0.0 || ids_chunk[i] == 0U) {
+          !std::isfinite(mass_code) || mass_code < 0.0) {
         throw std::runtime_error(
-            "snapshot reader: non-finite phase-space value, negative mass, or zero ParticleID");
+            "snapshot reader: non-finite phase-space value or negative mass");
+      }
+      if (periodic_external_positions) {
+        const double wrapped_x = core::canonicalPeriodicPosition(position_x, header_box_size_x_code);
+        const double wrapped_y = core::canonicalPeriodicPosition(position_y, header_box_size_y_code);
+        const double wrapped_z = core::canonicalPeriodicPosition(position_z, header_box_size_z_code);
+        periodically_wrapped_components += static_cast<std::uint64_t>(wrapped_x != position_x);
+        periodically_wrapped_components += static_cast<std::uint64_t>(wrapped_y != position_y);
+        periodically_wrapped_components += static_cast<std::uint64_t>(wrapped_z != position_z);
+        position_x = wrapped_x; position_y = wrapped_y; position_z = wrapped_z;
+      }
+      std::uint64_t internal_particle_id = ids_chunk[i];
+      if (!source_id_policy_decided) {
+        source_id_affine_plus_one = internal_particle_id == 0U;
+        source_id_policy_decided = true;
+      }
+      if (source_id_affine_plus_one) {
+        if (internal_particle_id != static_cast<std::uint64_t>(global_i) ||
+            internal_particle_id == std::numeric_limits<std::uint64_t>::max()) {
+          throw std::runtime_error(
+              "snapshot reader: zero-based external IDs require contiguous row-ordered IDs for bounded affine normalization");
+        }
+        ++internal_particle_id;
+      } else if (internal_particle_id == 0U) {
+        throw std::runtime_error(
+            "snapshot reader: external ParticleID zero appeared outside the proven contiguous zero-based mapping");
       }
       if (chui_authored) {
         const double tolerance = 1.0e-10 * std::max(
@@ -2265,7 +2319,7 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
       result.state.particles.velocity_z_peculiar[global_i] = velocity_z;
       result.state.particles.mass_code[global_i] = mass_code;
       result.state.particles.time_bin[global_i] = 0;
-      result.state.particle_sidecar.particle_id[global_i] = ids_chunk[i];
+      result.state.particle_sidecar.particle_id[global_i] = internal_particle_id;
       result.state.particle_sidecar.species_tag[global_i] = mapPartTypeToSpeciesTag(type_index, options, chui_authored);
       result.state.particle_sidecar.owning_rank[global_i] = 0;
       if (!softening_chunk.empty()) {
@@ -2630,6 +2684,13 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   if (result.report.materialized_state_bytes > options.budget.max_materialized_bytes) {
     throw std::length_error(
         "snapshot reader: actual materialized SimulationState exceeds max_materialized_bytes");
+  }
+  if (source_id_affine_plus_one) {
+    result.report.present_aliases.push_back("external_id_mapping=contiguous_zero_based_plus_one");
+  }
+  if (periodically_wrapped_components > 0U) {
+    result.report.present_aliases.push_back(
+        "periodic_position_components_wrapped=" + std::to_string(periodically_wrapped_components));
   }
   internal::updateSnapshotReadiness(result.state, &result.report);
   return result;

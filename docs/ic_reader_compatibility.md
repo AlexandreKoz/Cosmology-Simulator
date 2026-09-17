@@ -75,10 +75,27 @@ integer storage up to 64 bits. Reads use a wide intermediate and reject:
 - malformed rank or extent.
 
 The manifest preserves the actual source scalar class, byte width, signedness,
-byte order, rank, and dimensions. `NumPart_Total` and
-`NumPart_Total_HighWord` retain strict unsigned low/high-word handling. Mixed
-signed and unsigned per-file count attributes are allowed only when their values
-and all other file-set contracts agree.
+byte order, rank, and dimensions. `NumPart_Total` accepts both the classic
+GADGET low-word plus optional `NumPart_Total_HighWord` representation and a
+direct nonnegative unsigned 64-bit total. When both interpretations carry
+information they must agree; no value is truncated. Logical scalar header
+attributes accept HDF5 rank 0 or rank 1 with extent `[1]` and reject larger or
+higher-rank shapes. These structural normalizations are recorded in manifest
+warnings rather than weakening scientific header checks.
+
+## Mode-aware geometry and external identity normalization
+
+Cosmological periodic ingestion requires the epoch/cosmology/box metadata that
+defines the science contract. Finite external coordinates are normalized by true
+axis-aware modulo into `[0,L)`, and the aggregate number of wrapped coordinate
+components is recorded. Isolated/open ingestion does not require cosmological
+placeholder fields and does not periodically wrap legitimate negative positions.
+
+CHUÍ keeps zero reserved in its internal particle-ID domain. A proven contiguous
+zero-based external file ordering is normalized deterministically with checked
+`internal_id = source_id + 1`; uniqueness and overflow are verified without an
+O(N) remap table, and the mapping policy is recorded in manifest provenance.
+Arbitrary or ambiguous ID domains still fail closed rather than recycling IDs.
 
 ## Deterministic multifile discovery and source identity
 

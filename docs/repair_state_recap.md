@@ -2421,3 +2421,17 @@ though it no longer invalidates scale-free spectral arrays. Focused CPU and
 HDF5 regressions pass in the available environment; FFTW/MPI PM validation
 remains dependency-blocked. See
 `docs/repair/dmo_first_light_correctness_20260916.md`.
+
+## 2026-09-17 — DMO first-light runtime, IC, periodic-state, and snapshot-layout recovery
+
+The first real DMO run exposed a config-driven timestep/endpoint authority bug,
+not an FLRW bracketing defect. Rung-zero now selects the collective physical
+minimum before KDK construction, `max_global_steps` is only a safety cap, and
+scale-factor authority derives and clips to the FLRW code-time endpoint. The
+repair also centralizes first-light periodic modulo semantics, accepts the
+monofonIC HDF5 structural forms exercised by the failure bundle, normalizes
+proven contiguous zero-based source IDs, and migrates new science output from
+per-snapshot directories to stem-scoped sets inside one `snapshots/` directory
+without changing science snapshot schema v6. The config-driven DMO smoke and
+focused HDF5 IC/snapshot tests pass locally; MPI and FFTW runtime matrices remain
+dependency-blocked.

@@ -1968,6 +1968,12 @@ if(COSMOSIM_ENABLE_TESTS)
     test_validation_dmo_zeldovich_workflow PRIVATE
     COSMOSIM_DMO_ARTIFACT_ROOT="${CMAKE_BINARY_DIR}/validation_artifacts/dmo_zeldovich")
   add_test(
+    NAME integration_dmo_config_driven_firstlight_smoke_single_rank
+    COMMAND test_validation_dmo_zeldovich_workflow --config-driven-firstlight-smoke)
+  set_tests_properties(
+    integration_dmo_config_driven_firstlight_smoke_single_rank
+    PROPERTIES LABELS "integration;gravity;dmo;workflow;first_light;config_driven;timestep")
+  add_test(
     NAME integration_dmo_empty_rank_smoke_single_rank
     COMMAND test_validation_dmo_zeldovich_workflow --empty-rank-smoke)
   set_tests_properties(

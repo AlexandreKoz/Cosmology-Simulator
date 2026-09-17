@@ -29,6 +29,8 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/periodic_domain.hpp"
+#include "cosmosim/core/simulation_mode.hpp"
 #include "io/internal/ic_byte_codec.hpp"
 #include "io/internal/ic_canonical_bundle.hpp"
 #include "io/internal/ic_conversion_catalog.hpp"
@@ -172,33 +174,19 @@ void convertValues(
   return value;
 }
 
-[[nodiscard]] double normalizePeriodicCoordinate(
-    double value,
-    double box_size,
-    std::string_view axis_name) {
-  if (!std::isfinite(value) || !(box_size > 0.0)) {
-    throw std::runtime_error(
-        "IC " + std::string(axis_name) + " coordinate is non-finite");
-  }
-  const double tolerance = 1.0e-12 * std::max(1.0, box_size);
-  if (value < -tolerance || value > box_size + tolerance) {
-    throw std::runtime_error(
-        "IC " + std::string(axis_name) +
-        " coordinate is outside the periodic box");
-  }
-  if (value < 0.0 || value >= box_size) {
-    return 0.0;
-  }
-  return value;
-}
-
 void validateRecordScientificState(
     ParticleRecord& record,
     IcSpeciesPolicy policy,
-    double box_size) {
-  record.x = normalizePeriodicCoordinate(record.x, box_size, "x");
-  record.y = normalizePeriodicCoordinate(record.y, box_size, "y");
-  record.z = normalizePeriodicCoordinate(record.z, box_size, "z");
+    double box_size,
+    bool periodic_geometry) {
+  if (periodic_geometry) {
+    record.x = core::canonicalPeriodicPosition(record.x, box_size);
+    record.y = core::canonicalPeriodicPosition(record.y, box_size);
+    record.z = core::canonicalPeriodicPosition(record.z, box_size);
+  } else if (!std::isfinite(record.x) || !std::isfinite(record.y) ||
+             !std::isfinite(record.z)) {
+    throw std::runtime_error("IC position components must be finite");
+  }
   if (!std::isfinite(record.vx) || !std::isfinite(record.vy) ||
       !std::isfinite(record.vz)) {
     throw std::runtime_error("IC velocity components must be finite");
@@ -226,11 +214,8 @@ void validateRecordScientificState(
           "negative stellar formation time identifies an AREPO wind particle; "
           "gadget_arepo_bridge_v1 does not silently reinterpret wind particles as ordinary stars");
     }
-    if (
-        !std::isfinite(record.star_birth_mass) ||
-        !(record.star_birth_mass > 0.0) ||
-        !std::isfinite(record.star_metallicity) ||
-        record.star_metallicity < 0.0) {
+    if (!std::isfinite(record.star_birth_mass) || !(record.star_birth_mass > 0.0) ||
+        !std::isfinite(record.star_metallicity) || record.star_metallicity < 0.0) {
       throw std::runtime_error("stellar IC sidecar values are invalid");
     }
   } else if (policy == IcSpeciesPolicy::kBlackHole) {
@@ -267,9 +252,19 @@ void validateRecordScientificState(
   const core::UnitSystem target = core::makeUnitSystem(
       config.units.length_unit, config.units.mass_unit,
       config.units.velocity_unit);
-  const double box_size = convertedHeaderFieldCode(
-      manifest, requireField(manifest, file_index, "/Header/BoxSize"),
-      manifest.box_size, target);
+  const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
+  const bool periodic_geometry =
+      mode_policy.gravity_boundary == core::GravityBoundaryModel::kPeriodicPoisson;
+  double box_size = 1.0;
+  if (periodic_geometry) {
+    box_size = convertedHeaderFieldCode(
+        manifest, requireField(manifest, file_index, "/Header/BoxSize"),
+        manifest.box_size, target);
+  } else if (const auto* box_field =
+                 findField(manifest, file_index, "/Header/BoxSize")) {
+    box_size = convertedHeaderFieldCode(
+        manifest, *box_field, manifest.box_size, target);
+  }
 
   std::vector<double> pos;
   std::vector<double> vel;
@@ -315,6 +310,20 @@ void validateRecordScientificState(
       ids[i] = base + i;
     }
   }
+  if (inspection.normalize_zero_based_contiguous_ids) {
+    const std::uint64_t base =
+        precedingRecordCount(manifest, file_index, type_index) + start;
+    for (std::size_t i = 0U; i < ids.size(); ++i) {
+      const std::uint64_t expected = base + i;
+      if (ids[i] != expected || ids[i] == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error(
+            "external zero-based ParticleIDs are not globally contiguous; "
+            "refusing an ambiguous identity remap");
+      }
+      ids[i] += 1U;
+    }
+  }
+
 
   if (const auto* field =
           findField(manifest, file_index, prefix + "Masses")) {
@@ -478,7 +487,18 @@ void validateRecordScientificState(
       record.tracer_last_host_mass = tracer_last[i];
       record.tracer_exchanged_mass = tracer_exchange[i];
     }
-    validateRecordScientificState(record, policy, box_size);
+    const std::array<double, 3> source_position{record.x, record.y, record.z};
+    validateRecordScientificState(record, policy, box_size, periodic_geometry);
+    if (periodic_geometry) {
+      const std::array<double, 3> canonical_position{record.x, record.y, record.z};
+      for (std::size_t axis = 0U; axis < source_position.size(); ++axis) {
+        if (source_position[axis] != canonical_position[axis]) {
+          checkedCounterAdd(
+              counters.periodic_coordinate_components_wrapped, 1U,
+              "periodic_coordinate_components_wrapped");
+        }
+      }
+    }
   }
 
   std::uint64_t staging_bytes = vectorCapacityBytes(records);
@@ -843,6 +863,10 @@ void finalizeImportedState(
 void validateRuntimeCosmology(
     const IcManifest& manifest,
     const core::SimulationConfig& config) {
+  const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
+  if (!mode_policy.cosmological_comoving_frame) {
+    return;
+  }
   const double box_code = convertedBoxSizeCode(manifest, config);
   const core::UnitSystem target = core::makeUnitSystem(
       config.units.length_unit,

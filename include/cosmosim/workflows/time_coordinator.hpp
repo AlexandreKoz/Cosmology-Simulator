@@ -122,7 +122,7 @@ class TimeCoordinator {
       core::ProfilerSession* profiler_session,
       core::StepBoundaryKind requested_boundary_kind);
 
-  void updateAdaptiveTimeBins(
+  [[nodiscard]] double updateAdaptiveTimeBins(
       core::SimulationState& state,
       core::HierarchicalTimeBinScheduler& particle_scheduler,
       core::HierarchicalTimeBinScheduler& gas_cell_scheduler,

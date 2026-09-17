@@ -223,9 +223,23 @@ Einstein-de Sitter (`omega_matter=1`, `omega_lambda=0`) is accepted.
 
 Time/scale semantics (anti-ambiguity contract):
 
-- `t_code_begin` / `t_code_end` are code-time boundaries for integration bookkeeping.
+- `integrator_time_variable` is runtime authority, not descriptive metadata.
+  `scale_factor` and `ln_a` make `a_begin/a_end` authoritative and derive the
+  code-time interval from the configured flat FLRW background. `code_time`
+  makes `t_code_begin/t_code_end` authoritative and derives the matching final
+  scale factor. `physical_time` is rejected at config freeze until a complete
+  production conversion path exists.
+- A cosmological config that explicitly supplies contradictory scale-factor and
+  code-time endpoint families fails before IC ingestion. Normalized config emits
+  the resolved `a`, `z`, and code-time endpoints actually used by the runtime.
+- If no time authority is explicitly named, a supplied `a_end`/`z_end` selects
+  scale-factor authority; a code-time-only endpoint selects code time.
+  Non-cosmological modes use code time.
+- `max_global_steps` is a termination/safety cap. It does not generate the
+  physical timestep. In the supported rung-zero path the accepted global step is
+  the MPI minimum of active physical criteria, optional explicit test/embedding
+  maximum, ordered output boundary, and authoritative run endpoint.
 - Legacy `time_begin_code`/`time_end_code` and `initial_scale_factor`/`initial_redshift` are accepted only as user-input aliases.
-- They are not redshift keys and not SI physical-time keys.
 - Committed/restart cosmological scale-factor authority is
   `IntegratorState.current_scale_factor`, while redshift remains derived
   (`z=1/a-1`). Within an in-flight step, `StepContext.timeline_step` owns stage

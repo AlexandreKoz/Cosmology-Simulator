@@ -84,8 +84,11 @@ MPI science output is one logical multifile snapshot set. Every member has local
 schema/dialect, epoch, box/cosmology, unit/frame, config-hash and governance identity, and one
 contiguous member index in `[0, NumFilesPerSnapshot)`. Discovery resolves one generation/stem
 rather than treating every `.hdf5` file in a directory as one snapshot. Root publishes a
-versioned `chui_snapshot_set_v2` `<generation>.complete` manifest only after all expected
-members have transactionally completed. The manifest binds the common scientific identity,
+versioned `chui_snapshot_set_v2` stem-scoped `snap_###.complete` manifest only after all expected
+members have transactionally completed. New production members live together under
+`<shared_run>/snapshots/` as `snap_###.hdf5` or `snap_###.N.hdf5`; the set locator filters by
+stem and cannot treat unrelated files in that directory as one set. Legacy
+`snapdir_###/<generation>.complete` remains readable. The manifest binds the common scientific identity,
 exact member filenames/indices/local counts/file sizes, per-member SHA-256 digests, and a root
 SHA-256 over the canonical manifest body. CHUÍ reads fail closed on gaps, mixed scientific
 identity, stale/mismatched members, absent required manifests, or digest disagreement.

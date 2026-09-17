@@ -3619,6 +3619,17 @@ double MpiContext::allreduceSumDouble(double local_value) const {
   return local_value;
 }
 
+double MpiContext::allreduceMinDouble(double local_value) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    double global = 0.0;
+    MPI_Allreduce(&local_value, &global, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    return global;
+  }
+#endif
+  return local_value;
+}
+
 std::uint64_t MpiContext::allreduceSumUint64(std::uint64_t local_value) const {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   if (m_is_enabled) {

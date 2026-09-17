@@ -2,6 +2,16 @@
 
 > **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
 
+## 2026-09-17 DMO first-light recovery remaining gates
+
+The source-level first-light blockers for config-driven rung-zero stepping,
+scale-factor endpoint authority, monofonIC structural ingestion, periodic state,
+and flat snapshot-set discovery are repaired. The remaining acceptance blockers
+are environment gates: this repair host lacks a discoverable MPI C++ toolchain
+and FFTW development library, so real multi-rank timestep/snapshot execution and
+the FFTW-backed `cosmosim_harness` TreePM smoke were not executed. These are
+validation gates, not permission to weaken the repaired contracts.
+
 
 ## 2026-07-30 Campaign B packaging closure and remaining MPI gate
 

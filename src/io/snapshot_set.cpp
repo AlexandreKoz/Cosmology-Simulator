@@ -37,6 +37,15 @@ namespace {
 
 constexpr std::uint64_t kMaxSnapshotSetManifestBytes = 4ULL << 20U;
 
+[[nodiscard]] std::string logicalSnapshotStem(const std::filesystem::path& path) {
+  const std::regex ranked_pattern(R"(^(.+)\.([0-9]+)\.hdf5$)");
+  std::smatch match;
+  const std::string filename = path.filename().string();
+  if (std::regex_match(filename, match, ranked_pattern)) return match[1].str();
+  if (path.extension() == ".hdf5") return path.stem().string();
+  return filename;
+}
+
 [[nodiscard]] std::string dialectLabel(SnapshotDialect dialect) {
   switch (dialect) {
     case SnapshotDialect::kAuto: return "auto";
@@ -469,21 +478,17 @@ class H5Handle {
   return parent.empty() ? std::filesystem::path(".") : parent;
 }
 
-[[nodiscard]] std::vector<std::filesystem::path> manifestListedMembers(
-    const std::filesystem::path& directory) {
-  std::vector<std::filesystem::path> manifests;
-  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-    if (entry.is_regular_file() && entry.path().extension() == ".complete") manifests.push_back(entry.path());
-  }
-  if (manifests.empty()) return {};
-  if (manifests.size() != 1U) {
-    throw std::runtime_error("snapshot inspection: directory contains multiple completion manifests; select a member or a specific snapdir");
-  }
-  const std::string text = readBoundedTextFile(manifests.front());
+[[nodiscard]] std::vector<std::filesystem::path> manifestListedMembersFromPath(
+    const std::filesystem::path& manifest) {
+  const std::filesystem::path directory = setDirectory(manifest);
+  const std::string text = readBoundedTextFile(manifest);
   const auto values = parseKeyValueBody(text);
   const auto schema_it = values.find("schema");
   if (schema_it == values.end() || schema_it->second != "chui_snapshot_set_v2") return {};
   const std::uint32_t count = parseU32(values, "member_count");
+  const std::string generation_id = requireString(values, "generation_id");
+  const std::string marker_stem = manifest.stem().string();
+  std::string member_stem;
   std::vector<std::filesystem::path> paths;
   paths.reserve(count);
   for (std::uint32_t i = 0; i < count; ++i) {
@@ -492,9 +497,37 @@ class H5Handle {
     if (relative.is_absolute() || relative.has_parent_path() || filename == "." || filename == "..") {
       throw std::runtime_error("snapshot set manifest contains unsafe member filename");
     }
+    const std::string current_stem = logicalSnapshotStem(relative);
+    if (member_stem.empty()) {
+      member_stem = current_stem;
+    } else if (member_stem != current_stem) {
+      throw std::runtime_error(
+          "snapshot set completion manifest mixes multiple logical snapshot stems");
+    }
     paths.push_back(directory / relative);
   }
+  // Legacy snapdir layouts named the marker by generation id.  New flat
+  // layouts name it by logical snapshot stem.  Accept either contract, but
+  // reject a renamed/stale marker that binds neither identity.
+  if (!member_stem.empty() && marker_stem != generation_id && marker_stem != member_stem) {
+    throw std::runtime_error(
+        "snapshot set completion marker stem disagrees with logical snapshot set");
+  }
   return paths;
+}
+
+[[nodiscard]] std::vector<std::filesystem::path> manifestListedMembers(
+    const std::filesystem::path& directory) {
+  std::vector<std::filesystem::path> manifests;
+  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    if (entry.is_regular_file() && entry.path().extension() == ".complete") manifests.push_back(entry.path());
+  }
+  if (manifests.empty()) return {};
+  if (manifests.size() != 1U) {
+    throw std::runtime_error(
+        "snapshot inspection: directory contains multiple completion manifests; select a member or a .complete manifest");
+  }
+  return manifestListedMembersFromPath(manifests.front());
 }
 
 [[nodiscard]] std::vector<MemberHeader> discoverMemberHeaders(
@@ -513,6 +546,8 @@ class H5Handle {
         if (entry.is_regular_file() && entry.path().extension() == ".hdf5") candidates.push_back(entry.path());
       }
     }
+  } else if (input.extension() == ".complete") {
+    candidates = manifestListedMembersFromPath(input);
   } else {
     const MemberHeader first = inspectMember(input, options);
     if (first.num_files <= 1U) {
@@ -641,7 +676,17 @@ struct MemberIntegrity {
     const std::vector<MemberHeader>& headers,
     const SnapshotReadOptions& options) {
   if (headers.empty() || headers.front().generation.empty()) return false;
-  const auto marker = setDirectory(input) / (headers.front().generation + ".complete");
+  std::filesystem::path marker;
+  if (!std::filesystem::is_directory(input) && input.extension() == ".complete") {
+    marker = input;
+  } else if (!std::filesystem::is_directory(input) && input.extension() == ".hdf5") {
+    marker = setDirectory(input) / (logicalSnapshotStem(input) + ".complete");
+    if (!std::filesystem::exists(marker)) {
+      marker = setDirectory(input) / (headers.front().generation + ".complete");
+    }
+  } else {
+    marker = setDirectory(input) / (headers.front().generation + ".complete");
+  }
   std::error_code ec;
   if (!std::filesystem::is_regular_file(marker, ec) || ec) return false;
   try {
@@ -1139,8 +1184,12 @@ void writeSnapshotSetCompletionMarker(
   }
   const std::string body = buildCompletionManifestBody(headers, integrities);
   const std::string contents = body + "set_digest_sha256=" + core::internal::sha256Hex(body) + "\n";
+  const std::filesystem::path completion_path =
+      std::filesystem::is_directory(snapshot_directory)
+      ? snapshot_directory / (std::string(generation_id) + ".complete")
+      : setDirectory(snapshot_directory) / (logicalSnapshotStem(snapshot_directory) + ".complete");
   internal::writeTextFileTransactionally(
-      snapshot_directory / (std::string(generation_id) + ".complete"), contents,
+      completion_path, contents,
       durable_publication ? internal::FileDurability::kDurablePublication
                           : internal::FileDurability::kAtomicVisibility);
   for (const auto& header : headers) {

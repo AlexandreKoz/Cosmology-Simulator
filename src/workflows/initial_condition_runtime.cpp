@@ -318,6 +318,7 @@ InitialConditionStartupResult InitialConditionRuntime::materialize(
                   {"manifest_metadata_bytes_communicated", std::to_string(counters.manifest_metadata_bytes_communicated)},
                   {"bytes_read", std::to_string(counters.bytes_read)},
                   {"records_converted", std::to_string(counters.records_converted)},
+                  {"periodic_coordinate_components_wrapped", std::to_string(counters.periodic_coordinate_components_wrapped)},
                   {"records_routed", std::to_string(counters.records_routed)},
                   {"bytes_sent", std::to_string(counters.bytes_sent)},
                   {"bytes_received", std::to_string(counters.bytes_received)},

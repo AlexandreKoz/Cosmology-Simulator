@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/simulation_mode.hpp"
 #include "io/internal/ic_byte_codec.hpp"
 #include "io/internal/ic_canonical_bundle.hpp"
 #include "io/internal/ic_conversion_catalog.hpp"
@@ -312,13 +313,29 @@ void readAttributeNonnegativeU64x6(
   }
 }
 
+void requireLogicalScalarShape(hid_t attribute, const char* name) {
+  const auto dims = attributeDimensions(attribute);
+  if (dims.empty() || (dims.size() == 1U && dims.front() == 1U)) {
+    return;
+  }
+  throw std::runtime_error(
+      std::string("Header/") + name +
+      " must be a logical scalar (rank 0 or rank 1 extent 1)");
+}
+
 void readAttributeNonnegativeU32(
     hid_t group,
     const char* name,
     std::uint32_t& value) {
-  Hdf5Handle attribute = openValidatedAttribute(
-      group, name, true, IcScalarClass::kInteger, {}, false,
+  Hdf5Handle attribute(H5Aopen(group, name, H5P_DEFAULT));
+  if (!attribute.valid()) {
+    throw std::runtime_error(std::string("missing Header/") + name);
+  }
+  requireLogicalScalarShape(attribute.get(), name);
+  Hdf5Handle checked = openValidatedAttribute(
+      group, name, true, IcScalarClass::kInteger, attributeDimensions(attribute.get()), false,
       sizeof(std::uint64_t));
+  attribute = std::move(checked);
   Hdf5Handle type(H5Aget_type(attribute.get()));
   if (!type.valid()) {
     throw std::runtime_error(std::string("failed to inspect Header/") + name);
@@ -374,16 +391,28 @@ void readAttributeF64x6(
 }
 
 void readAttributeF64(hid_t group, const char* name, double& value) {
-  Hdf5Handle attribute = openValidatedAttribute(
-      group, name, true, IcScalarClass::kFloatingPoint, {});
+  Hdf5Handle attribute(H5Aopen(group, name, H5P_DEFAULT));
+  if (!attribute.valid()) {
+    throw std::runtime_error(std::string("missing Header/") + name);
+  }
+  requireLogicalScalarShape(attribute.get(), name);
+  const auto dims = attributeDimensions(attribute.get());
+  attribute = openValidatedAttribute(
+      group, name, true, IcScalarClass::kFloatingPoint, dims);
   if (H5Aread(attribute.get(), H5T_NATIVE_DOUBLE, &value) < 0) {
     throw std::runtime_error(std::string("failed to read Header/") + name);
   }
 }
 
 void readAttributeU32(hid_t group, const char* name, std::uint32_t& value) {
-  Hdf5Handle attribute = openValidatedAttribute(
-      group, name, true, IcScalarClass::kInteger, {}, true);
+  Hdf5Handle attribute(H5Aopen(group, name, H5P_DEFAULT));
+  if (!attribute.valid()) {
+    throw std::runtime_error(std::string("missing Header/") + name);
+  }
+  requireLogicalScalarShape(attribute.get(), name);
+  const auto dims = attributeDimensions(attribute.get());
+  attribute = openValidatedAttribute(
+      group, name, true, IcScalarClass::kInteger, dims, true);
   if (H5Aread(attribute.get(), H5T_NATIVE_UINT32, &value) < 0) {
     throw std::runtime_error(std::string("failed to read Header/") + name);
   }
@@ -429,28 +458,76 @@ void readAttributeU32(hid_t group, const char* name, std::uint32_t& value) {
   return std::string(raw.begin(), end);
 }
 
-[[nodiscard]] IcSchemaSummary readHeader(hid_t header) {
+[[nodiscard]] IcSchemaSummary readHeader(
+    hid_t header, const core::SimulationConfig& config) {
   IcSchemaSummary summary;
   std::array<std::uint64_t, 6> local{};
-  std::array<std::uint32_t, 6> low{};
+  std::array<std::uint64_t, 6> total{};
   readAttributeNonnegativeU64x6(header, "NumPart_ThisFile", local);
-  readAttributeU32x6(header, "NumPart_Total", low);
+  readAttributeNonnegativeU64x6(header, "NumPart_Total", total);
   readAttributeU32x6(
       header, "NumPart_Total_HighWord", summary.total_count_high_word, false);
   readAttributeF64x6(header, "MassTable", summary.mass_table);
-  readAttributeF64(header, "Time", summary.scale_factor);
-  readAttributeF64(header, "Redshift", summary.redshift);
-  readAttributeF64(header, "BoxSize", summary.box_size);
-  readAttributeF64(header, "Omega0", summary.omega_matter);
-  readAttributeF64(header, "OmegaLambda", summary.omega_lambda);
-  readAttributeF64(header, "HubbleParam", summary.hubble_param);
+
+  const auto logical_scalar_is_rank_one = [&](const char* name) {
+    if (H5Aexists(header, name) <= 0) return false;
+    Hdf5Handle attribute(H5Aopen(header, name, H5P_DEFAULT));
+    if (!attribute.valid()) return false;
+    const auto dims = attributeDimensions(attribute.get());
+    return dims.size() == 1U && dims.front() == 1U;
+  };
+  for (const char* name : {"Time", "Redshift", "BoxSize", "Omega0",
+                           "OmegaLambda", "HubbleParam",
+                           "NumFilesPerSnapshot"}) {
+    summary.normalized_rank1_scalar_attributes =
+        summary.normalized_rank1_scalar_attributes ||
+        logical_scalar_is_rank_one(name);
+  }
+  {
+    Hdf5Handle total_attribute(H5Aopen(header, "NumPart_Total", H5P_DEFAULT));
+    Hdf5Handle total_type(
+        total_attribute.valid() ? H5Aget_type(total_attribute.get()) : -1);
+    summary.normalized_uint64_total_counts =
+        total_type.valid() && H5Tget_size(total_type.get()) > sizeof(std::uint32_t);
+  }
+
+  const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
+  if (mode_policy.cosmological_comoving_frame) {
+    readAttributeF64(header, "Time", summary.scale_factor);
+    readAttributeF64(header, "Redshift", summary.redshift);
+    readAttributeF64(header, "BoxSize", summary.box_size);
+    readAttributeF64(header, "Omega0", summary.omega_matter);
+    readAttributeF64(header, "OmegaLambda", summary.omega_lambda);
+    readAttributeF64(header, "HubbleParam", summary.hubble_param);
+  } else {
+    summary.scale_factor = 1.0;
+    summary.redshift = 0.0;
+    summary.box_size = 1.0;
+    summary.omega_matter = config.cosmology.omega_matter;
+    summary.omega_lambda = config.cosmology.omega_lambda;
+    summary.hubble_param = config.cosmology.hubble_param;
+    if (H5Aexists(header, "Time") > 0) readAttributeF64(header, "Time", summary.scale_factor);
+    if (H5Aexists(header, "Redshift") > 0) readAttributeF64(header, "Redshift", summary.redshift);
+    if (H5Aexists(header, "BoxSize") > 0) readAttributeF64(header, "BoxSize", summary.box_size);
+    if (H5Aexists(header, "Omega0") > 0) readAttributeF64(header, "Omega0", summary.omega_matter);
+    if (H5Aexists(header, "OmegaLambda") > 0) readAttributeF64(header, "OmegaLambda", summary.omega_lambda);
+    if (H5Aexists(header, "HubbleParam") > 0) readAttributeF64(header, "HubbleParam", summary.hubble_param);
+  }
   readAttributeNonnegativeU32(
       header, "NumFilesPerSnapshot", summary.num_files_per_snapshot);
   for (std::size_t i = 0; i < 6; ++i) {
     summary.count_by_type[i] = local[i];
-    summary.total_count_by_type[i] =
-        static_cast<std::uint64_t>(low[i]) |
-        (static_cast<std::uint64_t>(summary.total_count_high_word[i]) << 32U);
+    if (summary.total_count_high_word[i] != 0U) {
+      if (total[i] > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::runtime_error(
+            "Header/NumPart_Total wide value conflicts with NumPart_Total_HighWord");
+      }
+      summary.total_count_by_type[i] =
+          total[i] |
+          (static_cast<std::uint64_t>(summary.total_count_high_word[i]) << 32U);
+    } else {
+      summary.total_count_by_type[i] = total[i];
+    }
   }
   return summary;
 }
@@ -1134,7 +1211,7 @@ void recordRootSchemaDisposition(
 
   SourceFileInspection result;
   result.path = path;
-  result.schema = readHeader(header.get());
+  result.schema = readHeader(header.get(), config);
   const bool source_declares_canonical =
       attributeExists(header.get(), "ChuiIcSchemaName");
   if (dialect == IcDialect::kGadgetArepoBridgeV1 &&
@@ -1491,7 +1568,7 @@ void recordRootSchemaDisposition(
   if (!first_header.valid()) {
     throw std::runtime_error("IC file missing /Header group");
   }
-  const IcSchemaSummary first_schema = readHeader(first_header.get());
+  const IcSchemaSummary first_schema = readHeader(first_header.get(), config);
 
   std::vector<std::filesystem::path> files;
   if (has_authoritative_manifest && !options.manifest->source_files.empty()) {
@@ -1505,6 +1582,37 @@ void recordRootSchemaDisposition(
   }
 
   Inspection inspection;
+  if (config.mode.ic_convention == core::InitialConditionConvention::kGadgetArepoBridgeV1) {
+    for (std::size_t type_index = 0U; type_index < kParticleTypeCount; ++type_index) {
+      if (first_schema.count_by_type[type_index] == 0U) {
+        continue;
+      }
+      const std::string dataset_path =
+          "/PartType" + std::to_string(type_index) + "/ParticleIDs";
+      if (H5Lexists(first_file.get(), dataset_path.c_str(), H5P_DEFAULT) <= 0) {
+        break;
+      }
+      Hdf5Handle dataset(H5Dopen2(first_file.get(), dataset_path.c_str(), H5P_DEFAULT));
+      if (!dataset.valid()) {
+        throw std::runtime_error("failed to inspect first external ParticleIDs value");
+      }
+      Hdf5Handle file_space(H5Dget_space(dataset.get()));
+      hsize_t start[1]{0U};
+      hsize_t count[1]{1U};
+      if (!file_space.valid() ||
+          H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, start, nullptr, count, nullptr) < 0) {
+        throw std::runtime_error("failed selecting first external ParticleIDs value");
+      }
+      Hdf5Handle memory_space(H5Screate_simple(1, count, nullptr));
+      std::uint64_t first_id = 0U;
+      if (!memory_space.valid() ||
+          H5Dread(dataset.get(), H5T_NATIVE_UINT64, memory_space.get(), file_space.get(), H5P_DEFAULT, &first_id) < 0) {
+        throw std::runtime_error("failed reading first external ParticleIDs value");
+      }
+      inspection.normalize_zero_based_contiguous_ids = first_id == 0U;
+      break;
+    }
+  }
   IcManifest& manifest = inspection.manifest;
   manifest.dialect =
       config.mode.ic_convention ==
@@ -1551,19 +1659,25 @@ void recordRootSchemaDisposition(
         manifest.dialect, manifest.species_policy, config, options,
         has_authoritative_manifest);
     const IcSchemaSummary& schema = source.schema;
-    if (schema.num_files_per_snapshot != files.size() ||
+    const core::ModePolicy source_mode_policy = core::buildModePolicy(config.mode);
+    const bool common_header_mismatch =
+        schema.num_files_per_snapshot != files.size() ||
         schema.total_count_by_type != first_schema.total_count_by_type ||
         schema.total_count_high_word != first_schema.total_count_high_word ||
-        schema.mass_table != first_schema.mass_table ||
-        !nearlyEqual(schema.box_size, first_schema.box_size) ||
-        !nearlyEqual(schema.scale_factor, first_schema.scale_factor) ||
-        !nearlyEqual(schema.redshift, first_schema.redshift) ||
-        !nearlyEqual(schema.omega_matter, first_schema.omega_matter) ||
-        !nearlyEqual(schema.omega_lambda, first_schema.omega_lambda) ||
-        !nearlyEqual(schema.hubble_param, first_schema.hubble_param)) {
+        schema.mass_table != first_schema.mass_table;
+    const bool cosmology_header_mismatch =
+        source_mode_policy.cosmological_comoving_frame &&
+        (!nearlyEqual(schema.box_size, first_schema.box_size) ||
+         !nearlyEqual(schema.scale_factor, first_schema.scale_factor) ||
+         !nearlyEqual(schema.redshift, first_schema.redshift) ||
+         !nearlyEqual(schema.omega_matter, first_schema.omega_matter) ||
+         !nearlyEqual(schema.omega_lambda, first_schema.omega_lambda) ||
+         !nearlyEqual(schema.hubble_param, first_schema.hubble_param));
+    if (common_header_mismatch || cosmology_header_mismatch) {
       throw std::runtime_error(
-          "inconsistent cosmology, box, epoch, mass table, totals, or "
-          "NumFilesPerSnapshot across IC files");
+          source_mode_policy.cosmological_comoving_frame
+              ? "inconsistent cosmology, box, epoch, mass table, totals, or NumFilesPerSnapshot across IC files"
+              : "inconsistent mass table, totals, or NumFilesPerSnapshot across IC files");
     }
     for (std::size_t type = 0; type < kParticleTypeCount; ++type) {
       if (summed[type] > std::numeric_limits<std::uint64_t>::max() -
@@ -1642,6 +1756,28 @@ void recordRootSchemaDisposition(
   manifest.omega_matter = first_schema.omega_matter;
   manifest.omega_lambda = first_schema.omega_lambda;
   manifest.hubble_param = first_schema.hubble_param;
+  const bool normalized_rank1_scalars = std::any_of(
+      inspection.schemas.begin(), inspection.schemas.end(),
+      [](const IcSchemaSummary& schema) {
+        return schema.normalized_rank1_scalar_attributes;
+      });
+  const bool normalized_uint64_totals = std::any_of(
+      inspection.schemas.begin(), inspection.schemas.end(),
+      [](const IcSchemaSummary& schema) {
+        return schema.normalized_uint64_total_counts;
+      });
+  if (normalized_rank1_scalars) {
+    manifest.warnings.push_back(
+        "structural_normalization=rank1_extent1_logical_scalars");
+  }
+  if (normalized_uint64_totals) {
+    manifest.warnings.push_back(
+        "structural_normalization=uint64_NumPart_Total");
+  }
+  if (inspection.normalize_zero_based_contiguous_ids) {
+    manifest.warnings.push_back(
+        "source_particle_id_mapping=zero_based_contiguous_plus_one");
+  }
   manifest.converted_fields.reserve(manifest.fields.size());
   for (const auto& field : manifest.fields) {
     if (field.disposition == IcFieldDisposition::kConverted) {

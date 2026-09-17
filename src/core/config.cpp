@@ -17,6 +17,7 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/constants.hpp"
+#include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/provenance.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
 #include "cosmosim/core/units.hpp"
@@ -33,6 +34,47 @@ struct SectionRequirement {
   std::string name;
   std::vector<std::string> required_fields;
 };
+
+[[nodiscard]] double resolveFlatLambdaCdmScaleFactorAfterTime(
+    const LambdaCdmBackground& background,
+    double scale_factor_begin,
+    double elapsed_time_si) {
+  if (!std::isfinite(scale_factor_begin) || scale_factor_begin <= 0.0 ||
+      !std::isfinite(elapsed_time_si) || elapsed_time_si < 0.0) {
+    throw std::invalid_argument("invalid scale factor or elapsed time for FLRW endpoint resolution");
+  }
+  if (elapsed_time_si == 0.0) {
+    return scale_factor_begin;
+  }
+
+  const auto& cosmology = background.config();
+  const double omega_m = cosmology.omega_matter;
+  const double omega_l = cosmology.omega_lambda;
+  const double hubble0 = background.hubble0Si();
+  if (omega_m > 0.0 && omega_l > 0.0) {
+    const double sqrt_l = std::sqrt(omega_l);
+    const double q = std::sqrt(omega_l / omega_m);
+    const double y_begin = std::asinh(q * std::pow(scale_factor_begin, 1.5));
+    const double y_end = y_begin + 1.5 * hubble0 * sqrt_l * elapsed_time_si;
+    if (!std::isfinite(y_end) || y_end > 700.0) {
+      throw std::overflow_error("FLRW code-time endpoint exceeds representable scale factor");
+    }
+    return std::pow(std::sinh(y_end) / q, 2.0 / 3.0);
+  }
+  if (omega_m > 0.0) {
+    const double a32 = std::pow(scale_factor_begin, 1.5) +
+        1.5 * hubble0 * std::sqrt(omega_m) * elapsed_time_si;
+    return std::pow(a32, 2.0 / 3.0);
+  }
+  if (omega_l > 0.0) {
+    const double exponent = hubble0 * std::sqrt(omega_l) * elapsed_time_si;
+    if (!std::isfinite(exponent) || exponent > 700.0) {
+      throw std::overflow_error("FLRW code-time endpoint exceeds representable scale factor");
+    }
+    return scale_factor_begin * std::exp(exponent);
+  }
+  throw std::invalid_argument("flat LambdaCDM endpoint resolution requires matter and/or Lambda");
+}
 
 [[nodiscard]] const std::map<std::string, std::string>& deprecatedAliasRegistry();
 
@@ -917,19 +959,26 @@ parseInitialConditionMissingFieldPolicy(
   if (!std::isfinite(a) || a <= 0.0) {
     throw ConfigError("key '" + key + "': scale factor must be finite and > 0");
   }
-  return (1.0 / a) - 1.0;
+  const double z = (1.0 / a) - 1.0;
+  // For very large but finite a, IEEE-754 subtraction can round the physical
+  // redshift to exactly -1. Preserve the closest representable value in the
+  // valid z > -1 domain; a remains the authoritative finite endpoint.
+  return z > -1.0 ? z : std::nextafter(-1.0, 0.0);
 }
 
 void validateScaleRedshiftPair(double a, double z, const std::string& a_key, const std::string& z_key) {
-  const double expected_a = redshiftToScaleFactor(z, z_key);
   if (!std::isfinite(a) || a <= 0.0) {
     throw ConfigError("key '" + a_key + "': scale factor must be finite and > 0");
   }
+  if (!std::isfinite(z) || z <= -1.0) {
+    throw ConfigError("key '" + z_key + "': redshift must be finite and > -1");
+  }
+  const double expected_z = scaleFactorToRedshift(a, a_key);
   const double tolerance = 16.0 * std::numeric_limits<double>::epsilon() *
-      std::max({1.0, std::abs(a), std::abs(expected_a)});
-  if (std::abs(expected_a - a) > tolerance) {
+      std::max({1.0, std::abs(z), std::abs(expected_z)});
+  if (std::abs(expected_z - z) > tolerance) {
     throw ConfigError("keys '" + a_key + "' and '" + z_key +
-                      "' are inconsistent: expected " + a_key + " = 1/(1+" + z_key + ")");
+                      "' are inconsistent: expected " + z_key + " = 1/" + a_key + " - 1");
   }
 }
 
@@ -2146,12 +2195,12 @@ void validateConfig(const SimulationConfig& config) {
   stream << "box_size_y = " << frozen.config.cosmology.box_size_y_mpc_comoving << " mpc\n";
   stream << "box_size_z = " << frozen.config.cosmology.box_size_z_mpc_comoving << " mpc\n";
   stream << "\n[numerics]\n";
-  stream << "a_begin = " << frozen.config.numerics.a_begin << '\n';
-  stream << "a_end = " << frozen.config.numerics.a_end << '\n';
-  stream << "z_begin = " << frozen.config.numerics.z_begin << '\n';
-  stream << "z_end = " << frozen.config.numerics.z_end << '\n';
-  stream << "t_code_begin = " << frozen.config.numerics.t_code_begin << '\n';
-  stream << "t_code_end = " << frozen.config.numerics.t_code_end << '\n';
+  stream << "a_begin = " << bridge_number(frozen.config.numerics.a_begin) << '\n';
+  stream << "a_end = " << bridge_number(frozen.config.numerics.a_end) << '\n';
+  stream << "z_begin = " << bridge_number(frozen.config.numerics.z_begin) << '\n';
+  stream << "z_end = " << bridge_number(frozen.config.numerics.z_end) << '\n';
+  stream << "t_code_begin = " << bridge_number(frozen.config.numerics.t_code_begin) << '\n';
+  stream << "t_code_end = " << bridge_number(frozen.config.numerics.t_code_end) << '\n';
   stream << "t_phys_begin = " << frozen.config.numerics.t_phys_begin << '\n';
   stream << "t_phys_end = " << frozen.config.numerics.t_phys_end << '\n';
   stream << "integrator_time_variable = "
@@ -3405,6 +3454,121 @@ void validateConfig(const SimulationConfig& config) {
       "compatibility.allow_unknown_keys");
   frozen.config.compatibility.allow_unknown_keys = options.allow_unknown_keys || compatible_by_file;
 
+  // Resolve one authoritative integration endpoint before validation/provenance.
+  // Cosmological configurations retain the declared scale-factor default.  An
+  // otherwise-unqualified code-time endpoint selects code-time authority,
+  // while non-cosmological modes use code time unless explicitly rejected
+  // below.  Supplying competing endpoint families without selecting an
+  // authority is ambiguous and therefore fails closed.
+  const ModePolicy resolved_mode_policy = buildModePolicy(frozen.config.mode);
+  if (!entries.contains("numerics.integrator_time_variable")) {
+    if (!resolved_mode_policy.cosmological_comoving_frame) {
+      frozen.config.numerics.integrator_time_variable =
+          IntegratorTimeVariable::kCodeTime;
+    } else {
+      const bool supplied_scale_endpoint =
+          entries.contains("numerics.a_end") || entries.contains("numerics.z_end");
+      const bool supplied_code_endpoint = entries.contains("numerics.t_code_end");
+      if (supplied_scale_endpoint && supplied_code_endpoint) {
+        throw ConfigError(
+            "cosmological config supplies both scale-factor/redshift and code-time endpoints without selecting numerics.integrator_time_variable");
+      }
+      if (supplied_scale_endpoint) {
+        frozen.config.numerics.integrator_time_variable =
+            IntegratorTimeVariable::kScaleFactor;
+      } else {
+        // With no explicit endpoint family, preserve the historical default
+        // finite code-time span rather than inventing a zero-length a=1 step.
+        frozen.config.numerics.integrator_time_variable =
+            IntegratorTimeVariable::kCodeTime;
+      }
+    }
+  }
+  const auto variable = frozen.config.numerics.integrator_time_variable;
+  if (variable == IntegratorTimeVariable::kPhysicalTime) {
+    throw ConfigError(
+        "numerics.integrator_time_variable=physical_time is not yet supported; use scale_factor, ln_a, or code_time");
+  }
+  if (!resolved_mode_policy.cosmological_comoving_frame &&
+      variable != IntegratorTimeVariable::kCodeTime) {
+    throw ConfigError(
+        "non-cosmological modes currently support only numerics.integrator_time_variable=code_time");
+  }
+  if (resolved_mode_policy.cosmological_comoving_frame) {
+    CosmologyBackgroundConfig background_config;
+    background_config.hubble_param = frozen.config.cosmology.hubble_param;
+    background_config.omega_matter = frozen.config.cosmology.omega_matter;
+    background_config.omega_lambda = frozen.config.cosmology.omega_lambda;
+    const LambdaCdmBackground background = [&]() {
+      try {
+        return LambdaCdmBackground(background_config);
+      } catch (const std::exception& error) {
+        throw ConfigError(
+            "invalid cosmological background while resolving integration authority in " +
+            source_name + ": " + error.what());
+      }
+    }();
+    const UnitSystem units = makeUnitSystem(
+        frozen.config.units.length_unit, frozen.config.units.mass_unit,
+        frozen.config.units.velocity_unit);
+
+    if (variable == IntegratorTimeVariable::kScaleFactor ||
+        variable == IntegratorTimeVariable::kLogScaleFactor) {
+      const double elapsed_code = background.cosmicTimeIntervalSi(
+          frozen.config.numerics.a_begin, frozen.config.numerics.a_end) /
+          units.timeSiPerCode();
+      if (!std::isfinite(elapsed_code) || elapsed_code <= 0.0) {
+        throw ConfigError(
+            "resolved FLRW scale-factor interval is not finite and positive in " + source_name + ": a_begin=" +
+            std::to_string(frozen.config.numerics.a_begin) + ", a_end=" +
+            std::to_string(frozen.config.numerics.a_end) + ", elapsed_code=" +
+            std::to_string(elapsed_code));
+      }
+      const double resolved_end = frozen.config.numerics.t_code_begin + elapsed_code;
+      if (entries.contains("numerics.t_code_end")) {
+        const double supplied = frozen.config.numerics.t_code_end;
+        const double scale = std::max({1.0, std::abs(supplied), std::abs(resolved_end)});
+        if (std::abs(supplied - resolved_end) > 1.0e-10 * scale) {
+          throw ConfigError(
+              "numerics.t_code_end contradicts the FLRW endpoint implied by authoritative a_begin/a_end");
+        }
+      }
+      frozen.config.numerics.t_code_end = resolved_end;
+    } else if (variable == IntegratorTimeVariable::kCodeTime) {
+      const double elapsed_code =
+          frozen.config.numerics.t_code_end - frozen.config.numerics.t_code_begin;
+      if (!std::isfinite(elapsed_code) || elapsed_code <= 0.0) {
+        throw ConfigError(
+            "code-time authority requires a finite positive t_code_end - t_code_begin interval");
+      }
+      double resolved_a_end = 0.0;
+      try {
+        resolved_a_end = resolveFlatLambdaCdmScaleFactorAfterTime(
+            background, frozen.config.numerics.a_begin,
+            elapsed_code * units.timeSiPerCode());
+      } catch (const std::exception& error) {
+        throw ConfigError(
+            "failed to resolve code-time FLRW endpoint in " + source_name +
+            ": " + error.what());
+      }
+      if (!std::isfinite(resolved_a_end) ||
+          resolved_a_end < frozen.config.numerics.a_begin) {
+        throw ConfigError(
+            "code-time authority produced an invalid FLRW final scale factor");
+      }
+      if (entries.contains("numerics.a_end") || entries.contains("numerics.z_end")) {
+        const double supplied = frozen.config.numerics.a_end;
+        const double scale = std::max({1.0, std::abs(supplied), std::abs(resolved_a_end)});
+        if (std::abs(supplied - resolved_a_end) > 1.0e-10 * scale) {
+          throw ConfigError(
+              "numerics.a_end/z_end contradicts the FLRW endpoint implied by authoritative code time");
+        }
+      }
+      frozen.config.numerics.a_end = resolved_a_end;
+      frozen.config.numerics.z_end =
+          scaleFactorToRedshift(resolved_a_end, "numerics.a_end");
+    }
+  }
 
 
   for (const auto& [key, entry] : entries) {

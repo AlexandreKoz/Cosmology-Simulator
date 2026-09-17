@@ -455,13 +455,31 @@ bool maybeWriteOutputs(
     const std::filesystem::path shared_run_directory =
         report.shared_run_directory.empty() ? report.run_directory : report.shared_run_directory;
     const std::filesystem::path snapshot_directory =
-        shared_run_directory / ("snapdir_" + formatThreeDigitIndex(integrator_state.step_index));
-    report.snapshot_set_path = snapshot_directory;
+        shared_run_directory / "snapshots";
     report.snapshot_path = snapshot_directory / snapshotMemberFilename(
         config.output.output_stem, integrator_state.step_index,
         topology.world_size, topology.world_rank);
+    report.snapshot_set_path = snapshot_directory /
+        (config.output.output_stem + "_" +
+         formatThreeDigitIndex(integrator_state.step_index) + ".complete");
     const std::string generation_id =
         snapshotGenerationId(frozen_config, integrator_state.step_index);
+
+    // A published completion marker is the commit record for a logical
+    // snapshot set.  Never replace a committed index in-place: otherwise an
+    // old marker could temporarily certify a mixed/partially replaced set.
+    std::exception_ptr snapshot_replacement_failure;
+    try {
+      if (std::filesystem::exists(report.snapshot_set_path)) {
+        throw std::runtime_error(
+            "refusing to overwrite a committed snapshot set: " +
+            report.snapshot_set_path.string());
+      }
+    } catch (...) {
+      snapshot_replacement_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        snapshot_replacement_failure, "science snapshot replacement preflight");
 
     core::ProvenanceRecord snapshot_provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
@@ -542,11 +560,11 @@ bool maybeWriteOutputs(
     if (services.mpi_context.isRoot()) {
       try {
         io::writeSnapshotSetCompletionMarker(
-            snapshot_directory, generation_id,
+            report.snapshot_path, generation_id,
             core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot completion member count"),
             global_counts, false);
         const io::SnapshotValidationReport validation =
-            io::validateSnapshotSetHdf5(snapshot_directory);
+            io::validateSnapshotSetHdf5(report.snapshot_set_path);
         validation.requireValid();
         if (validation.inspection.global_part_count != global_counts ||
             validation.inspection.num_files_per_snapshot !=

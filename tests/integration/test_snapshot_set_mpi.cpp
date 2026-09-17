@@ -92,15 +92,16 @@ int main(int argc, char** argv) {
   if (rank == 0) {
     try {
       cosmosim::io::writeSnapshotSetCompletionMarker(
-          directory, generation, static_cast<std::uint32_t>(size), global_counts, false);
-      const auto inspection = cosmosim::io::inspectSnapshotSet(directory);
+          member, generation, static_cast<std::uint32_t>(size), global_counts, false);
+      const std::filesystem::path completion = directory / "snap_007.complete";
+      const auto inspection = cosmosim::io::inspectSnapshotSet(completion);
       assert(inspection.complete);
       assert(inspection.num_files_per_snapshot == static_cast<std::uint32_t>(size));
       assert(inspection.global_part_count == global_counts);
       assert(inspection.member_paths.size() == static_cast<std::size_t>(size));
-      cosmosim::io::validateSnapshotSetHdf5(directory).requireValid();
+      cosmosim::io::validateSnapshotSetHdf5(completion).requireValid();
 
-      const auto merged = cosmosim::io::readCosmoSimScienceSnapshotHdf5(directory, config);
+      const auto merged = cosmosim::io::readCosmoSimScienceSnapshotHdf5(completion, config);
       assert(merged.state.particles.size() == static_cast<std::size_t>(2 * size));
       assert(merged.state.validatePersistentParticleIds());
 
@@ -108,7 +109,7 @@ int main(int argc, char** argv) {
       std::filesystem::remove(directory / "snap_007.1.hdf5");
       bool rejected = false;
       try {
-        static_cast<void>(cosmosim::io::inspectSnapshotSet(directory));
+        static_cast<void>(cosmosim::io::inspectSnapshotSet(completion));
       } catch (const std::exception&) {
         rejected = true;
       }

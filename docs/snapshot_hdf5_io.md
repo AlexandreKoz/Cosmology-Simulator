@@ -70,21 +70,37 @@ The current scalable topology writes one member per MPI rank without gathering g
 to rank zero:
 
 ```text
-<shared_run>/snapdir_042/
-  <stem>_042.0.hdf5
-  <stem>_042.1.hdf5
+<shared_run>/snapshots/
+  snap_042.0.hdf5
+  snap_042.1.hdf5
   ...
-  <generation_id>.complete
+  snap_042.complete
+  snap_043.0.hdf5
+  ...
+  snap_043.complete
 ```
 
+Serial output uses `snap_042.hdf5` plus `snap_042.complete`. New writes never
+create one `snapdir_###/` directory per snapshot. The physical HDF5 science
+schema remains `chui_science_snapshot_v6`; this filesystem-layout change does
+not rename `/Header`, `/PartTypeN`, or canonical datasets.
+
 Each member has its own `NumPart_ThisFile`, the same global totals and
-`NumFilesPerSnapshot`, and common schema/epoch/generation metadata. After all members have
-been transactionally published and collectively accepted, root writes a bounded completion
-marker binding generation ID, member count, and global counts. CHUÍ multifile reads reject
-sets whose marker is absent or disagrees with the HDF5 members.
+`NumFilesPerSnapshot`, and common schema/epoch/generation metadata. After every
+member has been transactionally published, collectively accepted, and validated,
+root publishes the stem-scoped `.complete` marker last. Discovery from a member
+or completion marker considers only that logical stem, so snapshots sharing the
+flat directory cannot be mixed. The marker binds generation identity, member
+count, global counts, filenames/member indices, and existing integrity evidence;
+missing members, mixed generations, duplicate indices, stale/misnamed markers,
+or total-count disagreement fail closed. Same-index replacement of a committed
+set is refused rather than temporarily allowing an old marker to certify a new
+partial generation.
 
 `inspectSnapshotSet` performs shallow discovery/consistency checks without materializing the
-full payload. Standard external multifile sets may be imported when the explicit dialect and
+full payload. Legacy CHUÍ `snapdir_###/<generation>.complete` sets remain an
+explicit read-compatible path; all new production writes use `snapshots/`.
+Standard external multifile sets may be imported when the explicit dialect and
 species mapping are sufficient.
 
 ## Scientific fields

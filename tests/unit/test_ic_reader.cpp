@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/simulation_mode.hpp"
 #include "cosmosim/io/ic_reader.hpp"
 #include "io/internal/snapshot_conversion.hpp"
 #include "io/internal/ic_canonical_limits.hpp"
@@ -307,6 +308,40 @@ void writeHeaderAttributeU32x6(hid_t header_group, const char* name, const std::
   assert(H5Awrite(attr.get(), H5T_NATIVE_UINT32, values.data()) >= 0);
 }
 
+void writeHeaderAttributeU64x6(
+    hid_t header_group, const char* name,
+    const std::array<std::uint64_t, 6>& values) {
+  hsize_t dims[1] = {6};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle attr(H5Acreate2(
+      header_group, name, H5T_STD_U64LE, space.get(), H5P_DEFAULT,
+      H5P_DEFAULT));
+  assert(attr.get() >= 0);
+  assert(H5Awrite(attr.get(), H5T_NATIVE_UINT64, values.data()) >= 0);
+}
+
+void writeHeaderAttributeF64ExtentOne(
+    hid_t header_group, const char* name, double value) {
+  hsize_t dims[1] = {1};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle attr(H5Acreate2(
+      header_group, name, H5T_IEEE_F64LE, space.get(), H5P_DEFAULT,
+      H5P_DEFAULT));
+  assert(attr.get() >= 0);
+  assert(H5Awrite(attr.get(), H5T_NATIVE_DOUBLE, &value) >= 0);
+}
+
+void writeHeaderAttributeI32ExtentOne(
+    hid_t header_group, const char* name, std::int32_t value) {
+  hsize_t dims[1] = {1};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle attr(H5Acreate2(
+      header_group, name, H5T_STD_I32LE, space.get(), H5P_DEFAULT,
+      H5P_DEFAULT));
+  assert(attr.get() >= 0);
+  assert(H5Awrite(attr.get(), H5T_NATIVE_INT32, &value) >= 0);
+}
+
 void writeHeaderAttributeI32x6(
     hid_t header_group, const char* name,
     const std::array<std::int32_t, 6>& values) {
@@ -545,6 +580,41 @@ std::filesystem::path writeMinimalIcFile(
   return path;
 }
 
+
+std::filesystem::path writeMonofonicLikeDmIcFile() {
+  const auto path = uniqueHdf5Path("cosmosim_ic_monofonic_like_dmo");
+  Hdf5Handle file(H5Fcreate(
+      path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
+  Hdf5Handle header(H5Gcreate2(
+      file.get(), "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+
+  writeHeaderAttributeI32x6(
+      header.get(), "NumPart_ThisFile", {0, 2, 0, 0, 0, 0});
+  writeHeaderAttributeU64x6(
+      header.get(), "NumPart_Total", {0U, 2U, 0U, 0U, 0U, 0U});
+  writeHeaderAttributeU32x6(
+      header.get(), "NumPart_Total_HighWord", {0, 0, 0, 0, 0, 0});
+  writeHeaderAttributeF64x6(
+      header.get(), "MassTable", {0.0, 5.0, 0.0, 0.0, 0.0, 0.0});
+  writeHeaderAttributeF64ExtentOne(header.get(), "Time", 0.04);
+  writeHeaderAttributeF64ExtentOne(header.get(), "Redshift", 24.0);
+  writeHeaderAttributeF64ExtentOne(header.get(), "BoxSize", 10.0);
+  writeHeaderAttributeF64ExtentOne(header.get(), "Omega0", 0.315);
+  writeHeaderAttributeF64ExtentOne(header.get(), "OmegaLambda", 0.685);
+  writeHeaderAttributeF64ExtentOne(header.get(), "HubbleParam", 0.674);
+  writeHeaderAttributeI32ExtentOne(header.get(), "NumFilesPerSnapshot", 1);
+
+  Hdf5Handle dm(H5Gcreate2(
+      file.get(), "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  writeDataset2dVec3(
+      dm.get(), "Coordinates",
+      {-0.01, 1.0, 2.0, 10.0, 3.0, 4.0});
+  writeDataset2dVec3(
+      dm.get(), "Velocities",
+      {100.0, 0.0, 0.0, 200.0, 0.0, 0.0});
+  writeDataset1dIds(dm.get(), "ParticleIDs", {0U, 1U});
+  return path;
+}
 
 std::filesystem::path writeDimensionalGasBlackHoleIcFile() {
   const auto path = uniqueHdf5Path("cosmosim_ic_dimensional_contract");
@@ -794,6 +864,46 @@ void expectIcReadFailure(
     const std::filesystem::path& path,
     const cosmosim::core::SimulationConfig& config,
     std::string_view expected_text);
+
+void testMonofonicLikeStructuralCompatibility() {
+  auto config = makeExplicitBridgeConfig();
+  config.mode.mode = cosmosim::core::SimulationMode::kCosmoCube;
+  config.cosmology.box_size_mpc_comoving = 10.0;
+  config.cosmology.box_size_x_mpc_comoving = 10.0;
+  config.cosmology.box_size_y_mpc_comoving = 10.0;
+  config.cosmology.box_size_z_mpc_comoving = 10.0;
+  config.cosmology.omega_matter = 0.315;
+  config.cosmology.omega_lambda = 0.685;
+  config.cosmology.hubble_param = 0.674;
+  config.numerics.a_begin = 0.04;
+  config.numerics.z_begin = 24.0;
+  config.mode.ic_bridge_source_length_unit_to_si = 3.0856775814913673e22;
+
+  const auto path = writeMonofonicLikeDmIcFile();
+  const auto result = cosmosim::io::readGadgetArepoHdf5Ic(path, config);
+  assert(result.state.particles.size() == 2U);
+  assert(result.state.particle_sidecar.particle_id[0] == 1U);
+  assert(result.state.particle_sidecar.particle_id[1] == 2U);
+  assert(result.state.validatePersistentParticleIds());
+  assert(std::abs(result.state.particles.position_x_comoving[0] - 9.99) < 1.0e-12);
+  assert(std::abs(result.state.particles.position_x_comoving[1]) < 1.0e-12);
+  assert(std::abs(result.state.particles.velocity_x_peculiar[0] - 100.0) < 1.0e-12);
+  assert(std::abs(result.state.particles.mass_code[0] - 5.0) < 1.0e-12);
+  assert(std::abs(result.state.particles.mass_code[1] - 5.0) < 1.0e-12);
+  assert(result.report.counters.periodic_coordinate_components_wrapped == 2U);
+  assert(result.report.manifest.has_value());
+  const auto& warnings = result.report.manifest->warnings;
+  const auto has_warning = [&](std::string_view needle) {
+    return std::any_of(
+        warnings.begin(), warnings.end(), [&](const std::string& warning) {
+          return warning.find(needle) != std::string::npos;
+        });
+  };
+  assert(has_warning("rank1_extent1_logical_scalars"));
+  assert(has_warning("uint64_NumPart_Total"));
+  assert(has_warning("zero_based_contiguous_plus_one"));
+  std::filesystem::remove(path);
+}
 
 void testCanonicalHeaderContract() {
   auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
@@ -1721,7 +1831,25 @@ void testHdf5MalformedSchemaSafety() {
     const double value = 1.0;
     assert(H5Awrite(attribute.get(), H5T_NATIVE_DOUBLE, &value) >= 0);
   }
-  expectIcReadFailure(path, config, "expected []");
+  {
+    const auto result = cosmosim::io::readGadgetArepoHdf5Ic(path, config);
+    assert(result.state.particles.size() == 2U);
+    std::filesystem::remove(path);
+  }
+
+  path = writeMinimalIcFile(true);
+  {
+    Hdf5Handle file(H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+    Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+    assert(H5Adelete(header.get(), "Time") >= 0);
+    hsize_t dims[1]{2U};
+    Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+    Hdf5Handle attribute(H5Acreate2(
+        header.get(), "Time", H5T_IEEE_F64LE, space.get(), H5P_DEFAULT, H5P_DEFAULT));
+    const double values[2]{1.0, 1.0};
+    assert(H5Awrite(attribute.get(), H5T_NATIVE_DOUBLE, values) >= 0);
+  }
+  expectIcReadFailure(path, config, "logical scalar");
 
   path = writeMinimalIcFile(true);
   replaceDatasetWithFloatingIds(path, false);
@@ -1788,6 +1916,7 @@ int main() {
   testGeneratedConverterDefaultAudit();
   testHdf5GateBehavior();
 #if COSMOSIM_ENABLE_HDF5
+  testMonofonicLikeStructuralCompatibility();
   testCanonicalHeaderContract();
   testHdf5StarSidecarAndMultifileSchema();
   testHdf5GasThermoMapping();

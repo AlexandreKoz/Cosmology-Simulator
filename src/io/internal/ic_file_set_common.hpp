@@ -30,6 +30,7 @@ struct Inspection {
   IcManifest manifest;
   std::vector<IcSchemaSummary> schemas;
   IcImportCounters counters;
+  bool normalize_zero_based_contiguous_ids = false;
 };
 
 struct SourceFileInspection {
@@ -107,7 +108,8 @@ void validateCrossFileSchema(const IcManifest& manifest);
 void validateRecordScientificState(
     ParticleRecord& record,
     IcSpeciesPolicy policy,
-    double box_size);
+    double box_size,
+    bool periodic_geometry);
 void appendRecords(
     core::SimulationState& state,
     const std::vector<ParticleRecord>& records,

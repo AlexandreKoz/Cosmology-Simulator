@@ -5,6 +5,8 @@
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/cosmology.hpp"
+#include "cosmosim/core/units.hpp"
 #include "cosmosim/core/provenance.hpp"
 
 namespace {
@@ -1150,14 +1152,14 @@ void testCosmologyScaleFactorRedshiftCanonicalizationAndValidation() {
 
 void testIntegratorTimeVariableIsTypedAndCanonical() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
-      "[mode]\nmode = zoom_in\n[numerics]\nintegrator_time_variable = ln_a\n",
+      "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.5\na_end = 0.51\nintegrator_time_variable = ln_a\n",
       "typed_integrator");
   assert(frozen.config.numerics.integrator_time_variable ==
       cosmosim::core::IntegratorTimeVariable::kLogScaleFactor);
   assert(frozen.normalized_text.find("integrator_time_variable = ln_a") != std::string::npos);
 
   const auto alias = cosmosim::core::loadFrozenConfigFromString(
-      "[mode]\nmode = zoom_in\n[numerics]\nintegrator_time_variable = a\n",
+      "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.5\na_end = 0.51\nintegrator_time_variable = a\n",
       "typed_integrator_alias");
   assert(alias.config.numerics.integrator_time_variable ==
       cosmosim::core::IntegratorTimeVariable::kScaleFactor);
@@ -1172,6 +1174,57 @@ void testIntegratorTimeVariableIsTypedAndCanonical() {
     threw = true;
   }
   assert(threw);
+}
+
+void testIntegratorEndpointAuthorityResolution() {
+  const auto scale_factor = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.04\na_end = 0.041\n"
+      "integrator_time_variable = scale_factor\n",
+      "scale_factor_authority");
+  cosmosim::core::CosmologyBackgroundConfig background_config;
+  background_config.hubble_param = scale_factor.config.cosmology.hubble_param;
+  background_config.omega_matter = scale_factor.config.cosmology.omega_matter;
+  background_config.omega_lambda = scale_factor.config.cosmology.omega_lambda;
+  const cosmosim::core::LambdaCdmBackground background(background_config);
+  const auto units = cosmosim::core::makeUnitSystem(
+      scale_factor.config.units.length_unit, scale_factor.config.units.mass_unit,
+      scale_factor.config.units.velocity_unit);
+  const double expected_t_end = scale_factor.config.numerics.t_code_begin +
+      background.cosmicTimeIntervalSi(0.04, 0.041) / units.timeSiPerCode();
+  assert(std::abs(scale_factor.config.numerics.t_code_end - expected_t_end) <=
+         1.0e-12 * std::max(1.0, std::abs(expected_t_end)));
+  assert(scale_factor.normalized_text.find("integrator_time_variable = scale_factor") !=
+         std::string::npos);
+
+  bool contradiction_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.04\na_end = 0.041\n"
+        "t_code_begin = 0\nt_code_end = 1\nintegrator_time_variable = scale_factor\n",
+        "scale_factor_contradiction");
+  } catch (const cosmosim::core::ConfigError&) {
+    contradiction_rejected = true;
+  }
+  assert(contradiction_rejected);
+
+  const auto code_time = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.04\n"
+      "t_code_begin = 0\nt_code_end = 0.001\nintegrator_time_variable = code_time\n",
+      "code_time_authority");
+  assert(code_time.config.numerics.a_end > code_time.config.numerics.a_begin);
+  assert(std::abs(
+      code_time.config.numerics.z_end -
+      (1.0 / code_time.config.numerics.a_end - 1.0)) < 1.0e-12);
+
+  bool physical_time_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[numerics]\nintegrator_time_variable = physical_time\n",
+        "physical_time_unsupported");
+  } catch (const cosmosim::core::ConfigError&) {
+    physical_time_rejected = true;
+  }
+  assert(physical_time_rejected);
 }
 
 void testAdversarialPhysicsAndCosmologyDependenciesFail() {
@@ -1448,6 +1501,7 @@ int main() {
   testCosmologyScaleFactorRedshiftCanonicalizationAndValidation();
   testFlatCosmologyClosureContract();
   testIntegratorTimeVariableIsTypedAndCanonical();
+  testIntegratorEndpointAuthorityResolution();
   testAdversarialPhysicsAndCosmologyDependenciesFail();
   testFiniteNumericAndForwardCosmologyContract();
   testDerivedRuntimeSerializationUsesCanonicalNames();
