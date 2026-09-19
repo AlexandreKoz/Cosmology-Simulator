@@ -2060,16 +2060,42 @@ void validateConfig(const SimulationConfig& config) {
 }
 
 
+[[nodiscard]] std::string roundTripDoubleToString(double value) {
+  char buffer[64]{};
+  const auto result = std::to_chars(
+      std::begin(buffer), std::end(buffer), value, std::chars_format::general);
+  if (result.ec != std::errc{}) {
+    throw ConfigError("failed to serialize normalized floating-point value");
+  }
+  return std::string(buffer, result.ptr);
+}
+
+class NormalizedConfigStream {
+ public:
+  NormalizedConfigStream& operator<<(double value) {
+    m_stream << roundTripDoubleToString(value);
+    return *this;
+  }
+
+  template <typename T>
+  NormalizedConfigStream& operator<<(const T& value) {
+    m_stream << value;
+    return *this;
+  }
+
+  [[nodiscard]] std::string str() const { return m_stream.str(); }
+
+ private:
+  std::ostringstream m_stream;
+};
+
 [[nodiscard]] std::string buildNormalizedText(const FrozenConfig& frozen) {
-  std::ostringstream stream;
+  NormalizedConfigStream stream;
   const auto bridge_number = [](double value) {
     if (!std::isfinite(value)) {
       return std::string("unspecified");
     }
-    std::ostringstream out;
-    out << std::setprecision(std::numeric_limits<double>::max_digits10)
-        << value;
-    return out.str();
+    return roundTripDoubleToString(value);
   };
   stream << "schema_version = " << frozen.config.schema_version << '\n';
   stream << "\n[units]\n";

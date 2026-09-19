@@ -1,6 +1,6 @@
 # Current repository status
 
-**Authority date:** 2026-09-09
+**Authority date:** 2026-09-18
 **Status scope:** this source snapshot; historical campaign reports are not current truth
 
 This file is the concise current-status entry point. Build-specific dependency
@@ -44,6 +44,35 @@ and new science snapshots use one `snapshots/` directory with stem-scoped
 transactional completion markers. The native HDF5 science schema remains v6.
 Focused CPU and HDF5 tests pass in this repair environment. MPI and FFTW-backed
 production runtime acceptance remain dependency-blocked and are not promoted.
+
+## Post-first-light reproducibility closure — 2026-09-18
+
+The post-first-light cleanup closes three source-level reproducibility and I/O
+defects without changing the accepted first-light numerical method. FL-016 now
+propagates the authoritative `ModePolicy` periodic/open gravity geometry into
+the distributed IC routing/validation contract instead of relying on an
+obsolete validator call. FL-017 serializes finite normalized-configuration
+doubles with a shortest round-trip-safe representation and repairs the shipped
+32^3 first-light bridge/box constants; regression coverage reparses normalized
+text, reproduces the frozen config hash, and re-runs IC-manifest validation.
+FL-018 probes optional HDF5 attributes with `H5Aexists` before opening them, so
+a legitimately absent `NumPart_Total_HighWord` is silent while a present
+malformed attribute still fails closed. The root README is refreshed around
+the demonstrated DMO first-light milestone and its scientific maturity boundary.
+
+Focused CPU configuration-normalization and HDF5 IC-ingestion tests pass in
+this repair environment, and the repository hygiene check passes after generated
+build artifacts are removed. The dedicated config-driven DMO first-light smoke
+executable also builds, but its execution exceeded the local command window and
+is not reported as a pass. The external 32^3 monofonIC file is not part of this
+source tree, so the real first-light run was not repeated here. The
+HDF5+FFTW preset is **BLOCKED** by a missing FFTW3 development library, and MPI
+runtime acceptance is **BLOCKED** because CMake cannot find the MPI C++
+toolchain (`mpi-cxx` / `MPI_CXX`); no rank-equivalence result is promoted. The
+previously demonstrated operational DMO first light therefore remains
+established, while scientific production acceptance, dependency-complete MPI
+rank equivalence, long-interval growth validation, power-spectrum validation,
+and 512^3 qualification remain separate gates.
 
 ## Configuration policy
 

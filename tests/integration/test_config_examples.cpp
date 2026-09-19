@@ -53,6 +53,25 @@ int main() {
   const std::filesystem::path source_dir = COSMOSIM_SOURCE_DIR;
   checkEveryStarFormingProfileSelectsModel(source_dir / "configs");
   checkExample(source_dir / "configs/cosmo_cube.param.txt", cosmosim::core::SimulationMode::kCosmoCube);
+  checkExample(
+      source_dir / "configs/chui_firstlight_32_smoke.param.txt",
+      cosmosim::core::SimulationMode::kCosmoCube);
+  const auto firstlight = cosmosim::core::loadFrozenConfigFromFile(
+      source_dir / "configs/chui_firstlight_32_smoke.param.txt");
+  const auto firstlight_reparsed = cosmosim::core::loadFrozenConfigFromString(
+      firstlight.normalized_text, "chui_firstlight_32_smoke_normalized");
+  assert(firstlight_reparsed.normalized_text == firstlight.normalized_text);
+  assert(firstlight_reparsed.provenance.config_hash_hex ==
+         firstlight.provenance.config_hash_hex);
+  assert(firstlight.config.mode.ic_bridge_source_length_unit_to_si ==
+         3.0856775814913673e22);
+  assert(firstlight.config.cosmology.box_size_x_mpc_comoving ==
+         14.761890702961235);
+  assert(firstlight.config.cosmology.box_size_x_mpc_comoving *
+             firstlight.config.cosmology.hubble_param ==
+         10.0);
+  assert(firstlight.config.numerics.a_begin == 0.04);
+  assert(firstlight.config.numerics.a_end == 0.041);
   checkExample(source_dir / "configs/zoom_in.param.txt", cosmosim::core::SimulationMode::kZoomIn);
   assert(cosmosim::core::loadFrozenConfigFromFile(source_dir / "configs/zoom_in.param.txt").config.physics.star_formation_model == cosmosim::core::StarFormationModelKind::kAdaptiveBoundJeans);
   assert(cosmosim::core::loadFrozenConfigFromFile(source_dir / "configs/cosmo_cube.param.txt").config.physics.star_formation_model == cosmosim::core::StarFormationModelKind::kEffectiveMultiphaseTngLike);

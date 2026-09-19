@@ -14,6 +14,7 @@
 #include "cosmosim/io/ic_reader.hpp"
 #include "io/internal/snapshot_conversion.hpp"
 #include "io/internal/ic_canonical_limits.hpp"
+#include "io/internal/ic_file_set_common.hpp"
 #include "io/internal/ic_reader_session.hpp"
 
 #include "../support/test_temp_workspace.hpp"
@@ -24,10 +25,49 @@
 
 namespace {
 
+#if COSMOSIM_ENABLE_HDF5
+herr_t countHdf5ErrorStack(hid_t, void* client_data) {
+  auto* error_count = static_cast<int*>(client_data);
+  ++(*error_count);
+  return 0;
+}
+#endif
+
 [[nodiscard]] std::filesystem::path uniqueHdf5Path(std::string_view stem) {
   return cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalFile(
       stem, ".hdf5");
 }
+
+#if COSMOSIM_ENABLE_HDF5
+void testScientificStateGeometryPolicy() {
+  using cosmosim::io::IcSpeciesPolicy;
+  using cosmosim::io::file_set_internal::ParticleRecord;
+  using cosmosim::io::file_set_internal::validateRecordScientificState;
+
+  ParticleRecord periodic;
+  periodic.id = 1U;
+  periodic.mass = 1.0;
+  periodic.x = -0.25;
+  periodic.y = 10.25;
+  periodic.z = 20.5;
+  validateRecordScientificState(
+      periodic, IcSpeciesPolicy::kDarkMatter, 10.0, true);
+  assert(periodic.x == 9.75);
+  assert(periodic.y == 0.25);
+  assert(periodic.z == 0.5);
+
+  ParticleRecord open = periodic;
+  open.x = -0.25;
+  open.y = 10.25;
+  open.z = 20.5;
+  validateRecordScientificState(
+      open, IcSpeciesPolicy::kDarkMatter, 10.0, false);
+  assert(open.x == -0.25);
+  assert(open.y == 10.25);
+  assert(open.z == 20.5);
+}
+
+#endif
 
 void testCanonicalSingleFileCountLimit() {
   std::array<std::uint64_t, 6> counts{};
@@ -902,6 +942,102 @@ void testMonofonicLikeStructuralCompatibility() {
   assert(has_warning("rank1_extent1_logical_scalars"));
   assert(has_warning("uint64_NumPart_Total"));
   assert(has_warning("zero_based_contiguous_plus_one"));
+  std::filesystem::remove(path);
+}
+
+void testNormalizedConfigIsReusableForIcValidation() {
+  const auto path = writeMonofonicLikeDmIcFile();
+  const std::string config_text =
+      "[units]\n"
+      "length_unit = mpc\n"
+      "mass_unit = msun\n"
+      "velocity_unit = km_s\n"
+      "coordinate_frame = comoving\n"
+      "[mode]\n"
+      "mode = cosmo_cube\n"
+      "ic_file = " + path.string() + "\n"
+      "ic_convention = gadget_arepo_bridge_v1\n"
+      "ic_bridge_source_length_unit_to_si = 3.0856775814913673e22\n"
+      "ic_bridge_source_mass_unit_to_si = 1.98847e30\n"
+      "ic_bridge_source_velocity_unit_to_si = 1000\n"
+      "ic_bridge_coordinate_frame = comoving\n"
+      "ic_bridge_velocity_convention = gadget_arepo_stored_peculiar\n"
+      "ic_bridge_length_hubble_exponent = -1\n"
+      "ic_bridge_length_scale_factor_exponent = 0\n"
+      "ic_bridge_mass_hubble_exponent = 0\n"
+      "ic_bridge_mass_scale_factor_exponent = 0\n"
+      "ic_bridge_velocity_hubble_exponent = 0\n"
+      "ic_bridge_velocity_scale_factor_exponent = 0\n"
+      "[cosmology]\n"
+      "omega_matter = 0.315\n"
+      "omega_lambda = 0.685\n"
+      "hubble_param = 0.674\n"
+      "box_size_x = 14.836795252225519 mpc\n"
+      "box_size_y = 14.836795252225519 mpc\n"
+      "box_size_z = 14.836795252225519 mpc\n"
+      "[numerics]\n"
+      "a_begin = 0.04\n"
+      "a_end = 0.041\n"
+      "integrator_time_variable = scale_factor\n";
+
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      config_text, "normalized_ic_reuse_source");
+  const auto first = cosmosim::io::readGadgetArepoHdf5Ic(
+      path, frozen.config);
+  assert(first.state.particles.size() == 2U);
+
+  const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
+      frozen.normalized_text, "normalized_ic_reuse_roundtrip");
+  assert(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+  const auto second = cosmosim::io::readGadgetArepoHdf5Ic(
+      path, reparsed.config);
+  assert(second.state.particles.size() == first.state.particles.size());
+  assert(second.report.schema.box_size == first.report.schema.box_size);
+  assert(second.report.schema.scale_factor == first.report.schema.scale_factor);
+  std::filesystem::remove(path);
+}
+
+void testOptionalHighWordAttributeHandling() {
+  auto config = makeExplicitBridgeConfig();
+  config.cosmology.box_size_mpc_comoving = 10.0;
+  config.cosmology.box_size_x_mpc_comoving = 10.0;
+  config.cosmology.box_size_y_mpc_comoving = 10.0;
+  config.cosmology.box_size_z_mpc_comoving = 10.0;
+  config.cosmology.omega_matter = 0.315;
+  config.cosmology.omega_lambda = 0.685;
+  config.cosmology.hubble_param = 0.674;
+  config.numerics.a_begin = 0.04;
+  config.numerics.z_begin = 24.0;
+  config.mode.ic_bridge_source_length_unit_to_si = 3.0856775814913673e22;
+
+  const auto path = writeMonofonicLikeDmIcFile();
+  {
+    Hdf5Handle file(H5Fopen(
+        path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT));
+    Hdf5Handle header(H5Gopen2(file.get(), "/Header", H5P_DEFAULT));
+    assert(H5Adelete(header.get(), "NumPart_Total_HighWord") >= 0);
+  }
+
+  H5E_auto2_t previous_handler = nullptr;
+  void* previous_client_data = nullptr;
+  assert(H5Eget_auto2(
+             H5E_DEFAULT, &previous_handler, &previous_client_data) >= 0);
+  int hdf5_error_stack_count = 0;
+  assert(H5Eset_auto2(
+             H5E_DEFAULT, countHdf5ErrorStack,
+             &hdf5_error_stack_count) >= 0);
+  try {
+    const auto result = cosmosim::io::readGadgetArepoHdf5Ic(path, config);
+    assert(result.state.particles.size() == 2U);
+  } catch (...) {
+    (void)H5Eset_auto2(
+        H5E_DEFAULT, previous_handler, previous_client_data);
+    std::filesystem::remove(path);
+    throw;
+  }
+  assert(H5Eset_auto2(
+             H5E_DEFAULT, previous_handler, previous_client_data) >= 0);
+  assert(hdf5_error_stack_count == 0);
   std::filesystem::remove(path);
 }
 
@@ -1801,6 +1937,11 @@ void testHdf5MalformedSchemaSafety() {
   expectIcReadFailure(path, config, "expected [6]");
 
   path = writeMinimalIcFile(true);
+  replaceHeaderCountAttributeWithShape(
+      path, "NumPart_Total_HighWord", 5U);
+  expectIcReadFailure(path, config, "expected [6]");
+
+  path = writeMinimalIcFile(true);
   replaceThisFileWithSignedCounts(path, {-1, 0, 0, 0, 0, 0});
   expectIcReadFailure(path, config, "negative particle count");
 
@@ -1909,6 +2050,9 @@ void testHdf5MalformedSchemaSafety() {
 }  // namespace
 
 int main() {
+#if COSMOSIM_ENABLE_HDF5
+  testScientificStateGeometryPolicy();
+#endif
   testCanonicalSingleFileCountLimit();
   testManifestValidationAndConversions();
   testGadgetArepoVelocityConventionMatchesSnapshotPath();
@@ -1917,6 +2061,8 @@ int main() {
   testHdf5GateBehavior();
 #if COSMOSIM_ENABLE_HDF5
   testMonofonicLikeStructuralCompatibility();
+  testNormalizedConfigIsReusableForIcValidation();
+  testOptionalHighWordAttributeHandling();
   testCanonicalHeaderContract();
   testHdf5StarSidecarAndMultifileSchema();
   testHdf5GasThermoMapping();

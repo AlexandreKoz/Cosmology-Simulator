@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/simulation_mode.hpp"
 #include "io/internal/ic_byte_codec.hpp"
 #include "io/internal/ic_canonical_bundle.hpp"
 #include "io/internal/ic_conversion_catalog.hpp"
@@ -824,6 +825,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
     double box_size = 0.0;
     std::size_t chunk_particle_count = 0U;
     std::size_t batch_particle_count = 0U;
+    bool periodic_geometry = false;
   };
   const RoutingConfiguration routing =
       runCollectivePhase<RoutingConfiguration>(
@@ -831,6 +833,10 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
             RoutingConfiguration values;
             values.box_size = convertedBoxSizeCode(
                 inspection.manifest, config);
+            const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
+            values.periodic_geometry =
+                mode_policy.gravity_boundary ==
+                core::GravityBoundaryModel::kPeriodicPoisson;
             values.chunk_particle_count = std::min(
                 options.chunk_particle_count,
                 config.mode.ic_staging_particle_count);
@@ -1016,7 +1022,8 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                       policy = IcSpeciesPolicy::kTracer;
                     }
                     validateRecordScientificState(
-                        record, policy, routing.box_size);
+                        record, policy, routing.box_size,
+                        routing.periodic_geometry);
                     if (ownerForX(
                             record.x, routing.box_size,
                             mpi_context.worldSize()) !=

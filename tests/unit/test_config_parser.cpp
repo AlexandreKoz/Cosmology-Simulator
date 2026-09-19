@@ -395,6 +395,80 @@ void testDefaultsCanonicalizationAndDeterminism() {
   assert(reparsed.provenance.config_hash_hex == frozen_first.provenance.config_hash_hex);
 }
 
+void testNormalizedConfigRoundTripPreservesDifficultDoubles() {
+  const std::string text = R"(
+[mode]
+mode = cosmo_cube
+ic_file = ../ics/chui_ic_32_10mpch_z24.hdf5
+ic_convention = gadget_arepo_bridge_v1
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e22
+ic_bridge_source_mass_unit_to_si = 1.98847e40
+ic_bridge_source_velocity_unit_to_si = 1000
+ic_bridge_coordinate_frame = comoving
+ic_bridge_velocity_convention = gadget_arepo_stored_peculiar
+ic_bridge_length_hubble_exponent = -1
+ic_bridge_length_scale_factor_exponent = 0
+ic_bridge_mass_hubble_exponent = -1
+ic_bridge_mass_scale_factor_exponent = 0
+ic_bridge_velocity_hubble_exponent = 0
+ic_bridge_velocity_scale_factor_exponent = 0
+
+[cosmology]
+omega_matter = 0.3099
+omega_lambda = 0.6901
+omega_baryon = 0.0488911
+hubble_param = 0.67742
+sigma8 = 0.808992
+scalar_index_ns = 0.96822
+box_size_x = 14.761890702961235 mpc
+box_size_y = 14.761890702961235 mpc
+box_size_z = 14.761890702961235 mpc
+
+[numerics]
+a_begin = 0.04
+a_end = 0.041
+integrator_time_variable = scale_factor
+cosmology_max_delta_ln_a = 0.007812345678901234
+gravity_softening = 15 kpc
+treepm_tree_opening_theta = 0.6123456789012345
+treepm_tree_relative_force_tolerance = 0.0043210987654321
+)";
+
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      text, "normalized_difficult_doubles");
+  const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
+      frozen.normalized_text, "normalized_difficult_doubles_roundtrip");
+
+  assert(reparsed.normalized_text == frozen.normalized_text);
+  assert(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+  assert(reparsed.config.mode.ic_bridge_source_length_unit_to_si ==
+         frozen.config.mode.ic_bridge_source_length_unit_to_si);
+  assert(reparsed.config.mode.ic_bridge_source_mass_unit_to_si ==
+         frozen.config.mode.ic_bridge_source_mass_unit_to_si);
+  assert(reparsed.config.cosmology.omega_matter ==
+         frozen.config.cosmology.omega_matter);
+  assert(reparsed.config.cosmology.omega_lambda ==
+         frozen.config.cosmology.omega_lambda);
+  assert(reparsed.config.cosmology.hubble_param ==
+         frozen.config.cosmology.hubble_param);
+  assert(reparsed.config.cosmology.box_size_x_mpc_comoving ==
+         frozen.config.cosmology.box_size_x_mpc_comoving);
+  assert(reparsed.config.cosmology.box_size_y_mpc_comoving ==
+         frozen.config.cosmology.box_size_y_mpc_comoving);
+  assert(reparsed.config.cosmology.box_size_z_mpc_comoving ==
+         frozen.config.cosmology.box_size_z_mpc_comoving);
+  assert(reparsed.config.numerics.a_begin == frozen.config.numerics.a_begin);
+  assert(reparsed.config.numerics.a_end == frozen.config.numerics.a_end);
+  assert(reparsed.config.numerics.cosmology_max_delta_ln_a ==
+         frozen.config.numerics.cosmology_max_delta_ln_a);
+  assert(reparsed.config.numerics.gravity_softening_kpc_comoving ==
+         frozen.config.numerics.gravity_softening_kpc_comoving);
+  assert(reparsed.config.numerics.treepm_tree_opening_theta ==
+         frozen.config.numerics.treepm_tree_opening_theta);
+  assert(reparsed.config.numerics.treepm_tree_relative_force_tolerance ==
+         frozen.config.numerics.treepm_tree_relative_force_tolerance);
+}
+
 void testDebugExactDecompositionAuditConfig() {
   const std::string text = R"(
 [mode]
@@ -1480,6 +1554,7 @@ int main() {
   testTypedInitialConditionConfiguration();
   testBoundaryModeValidation();
   testDefaultsCanonicalizationAndDeterminism();
+  testNormalizedConfigRoundTripPreservesDifficultDoubles();
   testDebugExactDecompositionAuditConfig();
   testConfigNormalizationHashDeterminism();
   testConfigRuntimeOwnership();

@@ -36,6 +36,7 @@ The concrete run directory is:
 ## Reproducibility invariants
 
 - Config is normalized to canonical text.
+- Every finite double-valued normalized field uses a shortest round-trip-safe decimal representation; reparsing `normalized_config.param.txt` therefore preserves the frozen binary value rather than a display-rounded approximation.
 - Canonical text is hashed (stable FNV-1a) for provenance.
 - The normalized config snapshot is written to `normalized_config.param.txt` inside the run directory once config loading succeeds.
 - Stable naming constraints apply to `output.output_stem`, `output.restart_stem`, and diagnostics/halo stems.

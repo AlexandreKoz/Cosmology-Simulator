@@ -13,7 +13,7 @@ mode = cosmo_cube
 ic_file = ../ics/chui_ic_32_10mpch_z24.hdf5
 ic_convention = gadget_arepo_bridge_v1
 ic_manifest_file =
-ic_bridge_source_length_unit_to_si = 3.08568e+22
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e+22
 ic_bridge_source_mass_unit_to_si = 1.98847e+40
 ic_bridge_source_velocity_unit_to_si = 1000
 ic_bridge_coordinate_frame = comoving
@@ -61,9 +61,9 @@ omega_baryon = 0.0488911
 hubble_param = 0.67742
 sigma8 = 0.808992
 scalar_index_ns = 0.96822
-box_size_x = 14.7619 mpc
-box_size_y = 14.7619 mpc
-box_size_z = 14.7619 mpc
+box_size_x = 14.761890702961235 mpc
+box_size_y = 14.761890702961235 mpc
+box_size_z = 14.761890702961235 mpc
 
 [numerics]
 a_begin = 0.04

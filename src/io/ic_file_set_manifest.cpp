@@ -143,7 +143,14 @@ using internal::readChunkU64;
   return H5Lexists(parent, std::string(path).c_str(), H5P_DEFAULT) > 0;
 }
 [[nodiscard]] bool attributeExists(hid_t parent, std::string_view name) {
-  return H5Aexists(parent, std::string(name).c_str()) > 0;
+  const std::string attribute_name(name);
+  const htri_t exists = H5Aexists(parent, attribute_name.c_str());
+  if (exists < 0) {
+    throw std::runtime_error(
+        "failed to query HDF5 attribute existence for Header/" +
+        attribute_name);
+  }
+  return exists > 0;
 }
 
 struct TypeDescription {
@@ -229,12 +236,21 @@ struct TypeDescription {
     std::span<const std::uint64_t> expected_dimensions,
     bool require_unsigned_integer = false,
     std::size_t max_integer_width = 4U) {
-  Hdf5Handle attribute(H5Aopen(group, name, H5P_DEFAULT));
-  if (!attribute.valid()) {
+  const htri_t exists = H5Aexists(group, name);
+  if (exists < 0) {
+    throw std::runtime_error(
+        std::string("failed to query Header/") + name +
+        " attribute existence");
+  }
+  if (exists == 0) {
     if (required) {
       throw std::runtime_error(std::string("missing Header/") + name);
     }
-    return attribute;
+    return Hdf5Handle{};
+  }
+  Hdf5Handle attribute(H5Aopen(group, name, H5P_DEFAULT));
+  if (!attribute.valid()) {
+    throw std::runtime_error(std::string("failed to open Header/") + name);
   }
   Hdf5Handle type(H5Aget_type(attribute.get()));
   if (!type.valid()) {
@@ -470,9 +486,12 @@ void readAttributeU32(hid_t group, const char* name, std::uint32_t& value) {
   readAttributeF64x6(header, "MassTable", summary.mass_table);
 
   const auto logical_scalar_is_rank_one = [&](const char* name) {
-    if (H5Aexists(header, name) <= 0) return false;
+    if (!attributeExists(header, name)) return false;
     Hdf5Handle attribute(H5Aopen(header, name, H5P_DEFAULT));
-    if (!attribute.valid()) return false;
+    if (!attribute.valid()) {
+      throw std::runtime_error(
+          std::string("failed to open Header/") + name);
+    }
     const auto dims = attributeDimensions(attribute.get());
     return dims.size() == 1U && dims.front() == 1U;
   };
@@ -506,12 +525,24 @@ void readAttributeU32(hid_t group, const char* name, std::uint32_t& value) {
     summary.omega_matter = config.cosmology.omega_matter;
     summary.omega_lambda = config.cosmology.omega_lambda;
     summary.hubble_param = config.cosmology.hubble_param;
-    if (H5Aexists(header, "Time") > 0) readAttributeF64(header, "Time", summary.scale_factor);
-    if (H5Aexists(header, "Redshift") > 0) readAttributeF64(header, "Redshift", summary.redshift);
-    if (H5Aexists(header, "BoxSize") > 0) readAttributeF64(header, "BoxSize", summary.box_size);
-    if (H5Aexists(header, "Omega0") > 0) readAttributeF64(header, "Omega0", summary.omega_matter);
-    if (H5Aexists(header, "OmegaLambda") > 0) readAttributeF64(header, "OmegaLambda", summary.omega_lambda);
-    if (H5Aexists(header, "HubbleParam") > 0) readAttributeF64(header, "HubbleParam", summary.hubble_param);
+    if (attributeExists(header, "Time")) {
+      readAttributeF64(header, "Time", summary.scale_factor);
+    }
+    if (attributeExists(header, "Redshift")) {
+      readAttributeF64(header, "Redshift", summary.redshift);
+    }
+    if (attributeExists(header, "BoxSize")) {
+      readAttributeF64(header, "BoxSize", summary.box_size);
+    }
+    if (attributeExists(header, "Omega0")) {
+      readAttributeF64(header, "Omega0", summary.omega_matter);
+    }
+    if (attributeExists(header, "OmegaLambda")) {
+      readAttributeF64(header, "OmegaLambda", summary.omega_lambda);
+    }
+    if (attributeExists(header, "HubbleParam")) {
+      readAttributeF64(header, "HubbleParam", summary.hubble_param);
+    }
   }
   readAttributeNonnegativeU32(
       header, "NumFilesPerSnapshot", summary.num_files_per_snapshot);
@@ -987,11 +1018,14 @@ void validateDatasetSemanticType(
     std::uint32_t file_index,
     std::string name,
     bool required = true) {
-  Hdf5Handle attribute(H5Aopen(header, name.c_str(), H5P_DEFAULT));
-  if (!attribute.valid()) {
+  if (!attributeExists(header, name)) {
     if (!required) {
       return {};
     }
+    throw std::runtime_error("missing Header/" + name);
+  }
+  Hdf5Handle attribute(H5Aopen(header, name.c_str(), H5P_DEFAULT));
+  if (!attribute.valid()) {
     throw std::runtime_error("failed to open Header/" + name);
   }
   Hdf5Handle type(H5Aget_type(attribute.get()));
