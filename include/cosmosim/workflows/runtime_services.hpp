@@ -16,6 +16,8 @@ class MpiContext;
 
 namespace cosmosim::workflows {
 
+class RuntimeConsoleReporter;
+
 // Process-lifetime dependencies are created by the composition root and
 // borrowed by runtime components. Services must never create replacement MPI
 // contexts or profiler authorities internally.
@@ -25,6 +27,9 @@ struct RuntimeServices {
   // Optional only for standalone/unit composition. The production reference
   // workflow always supplies the one process-level governor authority.
   core::MemoryGovernor* memory_governor = nullptr;
+  // Optional observer owned by the composition root. It never owns or mutates
+  // scientific state and may be null for tests/embedded workflows.
+  RuntimeConsoleReporter* console_reporter = nullptr;
   bool deterministic_execution = true;
 };
 

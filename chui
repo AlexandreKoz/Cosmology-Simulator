@@ -1,0 +1,348 @@
+#!/usr/bin/env python3
+"""Thin POSIX launcher for CHUI's cosmosim_harness runtime."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+from typing import Any
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+PRESETS_PATH = REPO_ROOT / "CMakePresets.json"
+DEFAULT_PRESET = "cpu-only-debug"
+EXECUTABLE_NAME = "cosmosim_harness"
+
+
+class LauncherError(RuntimeError):
+    pass
+
+
+def _nonnegative_int(text: str) -> int:
+    try:
+        value = int(text, 10)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a non-negative integer") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("expected a non-negative integer")
+    return value
+
+
+def _positive_int(text: str) -> int:
+    value = _nonnegative_int(text)
+    if value == 0:
+        raise argparse.ArgumentTypeError("expected an integer greater than zero")
+    return value
+
+
+def _nonnegative_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a non-negative finite number") from exc
+    if value < 0.0 or not (value < float("inf")):
+        raise argparse.ArgumentTypeError("expected a non-negative finite number")
+    return value
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="chui",
+        description=(
+            "CHUI launcher. This is a thin orchestration layer over cosmosim_harness; "
+            "the .param.txt file remains the scientific runtime authority."
+        ),
+    )
+    subparsers = parser.add_subparsers(dest="command")
+    run = subparsers.add_parser(
+        "run",
+        help="run a CHUI simulation",
+        description=(
+            "Run cosmosim_harness without relocating or rewriting the simulation config. "
+            "On POSIX/Linux/WSL, --mpi N adds the configured MPI launcher."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  ./chui run configs/chui_firstlight_32_smoke.param.txt\n"
+            "  ./chui run configs/production.param.txt --mpi 8 --preset mpi-hdf5-fftw-release\n"
+            "  ./chui run config.param.txt --exe /path/to/cosmosim_harness --quiet\n"
+            "  ./chui run config.param.txt --mpi 8 -- --bind-to core\n\n"
+            "Direct fallback remains supported:\n"
+            "  ./build/<preset>/cosmosim_harness CONFIG [console options]"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    run.add_argument("config", help="authoritative .param.txt configuration path")
+    selection = run.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--preset",
+        help="select the executable from this CMake configure preset",
+    )
+    selection.add_argument(
+        "--exe",
+        help="use this exact cosmosim_harness executable path",
+    )
+    run.add_argument(
+        "--mpi",
+        metavar="N",
+        type=_positive_int,
+        help="launch exactly N MPI ranks; the runtime still validates parallel.mpi_ranks_expected",
+    )
+    run.add_argument("--quiet", action="store_true", help="suppress routine native CHUI console records")
+    run.add_argument(
+        "--status-every",
+        metavar="N",
+        type=_nonnegative_int,
+        default=None,
+        help="override native heartbeat step cadence (0 disables the step trigger)",
+    )
+    run.add_argument(
+        "--status-seconds",
+        metavar="SEC",
+        type=_nonnegative_float,
+        default=None,
+        help="override native heartbeat maximum silence trigger (0 disables it)",
+    )
+    return parser
+
+
+def _load_presets() -> dict[str, Any]:
+    try:
+        return json.loads(PRESETS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise LauncherError(f"CMake preset metadata not found: {PRESETS_PATH}") from exc
+    except json.JSONDecodeError as exc:
+        raise LauncherError(f"failed to parse {PRESETS_PATH}: {exc}") from exc
+
+
+def _configure_preset_map(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        item["name"]: item
+        for item in data.get("configurePresets", [])
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+
+
+def _resolve_binary_dir(
+    name: str,
+    presets: dict[str, dict[str, Any]],
+    stack: tuple[str, ...] = (),
+    macro_preset_name: str | None = None,
+) -> Path:
+    if name in stack:
+        raise LauncherError("cyclic CMake configure-preset inheritance: " + " -> ".join((*stack, name)))
+    if macro_preset_name is None:
+        macro_preset_name = name
+    try:
+        preset = presets[name]
+    except KeyError as exc:
+        raise LauncherError(f"unknown CMake configure preset: {name}") from exc
+
+    binary_dir = preset.get("binaryDir")
+    if not isinstance(binary_dir, str):
+        inherits = preset.get("inherits", [])
+        if isinstance(inherits, str):
+            inherits = [inherits]
+        for parent in inherits:
+            if parent in presets:
+                binary_dir = str(
+                    _resolve_binary_dir(
+                        parent, presets, (*stack, name), macro_preset_name
+                    )
+                )
+                break
+    if not isinstance(binary_dir, str):
+        raise LauncherError(f"configure preset '{name}' has no resolvable binaryDir")
+
+    expanded = binary_dir.replace("${sourceDir}", str(REPO_ROOT)).replace(
+        "${presetName}", macro_preset_name
+    )
+    path = Path(expanded)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
+def _build_presets_for(data: dict[str, Any], configure_preset: str) -> list[str]:
+    names = []
+    for item in data.get("buildPresets", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("configurePreset") == configure_preset and isinstance(item.get("name"), str):
+            names.append(item["name"])
+    return sorted(names)
+
+
+def _build_help(data: dict[str, Any], preset: str) -> str:
+    lines = [f"  cmake --preset {preset}"]
+    build_presets = _build_presets_for(data, preset)
+    if build_presets:
+        lines.append(f"  cmake --build --preset {build_presets[0]} -j")
+    else:
+        presets = _configure_preset_map(data)
+        try:
+            build_dir = _resolve_binary_dir(preset, presets)
+            lines.append(f"  cmake --build {build_dir} -j")
+        except LauncherError:
+            pass
+    return "\n".join(lines)
+
+
+def _preset_executable(data: dict[str, Any], preset: str) -> tuple[Path, Path]:
+    presets = _configure_preset_map(data)
+    if preset not in presets or presets[preset].get("hidden", False):
+        visible = sorted(name for name, item in presets.items() if not item.get("hidden", False))
+        raise LauncherError(
+            f"unknown runnable configure preset '{preset}'. Choices: " + ", ".join(visible)
+        )
+    build_dir = _resolve_binary_dir(preset, presets)
+    executable = build_dir / EXECUTABLE_NAME
+    if not executable.is_file():
+        raise LauncherError(
+            f"CHUI executable not found for preset {preset}.\n\nBuild it with:\n{_build_help(data, preset)}"
+        )
+    if not os.access(executable, os.X_OK):
+        raise LauncherError(f"selected CHUI executable is not executable: {executable}")
+    return executable, build_dir
+
+
+def _discover_executable(data: dict[str, Any]) -> tuple[Path, Path]:
+    presets = _configure_preset_map(data)
+    candidates: dict[Path, list[str]] = {}
+    for name, item in presets.items():
+        if item.get("hidden", False):
+            continue
+        try:
+            build_dir = _resolve_binary_dir(name, presets)
+        except LauncherError:
+            continue
+        executable = build_dir / EXECUTABLE_NAME
+        if executable.is_file() and os.access(executable, os.X_OK):
+            candidates.setdefault(executable.resolve(), []).append(name)
+
+    if len(candidates) == 1:
+        executable = next(iter(candidates))
+        return executable, executable.parent
+    if not candidates:
+        raise LauncherError(
+            "No built cosmosim_harness was found in any configured preset directory.\n\n"
+            f"Build the default development preset with:\n{_build_help(data, DEFAULT_PRESET)}\n\n"
+            "Or select explicitly with --preset PRESET / --exe PATH."
+        )
+
+    lines = ["Multiple runnable CHUI builds exist; refusing to guess. Select one with --preset or --exe:"]
+    for executable, names in sorted(candidates.items(), key=lambda item: str(item[0])):
+        lines.append(f"  {', '.join(sorted(names))}: {executable}")
+    raise LauncherError("\n".join(lines))
+
+
+def _select_executable(args: argparse.Namespace, data: dict[str, Any]) -> tuple[Path, Path]:
+    if args.exe:
+        executable = Path(args.exe).expanduser()
+        if not executable.is_absolute():
+            executable = (Path.cwd() / executable).resolve()
+        if not executable.is_file():
+            raise LauncherError(f"explicit CHUI executable does not exist: {executable}")
+        if not os.access(executable, os.X_OK):
+            raise LauncherError(f"explicit CHUI executable is not executable: {executable}")
+        return executable, executable.parent
+    if args.preset:
+        return _preset_executable(data, args.preset)
+    return _discover_executable(data)
+
+
+def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.is_file():
+        return None
+    prefix = key + ":"
+    try:
+        lines = cache.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if not line.startswith(prefix) or "=" not in line:
+            continue
+        return line.split("=", 1)[1].strip() or None
+    return None
+
+
+def _mpi_launcher(build_dir: Path) -> tuple[str, str]:
+    executable = _cmake_cache_value(build_dir, "MPIEXEC_EXECUTABLE")
+    if executable and Path(executable).is_file():
+        mpi_exec = executable
+    else:
+        mpi_exec = shutil.which("mpiexec") or shutil.which("mpirun") or ""
+    if not mpi_exec:
+        raise LauncherError(
+            "--mpi was requested but no MPI launcher was found. Configure/build an MPI preset "
+            "or ensure mpiexec/mpirun is on PATH."
+        )
+    numproc_flag = _cmake_cache_value(build_dir, "MPIEXEC_NUMPROC_FLAG") or "-n"
+    return mpi_exec, numproc_flag
+
+
+def _harness_console_args(args: argparse.Namespace) -> list[str]:
+    result: list[str] = []
+    if args.quiet:
+        result.append("--quiet")
+    if args.status_every is not None:
+        result.extend(["--status-every", str(args.status_every)])
+    if args.status_seconds is not None:
+        result.extend(["--status-seconds", str(args.status_seconds)])
+    return result
+
+
+def _run(args: argparse.Namespace, mpi_passthrough: list[str]) -> int:
+    if os.name != "posix":
+        raise LauncherError(
+            "the repository-root ./chui launcher currently supports POSIX/Linux/WSL. "
+            "Use cosmosim_harness directly on this platform."
+        )
+    data = _load_presets()
+    executable, build_dir = _select_executable(args, data)
+    harness_args = [str(executable), args.config, *_harness_console_args(args)]
+
+    if args.mpi is None:
+        if mpi_passthrough:
+            raise LauncherError("arguments after '--' are MPI-launcher arguments and require --mpi N")
+        command = harness_args
+    else:
+        mpi_exec, numproc_flag = _mpi_launcher(build_dir)
+        command = [mpi_exec, *mpi_passthrough, numproc_flag, str(args.mpi), *harness_args]
+
+    # Process replacement preserves the child/MPI exit status and delivers
+    # SIGINT/SIGTERM directly to the actual runtime/launcher rather than
+    # leaving a wrapper process that could orphan ranks.
+    os.execvp(command[0], command)
+    return 127  # unreachable if exec succeeds
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    mpi_passthrough: list[str] = []
+    if "--" in raw:
+        split = raw.index("--")
+        mpi_passthrough = raw[split + 1 :]
+        raw = raw[:split]
+
+    parser = _parser()
+    args = parser.parse_args(raw)
+    if args.command is None:
+        parser.print_help()
+        return 0
+    if args.command != "run":
+        raise LauncherError(f"unsupported command: {args.command}")
+    return _run(args, mpi_passthrough)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except LauncherError as exc:
+        print(f"chui: {exc}", file=sys.stderr)
+        raise SystemExit(2)

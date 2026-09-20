@@ -6,7 +6,7 @@ This document describes the live config-driven runtime path assembled by `workfl
 
 A valid `param.txt` run goes through the following real path:
 
-1. `cosmosim_harness <config.param.txt>` loads the typed frozen config with `loadFrozenConfigFromFile(...)`.
+1. `cosmosim_harness <config.param.txt>` loads the typed frozen config with `loadFrozenConfigFromFile(...)`. The repository-root `./chui run CONFIG` launcher is a thin operator convenience that selects/executes this same target and does not parse or rewrite scientific configuration.
 2. The runner validates the mode/build contract before stepping.
 3. Initial conditions are dispatched from the authoritative typed convention:
    - `mode.ic_convention=generated` requires `mode.ic_file=generated`.
@@ -25,6 +25,16 @@ A valid `param.txt` run goes through the following real path:
 5. The orchestrator executes the canonical KDK stage sequence through the
    gravity owner and the current hydro callback.
 6. Outputs, restart checkpoints, diagnostics, normalized config, and operational reports are written into the config-driven run directory.
+
+## Native console observability
+
+Normal harness execution owns a `RuntimeConsoleReporter` observer alongside the other runtime services. The reporter does not own timestep, cosmology, scheduler, decomposition, memory, or output state: it formats values at the existing authoritative boundaries and emits informational records from MPI rank 0 only. Embedded/test callers keep the observer disabled unless they explicitly opt in; `cosmosim_harness` enables it by default.
+
+The stable informational prefixes are `[CHUI][START]`, `[CHUI][IC]`, `[CHUI][RUNTIME]`, `[CHUI][PM]`, `[CHUI][MEMORY]`, `[CHUI][STEP]`, `[CHUI][DECOMP]`, `[CHUI][SNAPSHOT]`, `[CHUI][RESTART]`, and `[CHUI][DONE]`. `[CHUI][WARN]` remains available even under `--quiet`. Cosmological `a`/`z` fields are emitted only for the cosmological comoving mode policy.
+
+Step cadence is operational presentation state, not scientific/restart state. The harness defaults to every 10 productive global steps and/or roughly 30 seconds of console silence; `--status-every N` and `--status-seconds SEC` override those triggers, and `--quiet` suppresses normal informational chatter. The step record reuses the global active/total counts already reduced by the productive rung-zero algorithm and the memory report already built at the step boundary. It does not add a presentation-only per-step MPI collective.
+
+Snapshot and restart success messages are emitted from `OutputRestartRuntime` only after the existing write/readback/validation completion boundary succeeds. The legacy `COSMOSIM_RUNTIME_PHASE_DIAGNOSTICS` / `runtime_phase=...` stream remains separate and unchanged for narrow external diagnostics; native human-facing status does not replace that interface.
 
 ## Runtime contract
 

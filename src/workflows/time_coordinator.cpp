@@ -31,6 +31,7 @@
 #include "cosmosim/workflows/runtime_module_registry.hpp"
 #include "cosmosim/workflows/runtime_resources.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
+#include "cosmosim/workflows/runtime_console_reporter.hpp"
 #include "workflows/internal/cartesian_gas_cell_layout.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
@@ -1000,6 +1001,10 @@ void TimeCoordinator::runRungZeroSegment(
   core::TransientStepWorkspace workspace(m_services.memory_governor);
   while (integrator_state.step_index < target_step_index &&
          integrator_state.current_time_code < config.numerics.t_code_end) {
+    const RuntimeConsoleReporter::Clock::time_point console_step_begin =
+        RuntimeConsoleReporter::Clock::now();
+    const std::uint64_t pm_refresh_count_before = m_gravity.longRangeRefreshCount();
+    const std::uint64_t pm_reuse_count_before = m_gravity.longRangeReuseCount();
     // Rung zero has one physical timestep authority. Re-evaluate all local
     // criteria before constructing KDK stage times, then agree the minimum
     // collectively so every rank advances the identical interval.
@@ -1070,6 +1075,7 @@ void TimeCoordinator::runRungZeroSegment(
       throw std::runtime_error("ReferenceWorkflow global timestep selection produced an invalid dt");
     }
     integrator_state.dt_time_code = accepted_dt;
+    const double accepted_dt_time_code_for_console = accepted_dt;
 
     const std::span<const std::uint32_t> active_particles =
         particle_scheduler.beginSubstep();
@@ -1113,6 +1119,8 @@ void TimeCoordinator::runRungZeroSegment(
     const double resume_dt_after_step = pending_output.restart_resume_dt_time_code;
     const core::StepBoundaryKind requested_boundary =
         internal::requestedBoundaryForPendingOutput(pending_output);
+    const bool console_snapshot_requested = pending_output.snapshot_due;
+    const bool console_restart_requested = pending_output.checkpoint_due;
     const std::uint64_t global_active_particle_count =
         m_services.mpi_context.allreduceSumUint64(
             static_cast<std::uint64_t>(active_particles.size()));
@@ -1237,6 +1245,10 @@ void TimeCoordinator::runRungZeroSegment(
     if (particle_decomposition_changed) {
       m_gravity.commitParticleDecompositionChange();
       install_authoritative_domain_geometry();
+      if (m_services.console_reporter != nullptr) {
+        m_services.console_reporter->emitDecomposition(
+            integrator_state.step_index, m_gravity.decompositionEpoch());
+      }
     }
     ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);
     syncTimeBinsFromSchedulers(particle_scheduler, gas_cell_scheduler, state);
@@ -1248,6 +1260,55 @@ void TimeCoordinator::runRungZeroSegment(
           integrator_state,
           &profiler,
           requested_boundary);
+    }
+
+    if (m_services.console_reporter != nullptr) {
+      RuntimeConsoleStepStatus console_status;
+      console_status.step_index = integrator_state.step_index;
+      console_status.t_code = integrator_state.current_time_code;
+      console_status.dt_time_code = accepted_dt_time_code_for_console;
+      if (mode_policy.cosmological_comoving_frame) {
+        console_status.a_scale = integrator_state.current_scale_factor;
+        if (std::isfinite(integrator_state.current_scale_factor) &&
+            integrator_state.current_scale_factor > 0.0) {
+          console_status.redshift =
+              1.0 / integrator_state.current_scale_factor - 1.0;
+        }
+      }
+      console_status.active_particle_count = global_active_particle_count;
+      console_status.total_particle_count = global_particle_count;
+      console_status.active_cell_count = global_active_cell_count;
+      console_status.total_cell_count = global_cell_count;
+      console_status.wall_step_seconds = std::chrono::duration<double>(
+          RuntimeConsoleReporter::Clock::now() - console_step_begin).count();
+      const bool pm_refreshed =
+          m_gravity.longRangeRefreshCount() > pm_refresh_count_before;
+      const bool pm_reused =
+          m_gravity.longRangeReuseCount() > pm_reuse_count_before;
+      console_status.pm_activity = pm_refreshed
+          ? "refresh"
+          : (pm_reused ? "reuse" : "none");
+      const bool snapshot_flushed =
+          console_snapshot_requested && !pending_output.snapshot_due;
+      const bool restart_flushed =
+          console_restart_requested && !pending_output.checkpoint_due;
+      if (snapshot_flushed && restart_flushed) {
+        console_status.output_activity = "snapshot+restart";
+      } else if (snapshot_flushed) {
+        console_status.output_activity = "snapshot";
+      } else if (restart_flushed) {
+        console_status.output_activity = "restart";
+      } else {
+        console_status.output_activity = "none";
+      }
+      if (const core::MemoryReport* memory_report = profiler.memoryReport();
+          memory_report != nullptr && memory_report->governor_snapshot.has_value()) {
+        console_status.memory_headroom_bytes =
+            memory_report->governor_snapshot->headroom_bytes;
+        console_status.memory_pressure = std::string(core::memoryPressureLabel(
+            memory_report->governor_snapshot->pressure));
+      }
+      m_services.console_reporter->emitStep(console_status);
     }
   }
 

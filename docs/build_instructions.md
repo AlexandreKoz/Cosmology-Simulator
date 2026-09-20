@@ -40,6 +40,53 @@ cmake --build --preset build-cpu-debug
 ctest --preset test-cpu-debug --output-on-failure
 ```
 
+## Running CHUÍ
+
+The repository-root `chui` launcher is the normal POSIX/Linux/WSL operator interface. It uses only the Python 3 standard library and remains a thin orchestration layer over the existing `cosmosim_harness`; scientific configuration stays exclusively in the typed `.param.txt` path.
+
+After building one runnable preset, use:
+
+```bash
+./chui run configs/chui_firstlight_32_smoke.param.txt
+```
+
+If multiple preset build trees contain `cosmosim_harness`, the launcher fails with the available choices rather than executing an arbitrary binary. Select one deterministically with `--preset`, or bypass preset discovery with `--exe`:
+
+```bash
+./chui run CONFIG --preset pm-hdf5-fftw-debug
+./chui run CONFIG --exe /absolute/path/to/cosmosim_harness
+```
+
+For MPI runs, `--mpi N` prepends the MPI launcher recorded in the selected build's `CMakeCache.txt` when available, otherwise it uses `mpiexec`/`mpirun` from `PATH`. It does not inspect or rewrite `parallel.mpi_ranks_expected`; the authoritative runtime still validates communicator size before expensive simulation work. Arguments after `--` are passed to the MPI launcher:
+
+```bash
+./chui run CONFIG --preset mpi-hdf5-fftw-release --mpi 8
+./chui run CONFIG --preset mpi-hdf5-fftw-debug --mpi 2 -- --bind-to core
+```
+
+Native progress reporting is owned by the C++ runtime, not the launcher. The default direct harness and launcher paths emit bounded rank-0 status. Presentation controls are:
+
+```text
+--quiet
+--status-every N
+--status-seconds SEC
+```
+
+For example:
+
+```bash
+./chui run CONFIG --status-every 5 --status-seconds 20
+./chui run CONFIG --quiet
+```
+
+The direct executable remains fully supported:
+
+```bash
+./build/<preset>/cosmosim_harness CONFIG
+```
+
+`./chui --help` and `./chui run --help` document the complete launcher surface. The root launcher is currently POSIX/Linux/WSL-first; platforms that do not support it can invoke `cosmosim_harness` directly. External `chui_telemetry.py` process telemetry remains optional diagnostic tooling and is never launched implicitly.
+
 ## HDF5 path
 
 The supported HDF5 source/API range is **1.10.x through 1.14.x**. Object inspection uses stable handle/type queries rather than version-sensitive unversioned `H5Oget_info_by_name` signatures. CMake fails closed below 1.10 and on unqualified HDF5 2.x.

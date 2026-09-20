@@ -9,6 +9,7 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/time_integration.hpp"
+#include "cosmosim/workflows/runtime_console_reporter.hpp"
 
 namespace cosmosim::core {
 class SimulationState;
@@ -29,6 +30,11 @@ struct ReferenceWorkflowOptions {
   std::uint64_t step_index = 0;
   double dt_time_code = 0.0;
   bool write_outputs = true;
+
+  // Process-local presentation controls. These never enter normalized config,
+  // provenance, snapshots, or restart state. Embedders are quiet by default;
+  // cosmosim_harness explicitly enables native console reporting.
+  RuntimeConsoleOptions console{};
 
   // Narrow integration-test/benchmark seam.  When present, the runner copies
   // this already-validated state and executes the same production setup,

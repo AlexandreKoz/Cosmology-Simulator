@@ -79,14 +79,40 @@ IC paths are resolved relative to the config file, so with the repository layout
 ics/chui_ic_32_10mpch_z24.hdf5
 ```
 
-The external monofonIC file is **not** bundled with the repository. After supplying a compatible IC, run:
+The external monofonIC file is **not** bundled with the repository. After supplying a compatible IC, the normal human-facing entry point is:
+
+```bash
+./chui run configs/chui_firstlight_32_smoke.param.txt
+```
+
+If more than one runnable preset build exists, the launcher deliberately refuses to guess. Select the intended build explicitly:
+
+```bash
+./chui run configs/chui_firstlight_32_smoke.param.txt \
+  --preset pm-hdf5-fftw-debug
+```
+
+The runtime now emits compact rank-0 native status records such as `[CHUI][START]`, `[CHUI][IC]`, `[CHUI][STEP]`, `[CHUI][SNAPSHOT]`, `[CHUI][RESTART]`, and `[CHUI][DONE]`. Console cadence is presentation-only and can be controlled without changing the scientific configuration:
+
+```bash
+./chui run configs/chui_firstlight_32_smoke.param.txt --status-every 5 --status-seconds 20
+./chui run configs/chui_firstlight_32_smoke.param.txt --quiet
+```
+
+For distributed qualification, use the documented `mpi-hdf5-fftw-*` presets only on a machine with MPI, HDF5, FFTW, and FFTW-MPI development support. The launcher provides the MPI convenience form without rewriting the `.param.txt` contract:
+
+```bash
+./chui run configs/production.param.txt --preset mpi-hdf5-fftw-release --mpi 8
+```
+
+Direct harness execution remains supported for CI, debugging, and low-level use:
 
 ```bash
 ./build/pm-hdf5-fftw-debug/cosmosim_harness \
   configs/chui_firstlight_32_smoke.param.txt
 ```
 
-For distributed qualification, use the documented `mpi-hdf5-fftw-*` presets only on a machine with MPI, HDF5, FFTW, and FFTW-MPI development support. See [`docs/build_instructions.md`](docs/build_instructions.md).
+`chui_telemetry.py` remains an optional process/resource diagnostic tool for suspicious runs; it is not part of the normal launch path. See [`docs/build_instructions.md`](docs/build_instructions.md).
 
 ## Output layout
 

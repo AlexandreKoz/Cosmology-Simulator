@@ -69,6 +69,15 @@ void traceRuntimePhase(std::string_view phase) {
   return stream.str();
 }
 
+[[nodiscard]] std::optional<double> consoleRedshift(
+    bool cosmological,
+    double a_scale) {
+  if (!cosmological || !std::isfinite(a_scale) || a_scale <= 0.0) {
+    return std::nullopt;
+  }
+  return 1.0 / a_scale - 1.0;
+}
+
 
 [[nodiscard]] std::string treePmAssignmentSchemeName(core::TreePmAssignmentScheme assignment_scheme) {
   switch (assignment_scheme) {
@@ -363,6 +372,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       io::isRestartSchemaCompatible(io::restartSchema().version);
 
   core::ProfilerSession profiler(true);
+  RuntimeConsoleOptions console_options = options.console;
+  if (console_options.config_path.empty()) {
+    console_options.config_path = m_frozen_config.provenance.source_name;
+  }
+  RuntimeConsoleReporter console_reporter(
+      std::move(console_options), mpi_context.worldRank(), std::cout, std::cerr);
   std::uint64_t external_runtime_reserve_bytes = 0U;
   external_runtime_reserve_bytes = core::checkedMemoryBytesAdd(
       external_runtime_reserve_bytes,
@@ -396,6 +411,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       .mpi_context = mpi_context,
       .profiler = profiler,
       .memory_governor = &memory_governor,
+      .console_reporter = &console_reporter,
       .deterministic_execution = true};
   const FailureCoordinator failure_coordinator(runtime_services);
   const internal::MigrationBalanceRuntime migration_balance(
@@ -457,6 +473,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
     core::validateModePolicy(config, mode_policy);
 
+    console_reporter.emitRuntimePhase(
+        "initial_conditions_begin", "materializing authoritative initial state");
     traceRuntimePhase("initial_conditions_begin");
     const internal::InitialConditionRuntime initial_conditions(
         m_frozen_config, runtime_services);
@@ -567,6 +585,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     {"global_particle_partition_identity_match",
                      report.global_particle_partition_identity_match ? "true" : "false"}},
     });
+    console_reporter.emitInitialConditions(
+        report.global_particle_count,
+        report.global_cell_count,
+        restoring_from_restart,
+        report.ic_manifest_path);
 
     core::CosmologyBackgroundConfig background_config;
     background_config.hubble_param = config.cosmology.hubble_param;
@@ -615,6 +638,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     std::max(mpi_context.worldRank(), 0)),
             });
     traceRuntimePhase("runtime_composition_complete");
+    console_reporter.emitRuntimePhase(
+        "runtime_composition_ready", "solver/runtime modules frozen and instantiated");
     if (restoring_from_restart) {
       const std::string& prior_runtime_state =
           options.restart_state_override->provenance.derived_runtime_state;
@@ -705,6 +730,12 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             {"gravity_acceptance_profile_id", "unverified_current_source"},
         },
     });
+    console_reporter.emitPmSetup(
+        report.treepm_pm_grid_nx,
+        report.treepm_pm_grid_ny,
+        report.treepm_pm_grid_nz,
+        report.treepm_update_cadence_steps,
+        gravity::PmSolver::fftBackendName());
     {
       const std::array startup_reports{
           core::collectSimulationMemoryReport(state),
@@ -750,9 +781,47 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                              ? std::to_string(
                                    runtime_memory_report->governor_snapshot->headroom_bytes)
                              : "0"}},
-      });
+        });
+        console_reporter.emitMemory(*runtime_memory_report, "startup");
+      }
     }
-  }
+
+    RuntimeConsoleStartupStatus startup_status;
+    startup_status.run_name = config.output.run_name;
+    startup_status.run_directory = report.run_directory;
+    startup_status.simulation_mode = core::modeToString(config.mode.mode);
+    startup_status.mpi_world_size = mpi_context.worldSize();
+    startup_status.openmp_compiled = omp_runtime.compiled;
+    startup_status.openmp_threads = omp_runtime.configured_threads;
+    startup_status.global_particle_count = report.global_particle_count;
+    startup_status.global_cell_count = report.global_cell_count;
+    startup_status.t_code = integrator_state.current_time_code;
+    startup_status.dt_time_code = integrator_state.dt_time_code;
+    if (mode_policy.cosmological_comoving_frame) {
+      startup_status.a_scale = integrator_state.current_scale_factor;
+      startup_status.redshift = consoleRedshift(
+          true, integrator_state.current_scale_factor);
+      startup_status.endpoint_a_scale = config.numerics.a_end;
+    }
+    startup_status.endpoint_t_code = config.numerics.t_code_end;
+    startup_status.pm_grid_nx = report.treepm_pm_grid_nx;
+    startup_status.pm_grid_ny = report.treepm_pm_grid_ny;
+    startup_status.pm_grid_nz = report.treepm_pm_grid_nz;
+    startup_status.pm_update_cadence_steps = report.treepm_update_cadence_steps;
+    startup_status.snapshot_interval_steps = config.output.snapshot_interval_steps;
+    startup_status.snapshot_interval_time_code =
+        config.output.snapshot_interval_time_code;
+    startup_status.write_restarts = options.write_outputs && config.output.write_restarts;
+    startup_status.restoring_from_restart = restoring_from_restart;
+    if (const core::MemoryReport* memory_report = profiler.memoryReport();
+        memory_report != nullptr && memory_report->governor_snapshot.has_value()) {
+      startup_status.memory_headroom_bytes =
+          memory_report->governor_snapshot->headroom_bytes;
+      startup_status.memory_pressure = std::string(core::memoryPressureLabel(
+          memory_report->governor_snapshot->pressure));
+    }
+    console_reporter.emitStartup(startup_status);
+
     HydroAmrRuntime& hydro_callback = *runtime_composition.hydro_amr;
     auto effective_eos_table = runtime_composition.effective_eos_table;
     TimeCoordinator time_coordinator(
@@ -878,9 +947,20 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     // can finalize MPI. This is the normal lifecycle path; destructors retain
     // only emergency containment for exception unwinding.
     gravity_callback.shutdownMpiResources();
+    console_reporter.emitDone(
+        report.completed_steps,
+        report.final_time_code,
+        mode_policy.cosmological_comoving_frame
+            ? std::optional<double>(report.final_scale_factor)
+            : std::nullopt,
+        consoleRedshift(mode_policy.cosmological_comoving_frame, report.final_scale_factor),
+        report.run_directory,
+        report.normalized_config_snapshot_path,
+        report.operational_report_json_path);
     traceRuntimePhase("run_complete");
     return report;
   } catch (const std::exception& ex) {
+    console_reporter.emitWarning("workflows.reference", ex.what());
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "run.failure",
         .severity = core::RuntimeEventSeverity::kFatal,

@@ -402,6 +402,7 @@ add_library(cosmosim_workflows STATIC
   src/workflows/reference_runtime_composition.cpp
   src/workflows/restart_verification.cpp
   src/workflows/runtime_capabilities.cpp
+  src/workflows/runtime_console_reporter.cpp
   src/workflows/runtime_module_registry.cpp
   src/workflows/runtime_resources.cpp
   src/workflows/runtime_services.cpp
@@ -779,6 +780,17 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_runtime_services tests/unit/test_runtime_services.cpp)
   target_link_libraries(test_unit_runtime_services PRIVATE cosmosim_workflows)
   add_test(NAME unit_runtime_services COMMAND test_unit_runtime_services)
+
+  add_executable(test_unit_runtime_console_reporter tests/unit/test_runtime_console_reporter.cpp)
+  target_link_libraries(test_unit_runtime_console_reporter PRIVATE cosmosim_workflows)
+  add_test(NAME unit_runtime_console_reporter COMMAND test_unit_runtime_console_reporter)
+
+  find_package(Python3 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(
+      NAME integration_chui_launcher
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/test_chui_launcher.py ${PROJECT_SOURCE_DIR}/chui)
+  endif()
 
   add_executable(test_unit_runtime_resources tests/unit/test_runtime_resources.cpp)
   target_link_libraries(test_unit_runtime_resources PRIVATE cosmosim_workflows)

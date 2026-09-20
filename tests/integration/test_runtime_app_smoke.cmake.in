@@ -69,11 +69,26 @@ foreach(required_manifest_contract IN ITEMS
 endforeach()
 
 file(READ "${runtime_smoke_stdout}" runtime_stdout_text)
-if(NOT runtime_stdout_text MATCHES "run_directory=${runtime_smoke_run_dir}")
+foreach(required_console_record IN ITEMS
+    "[CHUI][START]"
+    "[CHUI][STEP]"
+    "[CHUI][SNAPSHOT]"
+    "[CHUI][RESTART]"
+    "[CHUI][DONE]")
+  string(FIND "${runtime_stdout_text}" "${required_console_record}" required_console_record_index)
+  if(required_console_record_index EQUAL -1)
+    message(FATAL_ERROR "runtime smoke stdout missing native console record ${required_console_record}")
+  endif()
+endforeach()
+if(NOT runtime_stdout_text MATCHES "${runtime_smoke_run_dir}")
   message(FATAL_ERROR "runtime smoke stdout must report the concrete run directory")
 endif()
 if(NOT runtime_stdout_text MATCHES "completed_steps=1")
   message(FATAL_ERROR "runtime smoke stdout must report completed_steps=1")
+endif()
+file(READ "${runtime_smoke_stderr}" runtime_stderr_text)
+if(NOT runtime_stderr_text MATCHES "runtime_phase=time_coordinator_begin")
+  message(FATAL_ERROR "runtime phase diagnostic compatibility marker is missing")
 endif()
 
 file(READ "${runtime_smoke_run_dir}/operational_events.json" runtime_ops)
@@ -103,6 +118,31 @@ endif()
 if(NOT runtime_normalized MATCHES "treepm_asmth_cells = 1.5")
   message(FATAL_ERROR "runtime smoke normalized config must preserve numerics.treepm_asmth_cells")
 endif()
+
+# Re-run the same one-step runtime after clearing only its output tree to prove
+# quiet mode suppresses routine native console output without changing success.
+file(REMOVE_RECURSE "${runtime_smoke_run_root}")
+set(runtime_smoke_quiet_stdout "${runtime_smoke_root}/runtime_quiet_stdout.txt")
+set(runtime_smoke_quiet_stderr "${runtime_smoke_root}/runtime_quiet_stderr.txt")
+execute_process(
+  COMMAND "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_smoke_config}" --quiet
+  RESULT_VARIABLE runtime_quiet_result
+  OUTPUT_FILE "${runtime_smoke_quiet_stdout}"
+  ERROR_FILE "${runtime_smoke_quiet_stderr}"
+  TIMEOUT 30)
+if(NOT runtime_quiet_result EQUAL 0)
+  file(READ "${runtime_smoke_quiet_stderr}" runtime_quiet_err)
+  message(FATAL_ERROR "cosmosim_harness quiet runtime smoke failed: ${runtime_quiet_err}")
+endif()
+file(READ "${runtime_smoke_quiet_stdout}" runtime_quiet_out)
+foreach(quiet_record IN ITEMS
+    "[CHUI][START]" "[CHUI][STEP]" "[CHUI][SNAPSHOT]" "[CHUI][RESTART]"
+    "[CHUI][DONE]" "[CHUI][RUNTIME]" "[CHUI][PM]" "[CHUI][MEMORY]" "[CHUI][IC]")
+  string(FIND "${runtime_quiet_out}" "${quiet_record}" quiet_record_index)
+  if(NOT quiet_record_index EQUAL -1)
+    message(FATAL_ERROR "--quiet must suppress routine native CHUI console record ${quiet_record}")
+  endif()
+endforeach()
 
 # The smoke proves artifact creation above, then removes its temporary run tree
 # so ordinary CTest execution does not leave runtime products in the source package.

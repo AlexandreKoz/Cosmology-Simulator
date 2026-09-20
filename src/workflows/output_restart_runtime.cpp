@@ -1,5 +1,6 @@
 #include "cosmosim/workflows/output_restart_runtime.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
+#include "cosmosim/workflows/runtime_console_reporter.hpp"
 #include "cosmosim/workflows/analysis_runtime.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 
@@ -592,6 +593,12 @@ bool maybeWriteOutputs(
                     {"generation_id", generation_id},
                     {"verification", local_verification_detail}},
     });
+    if (services.console_reporter != nullptr) {
+      services.console_reporter->emitSnapshotCommitted(
+          integrator_state.step_index,
+          report.snapshot_path,
+          report.snapshot_set_path);
+    }
     output_flushed = true;
   }
 
@@ -791,6 +798,15 @@ bool maybeWriteOutputs(
                         restart_payload.output_cadence_state.next_snapshot_time_code)},
                     {"stochastic_module_count", std::to_string(restart_payload.stochastic_state.modules.size())}},
     });
+    if (services.console_reporter != nullptr) {
+      if (report.restart_roundtrip_ok) {
+        services.console_reporter->emitRestartCommitted(
+            integrator_state.step_index, report.restart_path);
+      } else {
+        services.console_reporter->emitWarning(
+            "io.restart", "restart checkpoint write/readback equivalence verification failed");
+      }
+    }
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "restart.read.complete",
         .severity = report.restart_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,

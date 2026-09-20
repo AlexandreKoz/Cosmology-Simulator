@@ -1,8 +1,14 @@
+#include <charconv>
+#include <cmath>
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include "cosmosim/cosmosim.hpp"
 #include "cosmosim/core/build_config.hpp"
@@ -21,9 +27,123 @@ void requireMpiSuccess(int result, const char* operation) {
 }
 #endif
 
-int printUsage(const char* argv0) {
-  std::cerr << "Usage: " << argv0 << " <config.param.txt>\n";
-  return 2;
+void printUsage(std::ostream& out, const char* argv0) {
+  out << "Usage: " << argv0 << " <config.param.txt> [options]\n"
+      << "\n"
+      << "Native CHUI console options:\n"
+      << "  --quiet                 Suppress routine [CHUI] informational records.\n"
+      << "  --status-every N        Emit a productive-step heartbeat every N steps\n"
+      << "                          (0 disables the step-count trigger; default 10).\n"
+      << "  --status-seconds SEC    Emit a heartbeat after SEC seconds without console\n"
+      << "                          output at a completed step boundary (0 disables; default 30).\n"
+      << "  -h, --help              Show this help.\n"
+      << "\n"
+      << "The simulation configuration remains authoritative; these flags affect only\n"
+      << "process-local console presentation.\n";
+}
+
+[[nodiscard]] std::uint64_t parseUnsigned(
+    std::string_view text,
+    std::string_view option_name) {
+  std::uint64_t value = 0U;
+  const char* begin = text.data();
+  const char* end = text.data() + text.size();
+  const auto result = std::from_chars(begin, end, value, 10);
+  if (text.empty() || result.ec != std::errc{} || result.ptr != end) {
+    throw std::invalid_argument(
+        std::string(option_name) + " requires a non-negative integer, got '" +
+        std::string(text) + "'");
+  }
+  return value;
+}
+
+[[nodiscard]] double parseNonNegativeDouble(
+    std::string_view text,
+    std::string_view option_name) {
+  if (text.empty()) {
+    throw std::invalid_argument(std::string(option_name) + " requires a value");
+  }
+  std::size_t parsed = 0U;
+  double value = 0.0;
+  try {
+    value = std::stod(std::string(text), &parsed);
+  } catch (const std::exception&) {
+    throw std::invalid_argument(
+        std::string(option_name) + " requires a non-negative finite number, got '" +
+        std::string(text) + "'");
+  }
+  if (parsed != text.size() || !std::isfinite(value) || value < 0.0) {
+    throw std::invalid_argument(
+        std::string(option_name) + " requires a non-negative finite number, got '" +
+        std::string(text) + "'");
+  }
+  return value;
+}
+
+struct HarnessCliOptions {
+  std::filesystem::path config_path;
+  cosmosim::workflows::RuntimeConsoleOptions console;
+  bool help = false;
+};
+
+[[nodiscard]] HarnessCliOptions parseHarnessCli(int argc, char** argv) {
+  HarnessCliOptions parsed;
+  parsed.console.enabled = true;
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view arg(argv[i]);
+    if (arg == "-h" || arg == "--help") {
+      parsed.help = true;
+      continue;
+    }
+    if (arg == "--quiet") {
+      parsed.console.quiet = true;
+      continue;
+    }
+    if (arg == "--status-every") {
+      if (i + 1 >= argc) {
+        throw std::invalid_argument("--status-every requires N");
+      }
+      parsed.console.status_every_steps = parseUnsigned(argv[++i], "--status-every");
+      continue;
+    }
+    if (arg.starts_with("--status-every=")) {
+      parsed.console.status_every_steps = parseUnsigned(
+          arg.substr(std::string_view("--status-every=").size()),
+          "--status-every");
+      continue;
+    }
+    if (arg == "--status-seconds") {
+      if (i + 1 >= argc) {
+        throw std::invalid_argument("--status-seconds requires SEC");
+      }
+      parsed.console.status_seconds = parseNonNegativeDouble(argv[++i], "--status-seconds");
+      continue;
+    }
+    if (arg.starts_with("--status-seconds=")) {
+      parsed.console.status_seconds = parseNonNegativeDouble(
+          arg.substr(std::string_view("--status-seconds=").size()),
+          "--status-seconds");
+      continue;
+    }
+    if (!arg.empty() && arg.front() == '-') {
+      throw std::invalid_argument("unknown cosmosim_harness option: " + std::string(arg));
+    }
+    if (!parsed.config_path.empty()) {
+      throw std::invalid_argument(
+          "cosmosim_harness accepts exactly one config path; unexpected positional argument: " +
+          std::string(arg));
+    }
+    parsed.config_path = std::filesystem::path(arg);
+  }
+
+  if (!parsed.help && parsed.config_path.empty()) {
+    throw std::invalid_argument("missing required <config.param.txt> path");
+  }
+  if (!parsed.config_path.empty()) {
+    parsed.console.config_path = parsed.config_path.string();
+  }
+  return parsed;
 }
 
 class ExecutableMpiSession {
@@ -58,9 +178,9 @@ class ExecutableMpiSession {
           << MPI_THREAD_FUNNELED << "), provided=" << m_thread_level << ", rank=" << m_world_rank << '/'
           << m_world_size;
       if (m_owns_finalize) {
-        int finalized = 0;
-        requireMpiSuccess(MPI_Finalized(&finalized), "MPI_Finalized");
-        if (finalized == 0) {
+        int finalized_after_init = 0;
+        requireMpiSuccess(MPI_Finalized(&finalized_after_init), "MPI_Finalized");
+        if (finalized_after_init == 0) {
           requireMpiSuccess(MPI_Finalize(), "MPI_Finalize");
         }
       }
@@ -89,6 +209,7 @@ class ExecutableMpiSession {
 
   [[nodiscard]] int worldSize() const noexcept { return m_world_size; }
   [[nodiscard]] int worldRank() const noexcept { return m_world_rank; }
+  [[nodiscard]] bool isRoot() const noexcept { return m_world_rank == 0; }
 
   [[nodiscard]] std::string rankPrefix() const {
     std::ostringstream out;
@@ -154,38 +275,42 @@ int main(int argc, char** argv) {
   try {
     ExecutableMpiSession mpi_session(&argc, &argv);
 
-    if (argc != 2) {
-      const int error_code = printUsage(argc > 0 ? argv[0] : "cosmosim_harness");
-      mpi_session.abortDistributed(error_code);
-      return error_code;
+    HarnessCliOptions cli;
+    try {
+      cli = parseHarnessCli(argc, argv);
+    } catch (const std::exception& ex) {
+      if (mpi_session.isRoot()) {
+        std::cerr << "[CHUI][FATAL] " << ex.what() << "\n\n";
+        printUsage(std::cerr, argc > 0 ? argv[0] : "cosmosim_harness");
+      }
+      mpi_session.abortDistributed(2);
+      return 2;
+    }
+
+    if (cli.help) {
+      if (mpi_session.isRoot()) {
+        printUsage(std::cout, argc > 0 ? argv[0] : "cosmosim_harness");
+      }
+      return 0;
     }
 
     try {
-      const std::filesystem::path config_path = argv[1];
-      const cosmosim::core::FrozenConfig frozen = cosmosim::core::loadFrozenConfigFromFile(config_path, {});
+      const cosmosim::core::FrozenConfig frozen =
+          cosmosim::core::loadFrozenConfigFromFile(cli.config_path, {});
       cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
-      const cosmosim::workflows::ReferenceWorkflowReport report = runner.run();
-
-      std::cout << cosmosim::core::projectName() << ' ' << cosmosim::core::versionString() << '\n';
-      std::cout << "config=" << config_path.string() << '\n';
-      std::cout << "run_directory=" << report.run_directory.string() << '\n';
-      std::cout << "completed_steps=" << report.completed_steps << '\n';
-      std::cout << "normalized_config=" << report.normalized_config_snapshot_path.string() << '\n';
-      std::cout << "operational_report=" << report.operational_report_json_path.string() << '\n';
-      if (!report.snapshot_path.empty()) {
-        std::cout << "last_snapshot=" << report.snapshot_path.string() << '\n';
-      }
-      if (!report.restart_path.empty()) {
-        std::cout << "last_restart=" << report.restart_path.string() << '\n';
-      }
+      cosmosim::workflows::ReferenceWorkflowOptions workflow_options;
+      workflow_options.console = cli.console;
+      static_cast<void>(runner.run(workflow_options));
       return 0;
     } catch (const std::exception& ex) {
-      std::cerr << "cosmosim runtime failed [" << mpi_session.rankPrefix() << "]: " << ex.what() << '\n';
+      std::cerr << "[CHUI][FATAL] " << mpi_session.rankPrefix()
+                << " message=" << ex.what() << '\n';
       mpi_session.abortDistributed(1);
       return 1;
     }
   } catch (const std::exception& ex) {
-    std::cerr << "cosmosim runtime failed [" << currentRankPrefix() << "]: " << ex.what() << '\n';
+    std::cerr << "[CHUI][FATAL] " << currentRankPrefix()
+              << " message=" << ex.what() << '\n';
     abortCurrentMpiWorldIfDistributed(1);
     return 1;
   }
