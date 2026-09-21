@@ -29,6 +29,7 @@ struct RuntimeConsoleOptions {
 struct RuntimeConsoleStartupStatus {
   std::string run_name;
   std::filesystem::path run_directory;
+  std::filesystem::path rank_directory;
   std::string simulation_mode;
   int mpi_world_size = 1;
   bool openmp_compiled = false;
@@ -113,7 +114,8 @@ class RuntimeConsoleReporter final {
   void emitSnapshotCommitted(
       std::uint64_t step_index,
       const std::filesystem::path& member_path,
-      const std::filesystem::path& set_path);
+      const std::filesystem::path& set_path,
+      std::uint32_t member_count);
   void emitRestartCommitted(
       std::uint64_t step_index,
       const std::filesystem::path& restart_path);
@@ -124,6 +126,7 @@ class RuntimeConsoleReporter final {
       std::optional<double> final_scale_factor,
       std::optional<double> final_redshift,
       const std::filesystem::path& run_directory,
+      const std::filesystem::path& rank_directory,
       const std::filesystem::path& normalized_config_path,
       const std::filesystem::path& operational_report_path);
 

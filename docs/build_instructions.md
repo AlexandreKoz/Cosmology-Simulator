@@ -50,21 +50,21 @@ After building one runnable preset, use:
 ./chui run configs/chui_firstlight_32_smoke.param.txt
 ```
 
-If multiple preset build trees contain `cosmosim_harness`, the launcher fails with the available choices rather than executing an arbitrary binary. Select one deterministically with `--preset`, or bypass preset discovery with `--exe`:
+If multiple preset build trees contain `cosmosim_harness`, the launcher fails with the available choices rather than executing an arbitrary binary. Select one deterministically with `--preset`, or bypass preset discovery with `--exe`. For non-quiet launches, a single `[CHUI][LAUNCH]` line records the selected executable, build directory, serial/MPI mode, and requested rank count before `exec` replaces the wrapper process:
 
 ```bash
 ./chui run CONFIG --preset pm-hdf5-fftw-debug
 ./chui run CONFIG --exe /absolute/path/to/cosmosim_harness
 ```
 
-For MPI runs, `--mpi N` prepends the MPI launcher recorded in the selected build's `CMakeCache.txt` when available, otherwise it uses `mpiexec`/`mpirun` from `PATH`. It does not inspect or rewrite `parallel.mpi_ranks_expected`; the authoritative runtime still validates communicator size before expensive simulation work. Arguments after `--` are passed to the MPI launcher:
+For MPI runs, `--mpi N` prepends the MPI launcher recorded in the selected build's `CMakeCache.txt` when available, otherwise it uses `mpiexec`/`mpirun` from `PATH`. If the selected build metadata explicitly says `COSMOSIM_ENABLE_MPI=OFF`, the launcher fails instead of starting multiple independent serial processes. It does not inspect or rewrite `parallel.mpi_ranks_expected`; the authoritative runtime still validates communicator size before expensive simulation work. Arguments after `--` are passed to the MPI launcher:
 
 ```bash
 ./chui run CONFIG --preset mpi-hdf5-fftw-release --mpi 8
 ./chui run CONFIG --preset mpi-hdf5-fftw-debug --mpi 2 -- --bind-to core
 ```
 
-Native progress reporting is owned by the C++ runtime, not the launcher. The default direct harness and launcher paths emit bounded rank-0 status. Presentation controls are:
+Native progress reporting is owned by the C++ runtime, not the launcher. The default direct harness and launcher paths emit bounded rank-0 status. Under MPI, `run_directory` is the shared/logical run location while `rank_directory` identifies rank 0's rank-local artifacts. A committed snapshot line reports the logical member count and `.complete` manifest; the rank-0 member is labeled explicitly rather than being presented as the complete snapshot. Presentation controls are:
 
 ```text
 --quiet

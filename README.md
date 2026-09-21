@@ -85,21 +85,21 @@ The external monofonIC file is **not** bundled with the repository. After supply
 ./chui run configs/chui_firstlight_32_smoke.param.txt
 ```
 
-If more than one runnable preset build exists, the launcher deliberately refuses to guess. Select the intended build explicitly:
+If more than one runnable preset build exists, the launcher deliberately refuses to guess. Select the intended build explicitly. Unless `--quiet` is used, `[CHUI][LAUNCH]` records the selected executable, build directory, launch mode, and requested MPI rank count before process replacement:
 
 ```bash
 ./chui run configs/chui_firstlight_32_smoke.param.txt \
   --preset pm-hdf5-fftw-debug
 ```
 
-The runtime now emits compact rank-0 native status records such as `[CHUI][START]`, `[CHUI][IC]`, `[CHUI][STEP]`, `[CHUI][SNAPSHOT]`, `[CHUI][RESTART]`, and `[CHUI][DONE]`. Console cadence is presentation-only and can be controlled without changing the scientific configuration:
+The runtime now emits compact rank-0 native status records such as `[CHUI][START]`, `[CHUI][IC]`, `[CHUI][STEP]`, `[CHUI][SNAPSHOT]`, `[CHUI][RESTART]`, and `[CHUI][DONE]`. In MPI runs, startup/completion identify the logical shared `run_directory` separately from rank 0's `rank_directory`, and snapshot success reports the committed logical set (`members` + `.complete` manifest) rather than presenting `.0.hdf5` as the whole snapshot. Console cadence is presentation-only and can be controlled without changing the scientific configuration:
 
 ```bash
 ./chui run configs/chui_firstlight_32_smoke.param.txt --status-every 5 --status-seconds 20
 ./chui run configs/chui_firstlight_32_smoke.param.txt --quiet
 ```
 
-For distributed qualification, use the documented `mpi-hdf5-fftw-*` presets only on a machine with MPI, HDF5, FFTW, and FFTW-MPI development support. The launcher provides the MPI convenience form without rewriting the `.param.txt` contract:
+For distributed qualification, use the documented `mpi-hdf5-fftw-*` presets only on a machine with MPI, HDF5, FFTW, and FFTW-MPI development support. The launcher provides the MPI convenience form without rewriting the `.param.txt` contract and rejects a selected build when its CMake cache explicitly records `COSMOSIM_ENABLE_MPI=OFF`:
 
 ```bash
 ./chui run configs/production.param.txt --preset mpi-hdf5-fftw-release --mpi 8

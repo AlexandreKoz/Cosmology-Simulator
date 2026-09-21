@@ -271,6 +271,18 @@ def _cmake_cache_value(build_dir: Path, key: str) -> str | None:
     return None
 
 
+def _cmake_cache_bool(build_dir: Path, key: str) -> bool | None:
+    value = _cmake_cache_value(build_dir, key)
+    if value is None:
+        return None
+    normalized = value.strip().upper()
+    if normalized in {"1", "ON", "TRUE", "YES", "Y"}:
+        return True
+    if normalized in {"0", "OFF", "FALSE", "NO", "N"}:
+        return False
+    return None
+
+
 def _mpi_launcher(build_dir: Path) -> tuple[str, str]:
     executable = _cmake_cache_value(build_dir, "MPIEXEC_EXECUTABLE")
     if executable and Path(executable).is_file():
@@ -297,6 +309,28 @@ def _harness_console_args(args: argparse.Namespace) -> list[str]:
     return result
 
 
+def _emit_launch_provenance(
+    args: argparse.Namespace, executable: Path, build_dir: Path
+) -> None:
+    if args.quiet:
+        return
+    selection = (
+        f"preset:{args.preset}"
+        if args.preset
+        else ("explicit_exe" if args.exe else "auto_discovery")
+    )
+    mode = "mpi" if args.mpi is not None else "serial"
+    fields = [
+        f"selection={selection}",
+        f"executable={json.dumps(str(executable))}",
+        f"build_directory={json.dumps(str(build_dir))}",
+        f"mode={mode}",
+    ]
+    if args.mpi is not None:
+        fields.append(f"mpi_ranks={args.mpi}")
+    print("[CHUI][LAUNCH] " + " ".join(fields), flush=True)
+
+
 def _run(args: argparse.Namespace, mpi_passthrough: list[str]) -> int:
     if os.name != "posix":
         raise LauncherError(
@@ -312,8 +346,16 @@ def _run(args: argparse.Namespace, mpi_passthrough: list[str]) -> int:
             raise LauncherError("arguments after '--' are MPI-launcher arguments and require --mpi N")
         command = harness_args
     else:
+        mpi_enabled = _cmake_cache_bool(build_dir, "COSMOSIM_ENABLE_MPI")
+        if mpi_enabled is False:
+            raise LauncherError(
+                "--mpi was requested for a build whose CMake cache has "
+                "COSMOSIM_ENABLE_MPI=OFF. Select an MPI-enabled preset/build."
+            )
         mpi_exec, numproc_flag = _mpi_launcher(build_dir)
         command = [mpi_exec, *mpi_passthrough, numproc_flag, str(args.mpi), *harness_args]
+
+    _emit_launch_provenance(args, executable, build_dir)
 
     # Process replacement preserves the child/MPI exit status and delivers
     # SIGINT/SIGTERM directly to the actual runtime/launcher rather than

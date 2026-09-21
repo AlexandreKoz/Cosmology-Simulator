@@ -34,14 +34,16 @@ The stable informational prefixes are `[CHUI][START]`, `[CHUI][IC]`, `[CHUI][RUN
 
 Step cadence is operational presentation state, not scientific/restart state. The harness defaults to every 10 productive global steps and/or roughly 30 seconds of console silence; `--status-every N` and `--status-seconds SEC` override those triggers, and `--quiet` suppresses normal informational chatter. The step record reuses the global active/total counts already reduced by the productive rung-zero algorithm and the memory report already built at the step boundary. It does not add a presentation-only per-step MPI collective.
 
-Snapshot and restart success messages are emitted from `OutputRestartRuntime` only after the existing write/readback/validation completion boundary succeeds. The legacy `COSMOSIM_RUNTIME_PHASE_DIAGNOSTICS` / `runtime_phase=...` stream remains separate and unchanged for narrow external diagnostics; native human-facing status does not replace that interface.
+Snapshot and restart success messages are emitted from `OutputRestartRuntime` only after the existing write/readback/validation completion boundary succeeds. Snapshot console records expose the logical set member count and completion manifest; in MPI mode the root member is labeled `rank0_member` rather than being presented as the full set. Restart verification is collectively agreed after every rank completes its local write/readback equivalence check before rank 0 may emit `[CHUI][RESTART]`. This checkpoint-verification collective is part of distributed I/O correctness, not presentation cadence. The legacy `COSMOSIM_RUNTIME_PHASE_DIAGNOSTICS` / `runtime_phase=...` stream remains separate and unchanged for narrow external diagnostics; native human-facing status does not replace that interface.
 
 ## Runtime contract
 
-The run directory is:
+The logical/shared run directory is:
 
 - `<output.output_directory>/<output.run_name>` in normal CLI usage.
 - `<override_root>/<output.run_name>` only for tests/benchmarks that intentionally override the output root.
+
+For multi-rank execution, rank-local provenance/profile/restart artifacts remain under `<logical_run_directory>_rankNNN`. Human-facing `[CHUI][START]` and `[CHUI][DONE]` therefore report the shared path as `run_directory` and, when different, rank 0's local path as `rank_directory`. This is a presentation/interface clarification only; no output naming or schema changes are introduced.
 
 The runner honors these config fields directly:
 

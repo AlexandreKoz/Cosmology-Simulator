@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -597,7 +598,9 @@ bool maybeWriteOutputs(
       services.console_reporter->emitSnapshotCommitted(
           integrator_state.step_index,
           report.snapshot_path,
-          report.snapshot_set_path);
+          report.snapshot_set_path,
+          core::checkedIntegralNarrow<std::uint32_t>(
+              topology.world_size, "snapshot console member count"));
     }
     output_flushed = true;
   }
@@ -727,12 +730,21 @@ bool maybeWriteOutputs(
         restart_payload.distributed_gravity_state.long_range_restart_policy;
 
     report.restart_path = report.run_directory / formatIndexedRankedFileStem(config.output.restart_stem, integrator_state.step_index, gravity_state.runtimeTopology().world_size, gravity_state.runtimeTopology().world_rank);
-    io::writeRestartCheckpointHdf5(report.restart_path, restart_payload,
-        io::RestartWritePolicy{.memory_governor = services.memory_governor});
-    report.restart_roundtrip_executed = true;
-    const io::RestartReadResult restart_read = io::readRestartCheckpointHdf5(
-        report.restart_path,
-        io::RestartReadPolicy{.memory_governor = services.memory_governor});
+    std::optional<io::RestartReadResult> restart_read_result;
+    std::exception_ptr restart_io_failure;
+    try {
+      io::writeRestartCheckpointHdf5(report.restart_path, restart_payload,
+          io::RestartWritePolicy{.memory_governor = services.memory_governor});
+      report.restart_roundtrip_executed = true;
+      restart_read_result.emplace(io::readRestartCheckpointHdf5(
+          report.restart_path,
+          io::RestartReadPolicy{.memory_governor = services.memory_governor}));
+    } catch (...) {
+      restart_io_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        restart_io_failure, "restart checkpoint write/readback");
+    const io::RestartReadResult& restart_read = *restart_read_result;
     const auto compatibility = parallel::evaluateDistributedRestartCompatibility(
         restart_read.distributed_gravity_state,
         gravity_state.runtimeTopology());
@@ -775,6 +787,12 @@ bool maybeWriteOutputs(
         stochasticStatesEquivalent(restart_read.stochastic_state, restart_payload.stochastic_state) &&
         restart_rank_qualified_name &&
         compatibility.compatible();
+    // A distributed checkpoint is only verified when every rank's local
+    // write/readback equivalence succeeds.  This collective belongs to the
+    // checkpoint verification boundary, not to console presentation.
+    const std::uint64_t restart_verification_failed_ranks =
+        FailureCoordinator(services).failedRankCount(!report.restart_roundtrip_ok);
+    report.restart_roundtrip_ok = restart_verification_failed_ranks == 0U;
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "restart.write.complete",
         .severity = report.restart_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,
@@ -796,7 +814,8 @@ bool maybeWriteOutputs(
                     {"output_next_snapshot_step_index", std::to_string(restart_payload.output_cadence_state.next_snapshot_step_index)},
                     {"output_next_snapshot_time_code", formatRuntimeDouble(
                         restart_payload.output_cadence_state.next_snapshot_time_code)},
-                    {"stochastic_module_count", std::to_string(restart_payload.stochastic_state.modules.size())}},
+                    {"stochastic_module_count", std::to_string(restart_payload.stochastic_state.modules.size())},
+                    {"verification_failed_ranks", std::to_string(restart_verification_failed_ranks)}},
     });
     if (services.console_reporter != nullptr) {
       if (report.restart_roundtrip_ok) {

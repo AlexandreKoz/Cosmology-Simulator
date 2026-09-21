@@ -788,7 +788,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
 
     RuntimeConsoleStartupStatus startup_status;
     startup_status.run_name = config.output.run_name;
-    startup_status.run_directory = report.run_directory;
+    startup_status.run_directory = report.shared_run_directory;
+    startup_status.rank_directory = report.run_directory;
     startup_status.simulation_mode = core::modeToString(config.mode.mode);
     startup_status.mpi_world_size = mpi_context.worldSize();
     startup_status.openmp_compiled = omp_runtime.compiled;
@@ -954,6 +955,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
             ? std::optional<double>(report.final_scale_factor)
             : std::nullopt,
         consoleRedshift(mode_policy.cosmological_comoving_frame, report.final_scale_factor),
+        report.shared_run_directory,
         report.run_directory,
         report.normalized_config_snapshot_path,
         report.operational_report_json_path);

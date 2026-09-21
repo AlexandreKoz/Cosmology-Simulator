@@ -107,8 +107,10 @@ bool RuntimeConsoleReporter::shouldEmitStepForCadence(
   if (!last_emitted_step.has_value()) {
     return true;
   }
+  if (step_index <= *last_emitted_step) {
+    return false;
+  }
   const bool step_due = step_trigger_enabled &&
-      step_index >= *last_emitted_step &&
       step_index - *last_emitted_step >= status_every_steps;
   const bool time_due = time_trigger_enabled &&
       std::isfinite(seconds_since_last_output) &&
@@ -159,8 +161,11 @@ void RuntimeConsoleReporter::emitStartup(
           << " version=" << core::versionString()
           << " config=" << std::quoted(m_options.config_path)
           << " run_name=" << std::quoted(status.run_name)
-          << " run_directory=" << std::quoted(status.run_directory.string())
-          << " mode=" << status.simulation_mode
+          << " run_directory=" << std::quoted(status.run_directory.string());
+  if (!status.rank_directory.empty() && status.rank_directory != status.run_directory) {
+    payload << " rank_directory=" << std::quoted(status.rank_directory.string());
+  }
+  payload << " mode=" << status.simulation_mode
           << " mpi_ranks=" << status.mpi_world_size
           << " openmp_compiled=" << (status.openmp_compiled ? "true" : "false")
           << " openmp_threads=" << status.openmp_threads
@@ -289,15 +294,21 @@ void RuntimeConsoleReporter::emitDecomposition(
 void RuntimeConsoleReporter::emitSnapshotCommitted(
     std::uint64_t step_index,
     const std::filesystem::path& member_path,
-    const std::filesystem::path& set_path) {
+    const std::filesystem::path& set_path,
+    std::uint32_t member_count) {
   if (!informationEnabled()) {
     return;
   }
   std::ostringstream payload;
   payload << "step=" << step_index
-          << " status=committed"
-          << " member=" << std::quoted(member_path.string())
-          << " set=" << std::quoted(set_path.string());
+          << " state=committed"
+          << " members=" << member_count
+          << " manifest=" << std::quoted(set_path.string());
+  if (member_count <= 1U) {
+    payload << " file=" << std::quoted(member_path.string());
+  } else {
+    payload << " rank0_member=" << std::quoted(member_path.string());
+  }
   emitInfoLine("SNAPSHOT", payload.str());
 }
 
@@ -331,6 +342,7 @@ void RuntimeConsoleReporter::emitDone(
     std::optional<double> final_scale_factor,
     std::optional<double> final_redshift,
     const std::filesystem::path& run_directory,
+    const std::filesystem::path& rank_directory,
     const std::filesystem::path& normalized_config_path,
     const std::filesystem::path& operational_report_path) {
   if (!informationEnabled()) {
@@ -344,8 +356,11 @@ void RuntimeConsoleReporter::emitDone(
             << " final_z=" << optionalDouble(final_redshift);
   }
   payload << " wall_total_s=" << formatSeconds(secondsSince(m_start_time))
-          << " run_directory=" << std::quoted(run_directory.string())
-          << " normalized_config=" << std::quoted(normalized_config_path.string())
+          << " run_directory=" << std::quoted(run_directory.string());
+  if (!rank_directory.empty() && rank_directory != run_directory) {
+    payload << " rank_directory=" << std::quoted(rank_directory.string());
+  }
+  payload << " normalized_config=" << std::quoted(normalized_config_path.string())
           << " operational_report=" << std::quoted(operational_report_path.string());
   emitInfoLine("DONE", payload.str());
 }

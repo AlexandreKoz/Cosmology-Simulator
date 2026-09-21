@@ -48,6 +48,9 @@ int main() {
   require(
       RuntimeConsoleReporter::shouldEmitStepForCadence(2U, 1U, 10U, 31.0, 30.0),
       "wall-time cadence should fire after maximum silence");
+  require(
+      !RuntimeConsoleReporter::shouldEmitStepForCadence(1U, 1U, 1U, 31.0, 30.0),
+      "the same productive boundary must not emit twice");
 
   std::ostringstream info;
   std::ostringstream diag;
@@ -61,6 +64,7 @@ int main() {
   RuntimeConsoleStartupStatus noncosmo;
   noncosmo.run_name = "isolated";
   noncosmo.run_directory = "outputs/isolated";
+  noncosmo.rank_directory = "outputs/isolated_rank000";
   noncosmo.simulation_mode = "isolated_galaxy";
   noncosmo.global_particle_count = 4U;
   noncosmo.t_code = 0.0;
@@ -70,6 +74,10 @@ int main() {
           "startup record should be emitted on rank zero");
   require(info.str().find(" z=") == std::string::npos,
           "non-cosmological startup must not fabricate redshift");
+  require(info.str().find("run_directory=\"outputs/isolated\"") != std::string::npos,
+          "startup should report the logical run directory");
+  require(info.str().find("rank_directory=\"outputs/isolated_rank000\"") != std::string::npos,
+          "startup should distinguish the rank-local artifact directory");
 
   RuntimeConsoleStepStatus step;
   step.step_index = 1U;
@@ -88,6 +96,29 @@ int main() {
           "cosmological step should print finite a/z");
   require(countOccurrences(info.str(), "[CHUI][STEP]") == 1U,
           "one boundary must emit at most one step record");
+
+  reporter.emitSnapshotCommitted(
+      1U, "outputs/isolated/snapshots/snap_001.0.hdf5",
+      "outputs/isolated/snapshots/snap_001.complete", 2U);
+  require(info.str().find("[CHUI][SNAPSHOT] step=1 state=committed members=2") !=
+              std::string::npos,
+          "snapshot record should expose logical-set member count");
+  require(info.str().find("manifest=\"outputs/isolated/snapshots/snap_001.complete\"") !=
+              std::string::npos,
+          "snapshot record should expose the transactional completion manifest");
+  require(info.str().find("rank0_member=\"outputs/isolated/snapshots/snap_001.0.hdf5\"") !=
+              std::string::npos,
+          "multi-rank snapshot record should label rank-zero member explicitly");
+
+  reporter.emitDone(
+      1U, 0.1, std::nullopt, std::nullopt,
+      "outputs/isolated", "outputs/isolated_rank000",
+      "outputs/isolated_rank000/normalized_config.param.txt",
+      "outputs/isolated_rank000/operational_events.json");
+  require(info.str().find("[CHUI][DONE]") != std::string::npos,
+          "completion record should be emitted");
+  require(info.str().find("run_directory=\"outputs/isolated\"") != std::string::npos,
+          "completion should retain logical run-directory truth");
 
   std::ostringstream quiet_info;
   std::ostringstream quiet_diag;
