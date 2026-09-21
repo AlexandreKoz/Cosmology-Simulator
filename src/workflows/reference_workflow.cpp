@@ -846,6 +846,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         mode_policy,
         restoring_from_restart);
     traceRuntimePhase("time_coordinator_complete");
+    runtime_composition.output_restart->ensureFinalEndpointSnapshot(
+        state, integrator_state);
     runtime_composition.analysis->finalizePending(
         integrator_state.step_index, integrator_state.current_time_code,
         integrator_state.current_scale_factor);

@@ -1515,11 +1515,18 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[output]\n"
       "snapshot_interval_steps = 0\n"
-      "snapshot_interval_time_code = 0.125\n",
+      "snapshot_interval_time_code = 0.125\n"
+      "snapshot_layout = single\n"
+      "snapshot_num_files = 0\n",
       "output_code_time_cadence");
   assert(frozen.config.output.snapshot_interval_steps == 0);
   assert(frozen.config.output.snapshot_interval_time_code == 0.125);
+  assert(frozen.config.output.snapshot_layout ==
+         cosmosim::core::ScienceSnapshotLayout::kSingle);
+  assert(frozen.config.output.snapshot_num_files == 0U);
   assert(frozen.normalized_text.find("snapshot_interval_time_code = 0.125") !=
+         std::string::npos);
+  assert(frozen.normalized_text.find("snapshot_layout = single") !=
          std::string::npos);
   const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
       frozen.normalized_text, "output_code_time_cadence_roundtrip");
@@ -1538,6 +1545,27 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
     }
     assert(rejected);
   }
+
+  bool invalid_single_count_rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[mode]\nmode = zoom_in\n[output]\n"
+        "snapshot_layout = single\n"
+        "snapshot_num_files = 2\n",
+        "invalid_single_snapshot_file_count");
+  } catch (const cosmosim::core::ConfigError&) {
+    invalid_single_count_rejected = true;
+  }
+  assert(invalid_single_count_rejected);
+
+  const auto aggregated = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[output]\n"
+      "snapshot_layout = aggregated\n"
+      "snapshot_num_files = 8\n",
+      "aggregated_snapshot_contract");
+  assert(aggregated.config.output.snapshot_layout ==
+         cosmosim::core::ScienceSnapshotLayout::kAggregated);
+  assert(aggregated.config.output.snapshot_num_files == 8U);
 }
 
 }  // namespace

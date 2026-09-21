@@ -718,7 +718,9 @@ void testMassTableFallbackSnapshotImport() {
 
   const std::array<double, 6> coords = {0.0, 0.1, 0.2, 1.0, 1.1, 1.2};
   const std::array<double, 6> vels = {10.0, 11.0, 12.0, 20.0, 21.0, 22.0};
-  const std::array<std::uint64_t, 2> ids = {101, 102};
+  // Deliberately shuffled zero-based IDs: identity-domain normalization must
+  // not depend on storage-row order.
+  const std::array<std::uint64_t, 2> ids = {1, 0};
   hsize_t coords_dims[2] = {2, 3};
   hid_t coords_space = H5Screate_simple(2, coords_dims, nullptr);
   assert(coords_space >= 0);
@@ -754,6 +756,11 @@ void testMassTableFallbackSnapshotImport() {
   assert(imported.state.particles.size() == 2);
   assert(imported.state.particles.mass_code[0] == 5.0);
   assert(imported.state.particles.mass_code[1] == 5.0);
+  assert(imported.state.particle_sidecar.particle_id[0] == 2U);
+  assert(imported.state.particle_sidecar.particle_id[1] == 1U);
+  assert(containsString(
+      imported.report.present_aliases,
+      "external_id_mapping=zero_present_plus_one_v1"));
   assert(containsString(imported.report.defaulted_fields, "/PartType1/Masses=MassTable"));
   std::filesystem::remove(snapshot_path);
 #else
@@ -832,6 +839,76 @@ void testPersistentIdAndMissingFieldContracts() {
   assert(unavailable.report.analysis_ready);
   assert(!unavailable.report.evolution_ready);
   std::filesystem::remove(path);
+#endif
+}
+
+void testSingleFileDistributedReadbackCompletionContract() {
+#if COSMOSIM_ENABLE_HDF5
+  auto config = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
+  config.output.run_name = "snapshot_single_completion_contract";
+  config.cosmology.box_size_x_mpc_comoving = 10.0;
+  config.cosmology.box_size_y_mpc_comoving = 10.0;
+  config.cosmology.box_size_z_mpc_comoving = 10.0;
+  config.cosmology.box_size_mpc_comoving = 10.0;
+
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(3U);
+  state.metadata.scale_factor = 0.5;
+  for (std::size_t row = 0; row < state.particles.size(); ++row) {
+    state.particles.position_x_comoving[row] = 1.0 + row;
+    state.particles.position_y_comoving[row] = 2.0 + row;
+    state.particles.position_z_comoving[row] = 3.0 + row;
+    state.particles.mass_code[row] = 2.5;
+    state.particle_sidecar.particle_id[row] = 10U + row;
+    state.particle_sidecar.species_tag[row] =
+        static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
+  }
+  state.species.count_by_species[
+      static_cast<std::size_t>(cosmosim::core::ParticleSpecies::kDarkMatter)] = 3U;
+  state.rebuildSpeciesIndex();
+
+  const std::filesystem::path directory =
+      cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath(
+          "cosmosim_snapshot_single_completion_contract");
+  std::filesystem::remove_all(directory);
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path snapshot = directory / "snap_043.hdf5";
+  const std::array<std::uint64_t, 6> global_counts = {0U, 3U, 0U, 0U, 0U, 0U};
+
+  cosmosim::io::SnapshotWritePayload payload;
+  payload.state = &state;
+  payload.config = &config;
+  payload.normalized_config_text = "schema_version=1\nmode=cosmo_cube\n";
+  payload.provenance = cosmosim::core::makeProvenanceRecord(
+      "snapshot_single_hash", "snapshot_single_sha", 0,
+      payload.normalized_config_text);
+  payload.set_member.member_index = 0U;
+  payload.set_member.num_files_per_snapshot = 1U;
+  payload.set_member.global_part_count = global_counts;
+  payload.set_member.has_global_part_count = true;
+  payload.set_member.generation_id = "snap_043";
+  cosmosim::io::writeScienceSnapshotHdf5(snapshot, payload);
+
+  cosmosim::io::writeSnapshotSetCompletionMarker(
+      snapshot, "snap_043", 1U, global_counts, false,
+      cosmosim::io::SnapshotCompletionIntegrityMode::kDistributedScienceReadback);
+  const std::filesystem::path marker = directory / "snap_043.complete";
+  const auto complete = cosmosim::io::inspectSnapshotSet(marker);
+  assert(complete.complete);
+  assert(complete.num_files_per_snapshot == 1U);
+  assert(complete.member_paths.size() == 1U);
+  assert(complete.member_paths.front().filename() == "snap_043.hdf5");
+  cosmosim::io::validateSnapshotSetHdf5(marker).requireValid();
+
+  // Production Parallel-HDF5 output has already compared every rank-owned ID
+  // against the authoritative runtime partition. The post-publication root
+  // validator must therefore be able to retain structural/scientific checks
+  // without allocating an O(N_global) ID uniqueness buffer.
+  cosmosim::io::SnapshotReadOptions bounded_validation;
+  bounded_validation.validate_global_id_uniqueness = false;
+  bounded_validation.budget.max_validation_id_bytes = 0U;
+  cosmosim::io::validateSnapshotSetHdf5(marker, bounded_validation).requireValid();
+  std::filesystem::remove_all(directory);
 #endif
 }
 
@@ -978,6 +1055,7 @@ int main() {
   testRoundtripMixedSpeciesSnapshot();
   testMassTableFallbackSnapshotImport();
   testPersistentIdAndMissingFieldContracts();
+  testSingleFileDistributedReadbackCompletionContract();
   testSnapshotSetCompletionContract();
   return 0;
 }

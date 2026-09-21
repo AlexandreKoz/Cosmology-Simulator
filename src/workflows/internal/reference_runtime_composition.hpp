@@ -32,6 +32,7 @@ struct RuntimeServices;
 
 namespace internal {
 struct PendingOutputBoundary;
+class OutputRestartRuntime;
 
 struct ReferenceRuntimeCompositionInputs {
   const core::FrozenConfig& frozen_config;
@@ -59,6 +60,7 @@ struct ReferenceRuntimeComposition {
   std::shared_ptr<GravityRuntime> gravity;
   std::shared_ptr<HydroAmrRuntime> hydro_amr;
   std::shared_ptr<SourceRuntime> source;
+  std::shared_ptr<OutputRestartRuntime> output_restart;
   std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table;
   RuntimeExecutionPlan execution_plan;
 };

@@ -14,6 +14,20 @@
 
 namespace cosmosim::io::distributed_audit_internal {
 
+struct SpeciesMassAuditResult {
+  double source_mass = 0.0;
+  double final_mass = 0.0;
+  double absolute_delta = 0.0;
+  double relative_delta = 0.0;
+  double tolerance = 0.0;
+  bool within_tolerance = false;
+};
+
+[[nodiscard]] SpeciesMassAuditResult evaluateSpeciesMassAudit(
+    double source_mass,
+    double final_mass,
+    double relative_tolerance = 1.0e-12);
+
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
 
 [[nodiscard]] int ownerForX(double x, double box_size, int world_size);

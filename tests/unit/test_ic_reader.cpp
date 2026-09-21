@@ -14,6 +14,7 @@
 #include "cosmosim/io/ic_reader.hpp"
 #include "io/internal/snapshot_conversion.hpp"
 #include "io/internal/ic_canonical_limits.hpp"
+#include "io/internal/ic_distributed_audit.hpp"
 #include "io/internal/ic_file_set_common.hpp"
 #include "io/internal/ic_reader_session.hpp"
 
@@ -621,7 +622,8 @@ std::filesystem::path writeMinimalIcFile(
 }
 
 
-std::filesystem::path writeMonofonicLikeDmIcFile() {
+std::filesystem::path writeMonofonicLikeDmIcFile(
+    std::vector<std::uint64_t> particle_ids = {0U, 1U}) {
   const auto path = uniqueHdf5Path("cosmosim_ic_monofonic_like_dmo");
   Hdf5Handle file(H5Fcreate(
       path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
@@ -652,7 +654,8 @@ std::filesystem::path writeMonofonicLikeDmIcFile() {
   writeDataset2dVec3(
       dm.get(), "Velocities",
       {100.0, 0.0, 0.0, 200.0, 0.0, 0.0});
-  writeDataset1dIds(dm.get(), "ParticleIDs", {0U, 1U});
+  assert(particle_ids.size() == 2U);
+  writeDataset1dIds(dm.get(), "ParticleIDs", particle_ids);
   return path;
 }
 
@@ -941,8 +944,68 @@ void testMonofonicLikeStructuralCompatibility() {
   };
   assert(has_warning("rank1_extent1_logical_scalars"));
   assert(has_warning("uint64_NumPart_Total"));
-  assert(has_warning("zero_based_contiguous_plus_one"));
+  assert(has_warning("zero_present_plus_one_v1"));
   std::filesystem::remove(path);
+}
+
+void testMonofonicZeroBasedIdsAreOrderIndependentAndOverflowSafe() {
+  auto config = makeExplicitBridgeConfig();
+  config.mode.mode = cosmosim::core::SimulationMode::kCosmoCube;
+  config.cosmology.box_size_mpc_comoving = 10.0;
+  config.cosmology.box_size_x_mpc_comoving = 10.0;
+  config.cosmology.box_size_y_mpc_comoving = 10.0;
+  config.cosmology.box_size_z_mpc_comoving = 10.0;
+  config.cosmology.omega_matter = 0.315;
+  config.cosmology.omega_lambda = 0.685;
+  config.cosmology.hubble_param = 0.674;
+  config.numerics.a_begin = 0.04;
+  config.numerics.z_begin = 24.0;
+  config.mode.ic_bridge_source_length_unit_to_si = 3.0856775814913673e22;
+
+  const auto zero_path = writeMonofonicLikeDmIcFile({0U, 1U});
+  const auto one_path = writeMonofonicLikeDmIcFile({1U, 2U});
+  const auto zero = cosmosim::io::readGadgetArepoHdf5Ic(zero_path, config);
+  const auto one = cosmosim::io::readGadgetArepoHdf5Ic(one_path, config);
+  assert(zero.state.particles.position_x_comoving ==
+         one.state.particles.position_x_comoving);
+  assert(zero.state.particles.position_y_comoving ==
+         one.state.particles.position_y_comoving);
+  assert(zero.state.particles.position_z_comoving ==
+         one.state.particles.position_z_comoving);
+  assert(zero.state.particles.velocity_x_peculiar ==
+         one.state.particles.velocity_x_peculiar);
+  assert(zero.state.particles.mass_code == one.state.particles.mass_code);
+  assert(zero.state.particle_sidecar.particle_id ==
+         one.state.particle_sidecar.particle_id);
+  std::filesystem::remove(zero_path);
+  std::filesystem::remove(one_path);
+
+  const auto shuffled_path = writeMonofonicLikeDmIcFile({1U, 0U});
+  const auto shuffled = cosmosim::io::readGadgetArepoHdf5Ic(shuffled_path, config);
+  assert(shuffled.state.particle_sidecar.particle_id.size() == 2U);
+  assert(shuffled.state.particle_sidecar.particle_id[0] == 2U);
+  assert(shuffled.state.particle_sidecar.particle_id[1] == 1U);
+  assert(shuffled.state.validatePersistentParticleIds());
+  std::filesystem::remove(shuffled_path);
+
+  const auto overflow_path = writeMonofonicLikeDmIcFile(
+      {0U, std::numeric_limits<std::uint64_t>::max()});
+  expectIcReadFailure(overflow_path, config, "would overflow");
+}
+
+void testDistributedMassAuditDetectsLossAndDuplication() {
+  using cosmosim::io::distributed_audit_internal::evaluateSpeciesMassAudit;
+  const auto exact = evaluateSpeciesMassAudit(1234.5, 1234.5);
+  assert(exact.within_tolerance);
+  assert(exact.absolute_delta == 0.0);
+
+  const auto loss = evaluateSpeciesMassAudit(1000.0, 999.0);
+  assert(!loss.within_tolerance);
+  assert(loss.absolute_delta == 1.0);
+
+  const auto duplicate = evaluateSpeciesMassAudit(1000.0, 1001.0);
+  assert(!duplicate.within_tolerance);
+  assert(duplicate.absolute_delta == 1.0);
 }
 
 void testNormalizedConfigIsReusableForIcValidation() {
@@ -2061,6 +2124,8 @@ int main() {
   testHdf5GateBehavior();
 #if COSMOSIM_ENABLE_HDF5
   testMonofonicLikeStructuralCompatibility();
+  testMonofonicZeroBasedIdsAreOrderIndependentAndOverflowSafe();
+  testDistributedMassAuditDetectsLossAndDuplication();
   testNormalizedConfigIsReusableForIcValidation();
   testOptionalHighWordAttributeHandling();
   testCanonicalHeaderContract();

@@ -92,6 +92,9 @@ struct SnapshotIoPolicy {
   bool durable_publication = false;
   SnapshotDialect dialect = SnapshotDialect::kAuto;
   bool write_optional_pressure = true;
+  // Collective Parallel-HDF5 callers manage the .partial -> final publication
+  // after distributed readback and failure agreement.
+  bool caller_managed_publication = false;
 };
 
 struct SnapshotWritePayload {
@@ -104,6 +107,12 @@ struct SnapshotWritePayload {
   core::ProvenanceRecord provenance;
   std::string git_sha = "unknown";
   SnapshotSetMemberInfo set_member;
+  // Parallel-HDF5 one-file topology. Global datasets use global_part_count;
+  // each rank writes only its non-overlapping file_row_offset range.
+  bool collective_single_file = false;
+  std::array<std::uint64_t, 6> collective_file_row_offset{};
+  bool collective_write_particle_softening = false;
+  bool collective_write_particle_softening_override = false;
 };
 
 struct SnapshotReadOptions {
@@ -113,6 +122,11 @@ struct SnapshotReadOptions {
   bool allow_mass_table_fallback = true;
   bool require_complete_chui_set = true;
   bool verify_snapshot_set_member_hashes = true;
+  // Generic offline validation proves global ID uniqueness by materializing
+  // the logical ID set. Distributed production output may disable only this
+  // redundant O(N_global) proof after exact rank-partition readback has already
+  // established file IDs == authoritative globally unique runtime IDs.
+  bool validate_global_id_uniqueness = true;
   SnapshotDialect dialect = SnapshotDialect::kAuto;
   SnapshotMissingFieldPolicy missing_field_policy =
       SnapshotMissingFieldPolicy::kReject;
@@ -231,15 +245,38 @@ void writeScienceSnapshotHdf5(
     const std::filesystem::path& input_path,
     const SnapshotReadOptions& options = {});
 
+enum class SnapshotCompletionIntegrityMode : std::uint8_t {
+  kMemberSha256 = 0,
+  kDistributedScienceReadback = 1,
+};
+
 void writeSnapshotSetCompletionMarker(
     const std::filesystem::path& snapshot_directory,
     std::string_view generation_id,
     std::uint32_t num_files_per_snapshot,
     const std::array<std::uint64_t, 6>& global_part_count,
-    bool durable_publication = false);
+    bool durable_publication = false,
+    SnapshotCompletionIntegrityMode integrity_mode =
+        SnapshotCompletionIntegrityMode::kMemberSha256);
 
 // Compatibility entry points retained for existing callers. They now use the
 // explicit CHUI science-snapshot implementation rather than a merged dialect.
+
+// Verify only the rank-owned hyperslabs of a collective single-file science
+// snapshot against the authoritative local state. The check is bounded and
+// does not materialize global state on rank 0.
+void verifySingleFileScienceSnapshotPartitionHdf5(
+    const std::filesystem::path& input_path,
+    const SnapshotWritePayload& payload,
+    const SnapshotIoPolicy& policy = {});
+
+// Publish a fully written and distributed-readback-verified science file.
+void publishSingleFileScienceSnapshot(
+    const std::filesystem::path& temporary_path,
+    const std::filesystem::path& final_path,
+    const SnapshotSetMemberInfo& member,
+    bool durable_publication = false);
+
 void writeGadgetArepoSnapshotHdf5(
     const std::filesystem::path& output_path,
     const SnapshotWritePayload& payload,

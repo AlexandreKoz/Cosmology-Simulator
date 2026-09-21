@@ -484,7 +484,9 @@ class H5Handle {
   const std::string text = readBoundedTextFile(manifest);
   const auto values = parseKeyValueBody(text);
   const auto schema_it = values.find("schema");
-  if (schema_it == values.end() || schema_it->second != "chui_snapshot_set_v2") return {};
+  if (schema_it == values.end() ||
+      (schema_it->second != "chui_snapshot_set_v2" &&
+       schema_it->second != "chui_snapshot_set_v3")) return {};
   const std::uint32_t count = parseU32(values, "member_count");
   const std::string generation_id = requireString(values, "generation_id");
   const std::string marker_stem = manifest.stem().string();
@@ -700,7 +702,10 @@ struct MemberIntegrity {
     if (digest_line.size() != 64U || core::internal::sha256Hex(body) != digest_line) return false;
     const auto values = parseKeyValueBody(text);
     const MemberHeader& ref = headers.front();
-    if (requireString(values, "schema") != "chui_snapshot_set_v2" ||
+    const std::string manifest_schema = requireString(values, "schema");
+    const bool distributed_readback_manifest =
+        manifest_schema == "chui_snapshot_set_v3";
+    if ((manifest_schema != "chui_snapshot_set_v2" && !distributed_readback_manifest) ||
         requireString(values, "generation_id") != ref.generation ||
         parseU32(values, "num_files_per_snapshot") != ref.num_files ||
         requireString(values, "schema_name") != ref.schema ||
@@ -737,11 +742,18 @@ struct MemberIntegrity {
           parseCountArray(requireString(values, prefix + "local_part_count")) != headers[i].local) {
         return false;
       }
-      const std::string expected_sha = requireString(values, prefix + "sha256");
-      if (expected_sha.size() != 64U) return false;
-      if (options.verify_snapshot_set_member_hashes &&
-          internal::sha256FileHex(headers[i].path) != expected_sha) {
-        return false;
+      if (distributed_readback_manifest) {
+        if (requireString(values, prefix + "integrity") !=
+            "distributed_science_readback_v1") {
+          return false;
+        }
+      } else {
+        const std::string expected_sha = requireString(values, prefix + "sha256");
+        if (expected_sha.size() != 64U) return false;
+        if (options.verify_snapshot_set_member_hashes &&
+            internal::sha256FileHex(headers[i].path) != expected_sha) {
+          return false;
+        }
       }
     }
     return true;
@@ -1130,7 +1142,8 @@ void writeSnapshotSetCompletionMarker(
     std::string_view generation_id,
     std::uint32_t num_files_per_snapshot,
     const std::array<std::uint64_t, 6>& global_part_count,
-    bool durable_publication) {
+    bool durable_publication,
+    SnapshotCompletionIntegrityMode integrity_mode) {
   validateManifestAtom(generation_id, "generation id");
   if (num_files_per_snapshot == 0U) {
     throw std::invalid_argument("snapshot completion manifest requires at least one member");
@@ -1151,7 +1164,9 @@ void writeSnapshotSetCompletionMarker(
   std::set<std::uint32_t> indices;
   std::array<std::uint64_t, 6> local_sum{};
   std::vector<MemberIntegrity> integrities;
-  integrities.reserve(headers.size());
+  if (integrity_mode == SnapshotCompletionIntegrityMode::kMemberSha256) {
+    integrities.reserve(headers.size());
+  }
   for (const auto& header : headers) {
     if (!sameScientificIdentity(header, reference)) {
       throw std::runtime_error("snapshot completion manifest refused scientifically inconsistent members");
@@ -1166,15 +1181,17 @@ void writeSnapshotSetCompletionMarker(
       }
       local_sum[i] += header.local[i];
     }
-    MemberIntegrity integrity = readMemberIntegrity(header.path);
-    if (integrity.generation_id != generation_id ||
-        integrity.filename != header.path.filename().string() ||
-        integrity.member_index != header.member_index ||
-        integrity.num_files != num_files_per_snapshot ||
-        integrity.file_size != header.file_size) {
-      throw std::runtime_error("snapshot member integrity sidecar disagrees with published member");
+    if (integrity_mode == SnapshotCompletionIntegrityMode::kMemberSha256) {
+      MemberIntegrity integrity = readMemberIntegrity(header.path);
+      if (integrity.generation_id != generation_id ||
+          integrity.filename != header.path.filename().string() ||
+          integrity.member_index != header.member_index ||
+          integrity.num_files != num_files_per_snapshot ||
+          integrity.file_size != header.file_size) {
+        throw std::runtime_error("snapshot member integrity sidecar disagrees with published member");
+      }
+      integrities.push_back(std::move(integrity));
     }
-    integrities.push_back(std::move(integrity));
   }
   for (std::uint32_t index = 0; index < num_files_per_snapshot; ++index) {
     if (!indices.contains(index)) throw std::runtime_error("snapshot completion manifest found a member-index gap");
@@ -1182,7 +1199,47 @@ void writeSnapshotSetCompletionMarker(
   if (local_sum != global_part_count) {
     throw std::runtime_error("snapshot completion manifest local-count sum disagrees with global counts");
   }
-  const std::string body = buildCompletionManifestBody(headers, integrities);
+  std::string body;
+  if (integrity_mode == SnapshotCompletionIntegrityMode::kMemberSha256) {
+    body = buildCompletionManifestBody(headers, integrities);
+  } else {
+    if (headers.size() != 1U || num_files_per_snapshot != 1U) {
+      throw std::runtime_error(
+          "distributed-science-readback completion is qualified only for one-file science snapshots");
+    }
+    const MemberHeader& ref = headers.front();
+    body += "schema=chui_snapshot_set_v3\n";
+    body += "generation_id=" + ref.generation + "\n";
+    body += "num_files_per_snapshot=1\n";
+    body += "schema_name=" + ref.schema + "\n";
+    body += "schema_version=" + std::to_string(ref.schema_version) + "\n";
+    body += "file_kind=" + ref.file_kind + "\n";
+    body += "dialect=" + dialectLabel(ref.dialect) + "\n";
+    body += "global_part_count=" + formatCountArray(ref.global) + "\n";
+    body += "time=" + formatDouble(ref.time) + "\n";
+    body += "redshift=" + formatDouble(ref.redshift) + "\n";
+    body += "box_size_x=" + formatDouble(ref.box_x) + "\n";
+    body += "box_size_y=" + formatDouble(ref.box_y) + "\n";
+    body += "box_size_z=" + formatDouble(ref.box_z) + "\n";
+    body += "omega_matter=" + formatDouble(ref.omega_matter) + "\n";
+    body += "omega_lambda=" + formatDouble(ref.omega_lambda) + "\n";
+    body += "omega_baryon=" + formatDouble(ref.omega_baryon) + "\n";
+    body += "hubble_param=" + formatDouble(ref.hubble) + "\n";
+    body += "unit_length=" + ref.unit_length + "\n";
+    body += "unit_mass=" + ref.unit_mass + "\n";
+    body += "unit_velocity=" + ref.unit_velocity + "\n";
+    body += "coordinate_frame=" + ref.coordinate_frame + "\n";
+    body += "velocity_storage_convention=" + ref.velocity_storage_convention + "\n";
+    body += "config_hash_hex=" + ref.config_hash_hex + "\n";
+    body += "naming_rules_version=" + ref.naming_rules_version + "\n";
+    body += "file_naming_rules_version=" + ref.file_naming_rules_version + "\n";
+    body += "member_count=1\n";
+    body += "member.0.filename=" + ref.path.filename().string() + "\n";
+    body += "member.0.index=0\n";
+    body += "member.0.file_size=" + std::to_string(ref.file_size) + "\n";
+    body += "member.0.integrity=distributed_science_readback_v1\n";
+    body += "member.0.local_part_count=" + formatCountArray(ref.local) + "\n";
+  }
   const std::string contents = body + "set_digest_sha256=" + core::internal::sha256Hex(body) + "\n";
   const std::filesystem::path completion_path =
       std::filesystem::is_directory(snapshot_directory)
@@ -1192,9 +1249,11 @@ void writeSnapshotSetCompletionMarker(
       completion_path, contents,
       durable_publication ? internal::FileDurability::kDurablePublication
                           : internal::FileDurability::kAtomicVisibility);
-  for (const auto& header : headers) {
-    std::error_code ignored;
-    std::filesystem::remove(memberIntegrityPath(header.path), ignored);
+  if (integrity_mode == SnapshotCompletionIntegrityMode::kMemberSha256) {
+    for (const auto& header : headers) {
+      std::error_code ignored;
+      std::filesystem::remove(memberIntegrityPath(header.path), ignored);
+    }
   }
 }
 

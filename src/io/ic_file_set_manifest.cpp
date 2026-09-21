@@ -1617,35 +1617,55 @@ void recordRootSchemaDisposition(
 
   Inspection inspection;
   if (config.mode.ic_convention == core::InitialConditionConvention::kGadgetArepoBridgeV1) {
-    for (std::size_t type_index = 0U; type_index < kParticleTypeCount; ++type_index) {
-      if (first_schema.count_by_type[type_index] == 0U) {
-        continue;
+    bool saw_zero = false;
+    bool saw_uint64_max = false;
+    constexpr hsize_t k_id_scan_chunk = 1U << 16U;
+    for (const auto& source_path : files) {
+      Hdf5Handle source_file(H5Fopen(source_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT));
+      if (!source_file.valid()) {
+        throw std::runtime_error("failed to open IC file while inspecting external ParticleIDs: " + source_path.string());
       }
-      const std::string dataset_path =
-          "/PartType" + std::to_string(type_index) + "/ParticleIDs";
-      if (H5Lexists(first_file.get(), dataset_path.c_str(), H5P_DEFAULT) <= 0) {
-        break;
+      for (std::size_t type_index = 0U; type_index < kParticleTypeCount; ++type_index) {
+        const std::string dataset_path = "/PartType" + std::to_string(type_index) + "/ParticleIDs";
+        htri_t dataset_exists = -1;
+        H5E_BEGIN_TRY {
+          dataset_exists = H5Lexists(
+              source_file.get(), dataset_path.c_str(), H5P_DEFAULT);
+        } H5E_END_TRY;
+        if (dataset_exists <= 0) continue;
+        Hdf5Handle dataset(H5Dopen2(source_file.get(), dataset_path.c_str(), H5P_DEFAULT));
+        Hdf5Handle file_space(dataset.valid() ? H5Dget_space(dataset.get()) : -1);
+        if (!dataset.valid() || !file_space.valid() || H5Sget_simple_extent_ndims(file_space.get()) != 1) {
+          throw std::runtime_error("invalid external ParticleIDs dataset while determining identity mapping: " + dataset_path);
+        }
+        hsize_t extent = 0U;
+        if (H5Sget_simple_extent_dims(file_space.get(), &extent, nullptr) < 0) {
+          throw std::runtime_error("failed reading external ParticleIDs extent: " + dataset_path);
+        }
+        std::vector<std::uint64_t> ids;
+        for (hsize_t offset = 0U; offset < extent; offset += k_id_scan_chunk) {
+          const hsize_t count = std::min<hsize_t>(k_id_scan_chunk, extent - offset);
+          hsize_t start_sel[1]{offset};
+          hsize_t count_sel[1]{count};
+          if (H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, start_sel, nullptr, count_sel, nullptr) < 0) {
+            throw std::runtime_error("failed selecting external ParticleIDs scan hyperslab");
+          }
+          Hdf5Handle memory_space(H5Screate_simple(1, count_sel, nullptr));
+          ids.resize(static_cast<std::size_t>(count));
+          if (!memory_space.valid() || H5Dread(dataset.get(), H5T_NATIVE_UINT64, memory_space.get(), file_space.get(), H5P_DEFAULT, ids.data()) < 0) {
+            throw std::runtime_error("failed reading external ParticleIDs while determining identity mapping");
+          }
+          for (const std::uint64_t id : ids) {
+            saw_zero = saw_zero || id == 0U;
+            saw_uint64_max = saw_uint64_max || id == std::numeric_limits<std::uint64_t>::max();
+          }
+        }
       }
-      Hdf5Handle dataset(H5Dopen2(first_file.get(), dataset_path.c_str(), H5P_DEFAULT));
-      if (!dataset.valid()) {
-        throw std::runtime_error("failed to inspect first external ParticleIDs value");
-      }
-      Hdf5Handle file_space(H5Dget_space(dataset.get()));
-      hsize_t start[1]{0U};
-      hsize_t count[1]{1U};
-      if (!file_space.valid() ||
-          H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, start, nullptr, count, nullptr) < 0) {
-        throw std::runtime_error("failed selecting first external ParticleIDs value");
-      }
-      Hdf5Handle memory_space(H5Screate_simple(1, count, nullptr));
-      std::uint64_t first_id = 0U;
-      if (!memory_space.valid() ||
-          H5Dread(dataset.get(), H5T_NATIVE_UINT64, memory_space.get(), file_space.get(), H5P_DEFAULT, &first_id) < 0) {
-        throw std::runtime_error("failed reading first external ParticleIDs value");
-      }
-      inspection.normalize_zero_based_contiguous_ids = first_id == 0U;
-      break;
     }
+    if (saw_zero && saw_uint64_max) {
+      throw std::runtime_error("external ParticleIDs contain both 0 and UINT64_MAX; zero-based +1 normalization would overflow");
+    }
+    inspection.normalize_external_zero_based_ids = saw_zero;
   }
   IcManifest& manifest = inspection.manifest;
   manifest.dialect =
@@ -1808,9 +1828,9 @@ void recordRootSchemaDisposition(
     manifest.warnings.push_back(
         "structural_normalization=uint64_NumPart_Total");
   }
-  if (inspection.normalize_zero_based_contiguous_ids) {
+  if (inspection.normalize_external_zero_based_ids) {
     manifest.warnings.push_back(
-        "source_particle_id_mapping=zero_based_contiguous_plus_one");
+        "source_particle_id_mapping=zero_present_plus_one_v1");
   }
   manifest.converted_fields.reserve(manifest.fields.size());
   for (const auto& field : manifest.fields) {

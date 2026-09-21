@@ -63,45 +63,32 @@ the selected dialect and configured unit names so a CHUÍ-authored file is self-
 Isolated physical-coordinate runs default to `chui_native` rather than pretending to be an
 AREPO cosmological snapshot.
 
-## Distributed logical snapshots
+## Distributed science snapshots
 
-MPI science output is one logical snapshot set, not independent rank-local science files.
-The current scalable topology writes one member per MPI rank without gathering global state
-to rank zero:
+Science snapshots and restart/checkpoint topology are deliberately independent. The default `output.snapshot_layout = auto` policy produces one ordinary analysis-ready HDF5 file for serial runs and for MPI runs whose build is linked against MPI-enabled **Parallel HDF5**. In that qualified MPI path every rank participates in file creation and writes only its owned, non-overlapping hyperslabs into global `/PartTypeN` datasets:
 
 ```text
 <shared_run>/snapshots/
-  snap_042.0.hdf5
-  snap_042.1.hdf5
-  ...
+  snap_042.hdf5
   snap_042.complete
-  snap_043.0.hdf5
-  ...
-  snap_043.complete
 ```
 
-Serial output uses `snap_042.hdf5` plus `snap_042.complete`. New writes never
-create one `snapdir_###/` directory per snapshot. The physical HDF5 science
-schema remains `chui_science_snapshot_v6`; this filesystem-layout change does
-not rename `/Header`, `/PartTypeN`, or canonical datasets.
+There is no full-state gather onto rank zero and no global duplicate particle array. Per-PartType rank offsets are derived with distributed prefix scans; zero-row ranks still participate in collective file/dataset topology. `NumFilesPerSnapshot = 1`, `NumPart_ThisFile` contains the complete file counts, and the ordinary HDF5 file can be opened directly without CHUÍ-specific shard reconstruction.
 
-Each member has its own `NumPart_ThisFile`, the same global totals and
-`NumFilesPerSnapshot`, and common schema/epoch/generation metadata. After every
-member has been transactionally published, collectively accepted, and validated,
-root publishes the stem-scoped `.complete` marker last. Discovery from a member
-or completion marker considers only that logical stem, so snapshots sharing the
-flat directory cannot be mixed. The marker binds generation identity, member
-count, global counts, filenames/member indices, and existing integrity evidence;
-missing members, mixed generations, duplicate indices, stale/misnamed markers,
-or total-count disagreement fail closed. Same-index replacement of a committed
-set is refused rather than temporarily allowing an old marker to certify a new
-partial generation.
+Construction uses a non-final `snap_042.hdf5.partial` path. After all ranks complete their writes, every rank performs exact bounded readback of the partition it contributed. Distributed failure agreement must succeed before rank zero atomically publishes the final `snap_042.hdf5` name and writes the completion marker. The Parallel-HDF5 path uses `chui_snapshot_set_v3`; its integrity record attests the completed distributed scientific readback instead of forcing rank zero to reread and SHA-256 the entire global HDF5 file. Legacy sharded sets retain the v2 per-member SHA-256 contract. Readers accept both completion versions.
 
-`inspectSnapshotSet` performs shallow discovery/consistency checks without materializing the
-full payload. Legacy CHUÍ `snapdir_###/<generation>.complete` sets remain an
-explicit read-compatible path; all new production writes use `snapshots/`.
-Standard external multifile sets may be imported when the explicit dialect and
-species mapping are sufficient.
+`output.snapshot_layout = sharded` explicitly retains the compatibility topology:
+
+```text
+snap_042.0.hdf5
+snap_042.1.hdf5
+...
+snap_042.complete
+```
+
+It is no longer the implicit normal MPI science-product topology. `output.snapshot_layout = aggregated` and `output.snapshot_num_files` reserve the public/configuration contract for a future fixed-count large-rank backend; that backend is not yet qualified and currently fails closed. This keeps science-file topology decoupled from compute-rank topology without advertising a hollow implementation. Legacy `snapdir_###/<generation>.complete` layouts remain explicit read-compatible input.
+
+The HDF5 science schema remains `chui_science_snapshot_v6`; changing the publication/file topology does not reinterpret fields or restart state.
 
 ## Scientific fields
 

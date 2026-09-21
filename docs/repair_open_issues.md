@@ -2,6 +2,15 @@
 
 > **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
 
+
+## 2026-09-21 first-light science-I/O closure remaining qualification gates
+
+Source-level closure now covers order-independent zero-based external IDs, numerically consistent distributed mass auditing, one-file Parallel-HDF5 science-output topology, transactional publication, and final-endpoint output. Remaining items are qualification/scale extensions rather than permission to fall back silently:
+
+- execute the registered 2/3/4/8-rank snapshot/IC matrix and real 64^3 three-rank TreePM smoke on a host with MPI C++, Parallel HDF5, FFTW and FFTW-MPI;
+- directly open a produced science snapshot in GLnemo2 when that executable is available; ordinary HDF5/h5py compatibility is the automated floor;
+- implement and qualify the reserved fixed-count `aggregated` large-rank backend before claiming scalable file-count aggregation beyond the single-file small/moderate-rank policy.
+
 ## 2026-09-17 DMO first-light recovery remaining gates
 
 The source-level first-light blockers for config-driven rung-zero stepping,

@@ -188,6 +188,18 @@ if(CMAKE_BUILD_TYPE STREQUAL "")
   message(STATUS "No CMAKE_BUILD_TYPE selected; use presets for explicit Debug/Release configuration.")
 endif()
 
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles(
+  "#include <span>\n#include <vector>\nint main(){ std::vector<int> v{1,2}; std::span<int> s(v); return s.size() == 2 ? 0 : 1; }"
+  COSMOSIM_HAVE_REQUIRED_CXX20_STDLIB)
+if(NOT COSMOSIM_HAVE_REQUIRED_CXX20_STDLIB)
+  message(FATAL_ERROR
+    "CHUI requires C++20 std::span support. Configured compiler '${CMAKE_CXX_COMPILER}' "
+    "(${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}) failed the capability probe.")
+endif()
+message(STATUS
+  "CHUI toolchain: cxx=${CMAKE_CXX_COMPILER} id=${CMAKE_CXX_COMPILER_ID} version=${CMAKE_CXX_COMPILER_VERSION} cxx20_span=available")
+
 # Dependencies gated by explicit feature options.
 set(COSMOSIM_HAVE_OPENMP OFF)
 if(COSMOSIM_ENABLE_OPENMP)
@@ -202,9 +214,15 @@ endif()
 
 if(COSMOSIM_ENABLE_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
+  message(STATUS
+    "CHUI dependency: MPI compiler=${MPI_CXX_COMPILER} version=${MPI_CXX_VERSION} libraries=${MPI_CXX_LIBRARIES}")
 endif()
 
+set(COSMOSIM_HDF5_PARALLEL OFF)
 if(COSMOSIM_ENABLE_HDF5)
+  if(COSMOSIM_ENABLE_MPI)
+    set(HDF5_PREFER_PARALLEL TRUE)
+  endif()
   find_package(HDF5 QUIET COMPONENTS C CXX)
   if(NOT HDF5_FOUND)
     message(FATAL_ERROR
@@ -221,6 +239,15 @@ if(COSMOSIM_ENABLE_HDF5)
       "CosmoSim's currently qualified HDF5 API range is 1.10.x through 1.14.x; found ${HDF5_VERSION}. "
       "Newer HDF5 families must be qualified explicitly before enabling production I/O.")
   endif()
+  if(HDF5_IS_PARALLEL)
+    set(COSMOSIM_HDF5_PARALLEL ON)
+  endif()
+  message(STATUS
+    "CHUI dependency: HDF5 version=${HDF5_VERSION} parallel=${COSMOSIM_HDF5_PARALLEL} includes=${HDF5_INCLUDE_DIRS} libraries=${HDF5_LIBRARIES}")
+  if(COSMOSIM_ENABLE_MPI AND NOT COSMOSIM_HDF5_PARALLEL)
+    message(WARNING
+      "MPI is enabled but selected HDF5 is serial. Multi-rank output.snapshot_layout=auto/single will fail closed; use Parallel HDF5 or explicitly select sharded.")
+  endif()
 endif()
 
 if(COSMOSIM_ENABLE_FFTW)
@@ -228,6 +255,39 @@ if(COSMOSIM_ENABLE_FFTW)
     cosmosim_find_fftw(COSMOSIM_FFTW_TARGET REQUIRE_MPI)
   else()
     cosmosim_find_fftw(COSMOSIM_FFTW_TARGET)
+  endif()
+  message(STATUS
+    "CHUI dependency: FFTW target=${COSMOSIM_FFTW_TARGET} version=${FFTW_VERSION} mpi_target=${COSMOSIM_FFTW_MPI_TARGET}")
+endif()
+
+# Conda MPI is supported when selected explicitly, but make mixed-prefix risk visible.
+# A system compiler/dependency stack paired accidentally with a Conda MPI wrapper is
+# a common first-light failure mode; warn without overriding the user's selection.
+if(COSMOSIM_ENABLE_MPI)
+  string(TOLOWER "${MPI_CXX_COMPILER}" _cosmosim_mpi_compiler_lower)
+  string(TOLOWER "${CMAKE_CXX_COMPILER}" _cosmosim_cxx_compiler_lower)
+  set(_cosmosim_mpi_looks_conda OFF)
+  if(_cosmosim_mpi_compiler_lower MATCHES "(anaconda|miniconda|/conda/|\\conda\\)")
+    set(_cosmosim_mpi_looks_conda ON)
+  endif()
+  if(_cosmosim_mpi_looks_conda)
+    set(_cosmosim_mixed_prefix_risk OFF)
+    if(NOT _cosmosim_cxx_compiler_lower MATCHES "(anaconda|miniconda|/conda/|\\conda\\)")
+      set(_cosmosim_mixed_prefix_risk ON)
+    endif()
+    if(COSMOSIM_ENABLE_HDF5)
+      string(TOLOWER "${HDF5_LIBRARIES}" _cosmosim_hdf5_libraries_lower)
+      if(NOT _cosmosim_hdf5_libraries_lower MATCHES "(anaconda|miniconda|/conda/|\\conda\\)")
+        set(_cosmosim_mixed_prefix_risk ON)
+      endif()
+    endif()
+    if(_cosmosim_mixed_prefix_risk)
+      message(WARNING
+        "CHUI toolchain mixed-prefix risk: MPI compiler='${MPI_CXX_COMPILER}', "
+        "C++ compiler='${CMAKE_CXX_COMPILER}', HDF5='${HDF5_LIBRARIES}', "
+        "FFTW target='${COSMOSIM_FFTW_TARGET}'. Explicit selections remain authoritative; "
+        "verify that MPI/HDF5/FFTW were built against a compatible ABI stack.")
+    endif()
   endif()
 endif()
 
@@ -1329,6 +1389,7 @@ if(COSMOSIM_ENABLE_TESTS)
     endforeach()
     foreach(acceptance_mode IN ITEMS
         canonical
+        zero_ids
         manifest
         canonical_manifest
         alternate
@@ -1787,7 +1848,7 @@ if(COSMOSIM_ENABLE_TESTS)
              COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_app_smoke.cmake")
   endif()
 
-  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW)
+  if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW AND COSMOSIM_HDF5_PARALLEL)
     configure_file(
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_mpi_treepm_smoke.cmake.in"
       "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_treepm_smoke.cmake"

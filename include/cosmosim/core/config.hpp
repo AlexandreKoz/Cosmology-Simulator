@@ -366,6 +366,13 @@ struct PhysicsConfig {
   double tracer_min_host_mass_code = 0.0;
 };
 
+enum class ScienceSnapshotLayout : std::uint8_t {
+  kAuto = 0,
+  kSingle = 1,
+  kAggregated = 2,
+  kSharded = 3,
+};
+
 struct OutputConfig {
   std::string run_name = "cosmosim_run";
   std::string output_directory = "outputs";
@@ -375,6 +382,10 @@ struct OutputConfig {
   // Zero disables code-time cadence.  When positive, the workflow clips a
   // step at each ordered event and persists the next event in restart state.
   double snapshot_interval_time_code = 0.0;
+  ScienceSnapshotLayout snapshot_layout = ScienceSnapshotLayout::kAuto;
+  // Zero selects backend policy. This is intentionally independent of MPI
+  // world size so future aggregated science I/O is not rank-count coupled.
+  std::uint32_t snapshot_num_files = 0U;
   bool write_restarts = true;
 };
 

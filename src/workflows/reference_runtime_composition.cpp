@@ -28,6 +28,7 @@ struct CompositionAssembly {
   std::shared_ptr<GravityRuntime> gravity;
   std::shared_ptr<HydroAmrRuntime> hydro_amr;
   std::shared_ptr<SourceRuntime> source;
+  std::shared_ptr<OutputRestartRuntime> output_restart;
   std::shared_ptr<const physics::EffectiveMultiphaseEosTable> effective_eos_table;
 };
 
@@ -530,6 +531,7 @@ namespace {
             inputs.profiler,
             inputs.pending_output,
             inputs.options.write_outputs);
+        assembly->output_restart = owner;
         RuntimeModuleInstance instance;
         instance.owner_lifetime = owner;
         instance.stage_tasks.push_back(RuntimeStageTaskContribution{
@@ -573,7 +575,8 @@ ReferenceRuntimeComposition buildReferenceRuntimeComposition(
   }
   RuntimeExecutionPlan execution_plan = registry.freezeAndInstantiate(
       RuntimeModuleFactoryContext{inputs.services});
-  if (!assembly->gravity || !assembly->hydro_amr || !assembly->source) {
+  if (!assembly->gravity || !assembly->hydro_amr || !assembly->source ||
+      !assembly->output_restart) {
     throw std::logic_error("reference runtime composition omitted a required owner");
   }
   return ReferenceRuntimeComposition{
@@ -581,6 +584,7 @@ ReferenceRuntimeComposition buildReferenceRuntimeComposition(
       .gravity = std::move(assembly->gravity),
       .hydro_amr = std::move(assembly->hydro_amr),
       .source = std::move(assembly->source),
+      .output_restart = std::move(assembly->output_restart),
       .effective_eos_table = std::move(assembly->effective_eos_table),
       .execution_plan = std::move(execution_plan),
   };

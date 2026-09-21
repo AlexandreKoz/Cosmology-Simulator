@@ -220,3 +220,7 @@ owner contracts stay `complete=false`, the `integration_reference_workflow`
 tight-envelope sweep admission and an MPI two-rank patch-migration scheduler
 mismatch remain outstanding, and dependency-complete distributed runtime
 acceptance remains pending. The dispatcher stays serial.
+
+## 2026-09-21 first-light science-I/O closure status
+
+The current source includes the 64^3 three-rank first-light production-closure repair: external zero-containing ParticleIDs are normalized source-wide and independent of storage order; distributed mass conservation uses consistent compensated local accumulation; science-output topology is typed and defaults to one ordinary HDF5 file for MPI only on a Parallel-HDF5 build; publication is transactional with exact distributed partition readback; final endpoint output is deduplicated; and the launcher can infer configured rank count through the authoritative C++ parser. Restart/checkpoint schema and same-topology rank-local continuation are unchanged. The fixed-count aggregated science backend remains reserved/unimplemented. This source snapshot must not be called MPI/Parallel-HDF5/FFTW production-qualified until the registered distributed matrix runs on a dependency-complete host.

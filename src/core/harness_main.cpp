@@ -273,6 +273,12 @@ void abortCurrentMpiWorldIfDistributed(int error_code) noexcept {
 
 int main(int argc, char** argv) {
   try {
+    if (argc == 3 && std::string_view(argv[1]) == "--print-mpi-ranks-expected") {
+      const cosmosim::core::FrozenConfig frozen =
+          cosmosim::core::loadFrozenConfigFromFile(std::filesystem::path(argv[2]), {});
+      std::cout << frozen.config.parallel.mpi_ranks_expected << '\n';
+      return 0;
+    }
     ExecutableMpiSession mpi_session(&argc, &argv);
 
     HarnessCliOptions cli;

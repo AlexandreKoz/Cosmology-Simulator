@@ -360,7 +360,9 @@ void validateMember(
     if (options.require_ids || chui_native) {
       static_cast<void>(requireDataset(
           group.get(), "ParticleIDs", rows, H5T_INTEGER, chui_native ? 8U : 0U, 1U, options.budget, report));
-      streamParticleIds(group.get(), rows, ids, options.budget, report);
+      if (options.validate_global_id_uniqueness) {
+        streamParticleIds(group.get(), rows, ids, options.budget, report);
+      }
     }
     if (datasetExists(group.get(), "Masses")) {
       static_cast<void>(requireDataset(
@@ -406,9 +408,10 @@ SnapshotValidationReport validateSnapshotSetHdf5(
     if (expected_particles > options.budget.max_particles) {
       throw std::length_error("snapshot validator: global particle count exceeds max_particles");
     }
-    const bool validate_ids = options.require_ids ||
+    const bool validate_ids = options.validate_global_id_uniqueness && (
+        options.require_ids ||
         report.inspection.dialect == SnapshotDialect::kChuiNative ||
-        report.inspection.schema_name.rfind("chui_science_snapshot_", 0U) == 0U;
+        report.inspection.schema_name.rfind("chui_science_snapshot_", 0U) == 0U);
     std::vector<std::uint64_t> ids;
     if (validate_ids) {
       const std::uint64_t id_bytes = checkedMul(expected_particles, sizeof(std::uint64_t), "global ID buffer");

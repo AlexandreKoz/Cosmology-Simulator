@@ -113,7 +113,13 @@ def main() -> int:
                 "process replacement should deliver SIGTERM directly to the launched runtime")
 
         preset_exe = root / "build" / "alpha" / "cosmosim_harness"
-        make_executable(preset_exe, "#!/bin/sh\nprintf 'preset:%s\\n' \"$1\"\n")
+        make_executable(
+            preset_exe,
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"--print-mpi-ranks-expected\" ]; then "
+            "printf '%s\\n' \"${FAKE_EXPECTED_RANKS:-1}\"; exit 0; fi\n"
+            "printf 'preset:%s\\n' \"$1\"\n",
+        )
         preset_result = run(str(launcher), "run", str(config), "--preset", "alpha", cwd=root)
         require(preset_result.returncode == 0, "explicit --preset should select deterministic binary")
         require(f"preset:{config}" in preset_result.stdout, "preset executable should receive config")
@@ -134,8 +140,11 @@ def main() -> int:
             f"COSMOSIM_ENABLE_MPI:BOOL=OFF\nMPIEXEC_EXECUTABLE:FILEPATH={fake_mpi}\nMPIEXEC_NUMPROC_FLAG:STRING=-n\n",
             encoding="utf-8",
         )
+        rank2_env = os.environ.copy()
+        rank2_env["FAKE_EXPECTED_RANKS"] = "2"
         rejected_serial_mpi = run(
-            str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2", cwd=root
+            str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2",
+            cwd=root, env=rank2_env
         )
         require(rejected_serial_mpi.returncode == 2,
                 "--mpi must reject a build that explicitly has MPI disabled")
@@ -148,7 +157,7 @@ def main() -> int:
         )
         mpi_result = run(
             str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2",
-            "--quiet", "--", "--bind-to", "core", cwd=root,
+            "--quiet", "--", "--bind-to", "core", cwd=root, env=rank2_env,
         )
         require(mpi_result.returncode == 0, "MPI command composition should execute configured launcher")
         mpi_args = mpi_result.stdout.splitlines()
@@ -156,6 +165,29 @@ def main() -> int:
                 "MPI passthrough and rank count should precede executable")
         require(str(preset_exe) in mpi_args, "MPI command should contain selected harness")
         require(str(config) in mpi_args, "MPI command should preserve config path")
+
+        inferred_mpi = run(
+            str(launcher), "run", str(config), "--preset", "alpha", "--quiet",
+            cwd=root, env=rank2_env,
+        )
+        require(inferred_mpi.returncode == 0,
+                "launcher should infer MPI rank count through authoritative C++ preflight")
+        inferred_args = inferred_mpi.stdout.splitlines()
+        require(inferred_args[:2] == ["-n", "2"],
+                "inferred MPI launch should use authoritative expected rank count")
+        require(str(preset_exe) in inferred_args and str(config) in inferred_args,
+                "inferred MPI command should retain executable and config")
+
+        rank3_env = os.environ.copy()
+        rank3_env["FAKE_EXPECTED_RANKS"] = "3"
+        contradictory_mpi = run(
+            str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2",
+            cwd=root, env=rank3_env,
+        )
+        require(contradictory_mpi.returncode == 2,
+                "explicit --mpi contradicting authoritative config must fail before launch")
+        require("mpi_ranks_expected=3" in contradictory_mpi.stderr,
+                "rank contradiction should report authoritative config truth")
 
         preset_exe.unlink()
         missing = run(str(launcher), "run", str(config), "--preset", "alpha", cwd=root)

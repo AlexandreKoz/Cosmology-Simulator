@@ -38,8 +38,7 @@ foreach(rank_dir IN ITEMS "${runtime_mpi_run_dir_rank0}" "${runtime_mpi_run_dir_
 endforeach()
 
 foreach(required_path IN ITEMS
-    "${runtime_mpi_snapshot_dir}/snap_001.0.hdf5"
-    "${runtime_mpi_snapshot_dir}/snap_001.1.hdf5"
+    "${runtime_mpi_snapshot_dir}/snap_001.hdf5"
     "${runtime_mpi_run_dir_rank0}/restart_001_rank000.hdf5"
     "${runtime_mpi_run_dir_rank1}/restart_001_rank001.hdf5")
   if(NOT EXISTS "${required_path}")
@@ -58,13 +57,13 @@ endif()
 list(GET runtime_mpi_completion_markers 0 runtime_mpi_completion_marker)
 file(READ "${runtime_mpi_completion_marker}" runtime_mpi_completion_text)
 foreach(required_manifest_contract IN ITEMS
-    "schema=chui_snapshot_set_v2"
+    "schema=chui_snapshot_set_v3"
     "schema_name=chui_science_snapshot_v6"
     "file_kind=science_snapshot"
-    "num_files_per_snapshot=2"
-    "member_count=2"
-    "member.0.filename=snap_001.0.hdf5"
-    "member.1.filename=snap_001.1.hdf5")
+    "num_files_per_snapshot=1"
+    "member_count=1"
+    "member.0.filename=snap_001.hdf5"
+    "member.0.integrity=distributed_science_readback_v1")
   if(NOT runtime_mpi_completion_text MATCHES "${required_manifest_contract}")
     message(FATAL_ERROR
       "MPI runtime smoke snapshot-set completion manifest is missing contract: "
@@ -95,8 +94,8 @@ list(LENGTH runtime_snapshot_records runtime_snapshot_record_count)
 if(NOT runtime_snapshot_record_count EQUAL 1)
   message(FATAL_ERROR "MPI runtime smoke expected exactly one rank-zero [CHUI][SNAPSHOT] record, got ${runtime_snapshot_record_count}")
 endif()
-if(NOT runtime_stdout_text MATCHES "\\[CHUI\\]\\[SNAPSHOT\\].*state=committed.*members=2.*manifest=.*snap_001.complete.*rank0_member=.*snap_001.0.hdf5")
-  message(FATAL_ERROR "MPI snapshot console record must describe the logical two-member set and label rank0 member explicitly")
+if(NOT runtime_stdout_text MATCHES "\\[CHUI\\]\\[SNAPSHOT\\].*state=committed.*members=1.*manifest=.*snap_001.complete.*file=.*snap_001.hdf5")
+  message(FATAL_ERROR "MPI snapshot console record must describe the committed logical single-file science product")
 endif()
 string(REGEX MATCHALL "\\[CHUI\\]\\[RESTART\\]" runtime_restart_records "${runtime_stdout_text}")
 list(LENGTH runtime_restart_records runtime_restart_record_count)
@@ -115,8 +114,8 @@ foreach(rank_dir IN ITEMS "${runtime_mpi_run_dir_rank0}" "${runtime_mpi_run_dir_
   if(NOT runtime_ops MATCHES "snapshot.write.complete")
     message(FATAL_ERROR "MPI runtime smoke operational report must record snapshot.write.complete in ${rank_dir}")
   endif()
-  if(NOT runtime_ops MATCHES "scientifically read back, and independently validated as one logical set")
-    message(FATAL_ERROR "MPI runtime smoke must record successful scientific snapshot-set validation in ${rank_dir}")
+  if(NOT runtime_ops MATCHES "scientifically read back, and transactionally published")
+    message(FATAL_ERROR "MPI runtime smoke must record successful scientific snapshot publication in ${rank_dir}")
   endif()
 
   file(READ "${rank_dir}/normalized_config.param.txt" runtime_normalized)

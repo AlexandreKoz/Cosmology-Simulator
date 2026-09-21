@@ -79,41 +79,9 @@ and CHUÍ temperature/sound-speed diagnostics. Stars preserve formation/birth id
 current cumulative stellar-evolution state. PartType5 preserves the current black-hole
 science sidecar using documented `CHUI_` extension names for model-specific quantities.
 
-MPI science output is one logical multifile snapshot set. Every member has local
-`NumPart_ThisFile`, common 64-bit global totals and `NumFilesPerSnapshot`, common generation,
-schema/dialect, epoch, box/cosmology, unit/frame, config-hash and governance identity, and one
-contiguous member index in `[0, NumFilesPerSnapshot)`. Discovery resolves one generation/stem
-rather than treating every `.hdf5` file in a directory as one snapshot. Root publishes a
-versioned `chui_snapshot_set_v2` stem-scoped `snap_###.complete` manifest only after all expected
-members have transactionally completed. New production members live together under
-`<shared_run>/snapshots/` as `snap_###.hdf5` or `snap_###.N.hdf5`; the set locator filters by
-stem and cannot treat unrelated files in that directory as one set. Legacy
-`snapdir_###/<generation>.complete` remains readable. The manifest binds the common scientific identity,
-exact member filenames/indices/local counts/file sizes, per-member SHA-256 digests, and a root
-SHA-256 over the canonical manifest body. CHUÍ reads fail closed on gaps, mixed scientific
-identity, stale/mismatched members, absent required manifests, or digest disagreement.
+Science snapshot topology is an I/O policy rather than an MPI-rank invariant. With `output.snapshot_layout = auto`, serial output is one `snap_###.hdf5`; MPI output also uses one collective `snap_###.hdf5` when the build has MPI-enabled Parallel HDF5. All ranks write owned hyperslabs directly into global datasets, `NumFilesPerSnapshot = 1`, and `NumPart_ThisFile` is the complete file count. Publication is transactional: ranks write `snap_###.hdf5.partial`, perform exact bounded partition readback, agree success collectively, and only then publish the final filename. The accompanying `chui_snapshot_set_v3` `.complete` marker records `distributed_science_readback_v1` integrity without a root-only whole-file hash pass.
 
-CHUÍ currently uses 32-bit dense local row indices, so one member may not exceed
-`UINT32_MAX` rows per PartType. This is explicitly recorded as `CHUILocalIndexWidthBits=32`;
-logical multifile global counts remain 64-bit.
-
-Snapshot writing streams bounded HDF5 hyperslabs instead of materializing full-species
-coordinate/velocity/mass arrays. Snapshot reading has particle/gas/sidecar/materialization/
-dataset/attribute/member budgets and enforces them cumulatively across a logical multifile
-set, with checked arithmetic before merge. Missing fields for gas, stars, black holes and
-tracers are governed by one explicit policy and all reconstruction/default actions are
-reported. `analysis_ready` and `evolution_ready` are separate: evolution readiness additionally
-proves persistent IDs and runtime-relevant gas identity/parent-or-patch ownership invariants;
-analysis-valid states that cannot safely re-enter evolution remain explicitly analysis-only.
-Storage reports inspect actual HDF5 creation properties rather than fabricating
-compression/chunk values. A direct HDF5 validator independently checks set/header identity,
-required dataset type/shape/counts, finite values, positive masses, box bounds where defined,
-and global nonzero/unique particle IDs without reconstructing the normal `SimulationState`.
-`CHUIBoxSize{X,Y,Z}_MpcComoving` and `SnapshotIoReport::header_box_size_*` remain expressed in
-comoving Mpc. CHUI-native `Coordinates` are stored/decoded in the configured code-length unit,
-so both direct validation and readback convert the Mpc box metadata into the corresponding
-stored/code coordinate unit before enforcing bounds. This is a unit-consistency repair only;
-no HDF5 attribute names, schema versions, or coordinate-storage conventions changed.
+The explicit `sharded` compatibility layout continues to use rank members plus a `chui_snapshot_set_v2` per-member SHA-256 completion marker. `aggregated`/`snapshot_num_files` reserve a future fixed-file-count backend and currently fail closed. Legacy `snapdir_###/<generation>.complete` sets remain readable. Science snapshot topology is independent from the same-world-size, rank-local restart topology.
 
 See `docs/snapshot_hdf5_io.md` for the detailed contract.
 

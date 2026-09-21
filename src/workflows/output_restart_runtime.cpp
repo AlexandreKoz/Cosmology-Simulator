@@ -52,6 +52,14 @@ namespace {
       core::collectSimulationMemoryReport(state));
 }
 
+[[nodiscard]] std::uint64_t snapshotPartitionVerificationPeakBytes() {
+  // verifySingleFileScienceSnapshotPartitionHdf5 reads at most 4096 rows at
+  // once: Coordinates[3], Velocities[3], Masses, ParticleIDs, plus a compact
+  // local-row index lane. Keep one MiB of governed headroom for vector capacity
+  // and HDF5-owned call staging without charging a second simulation state.
+  return 1U << 20U;
+}
+
 [[nodiscard]] std::uint64_t restartForceCachePeakBytes(
     const core::SimulationState& state) {
   // One exported cache remains live while RestartReadResult materializes its
@@ -271,6 +279,33 @@ namespace {
   return out.str();
 }
 
+[[nodiscard]] bool useSingleFileScienceSnapshot(
+    const core::SimulationConfig& config,
+    const parallel::DistributedExecutionTopology& topology) {
+  switch (config.output.snapshot_layout) {
+    case core::ScienceSnapshotLayout::kSharded:
+      return topology.world_size <= 1;
+    case core::ScienceSnapshotLayout::kAggregated:
+      throw std::runtime_error(
+          "output.snapshot_layout=aggregated reserves the fixed-file-count I/O topology contract but its production backend is not yet qualified");
+    case core::ScienceSnapshotLayout::kSingle:
+    case core::ScienceSnapshotLayout::kAuto:
+      if (topology.world_size <= 1) return true;
+#if COSMOSIM_ENABLE_MPI && COSMOSIM_HDF5_PARALLEL
+      return true;
+#else
+      throw std::runtime_error(
+          "analysis-ready single-file MPI science snapshots require an MPI-enabled Parallel HDF5 build; select a Parallel-HDF5 build or explicitly set output.snapshot_layout=sharded");
+#endif
+  }
+  throw std::logic_error("unhandled science snapshot layout");
+}
+
+[[nodiscard]] std::string singleSnapshotFilename(
+    std::string_view stem, std::uint64_t step_index) {
+  return std::string(stem) + "_" + formatThreeDigitIndex(step_index) + ".hdf5";
+}
+
 [[nodiscard]] std::string formatIndexedRankedFileStem(
     std::string_view stem,
     std::uint64_t index,
@@ -442,7 +477,8 @@ bool maybeWriteOutputs(
   if (snapshot_due) {
     core::assertCanWriteSnapshotAtBoundary(integrator_state);
   }
-  if ((snapshot_due || checkpoint_due) && !core::isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
+  if ((snapshot_due || checkpoint_due) &&
+      !core::isOutputSafeBoundary(integrator_state.last_completed_boundary_kind)) {
     return false;
   }
 
@@ -454,31 +490,45 @@ bool maybeWriteOutputs(
     for (std::size_t i = 0; i < global_counts.size(); ++i) {
       global_counts[i] = services.mpi_context.allreduceSumUint64(local_counts[i]);
     }
+    const bool single_file_snapshot = useSingleFileScienceSnapshot(config, topology);
+    const bool collective_single_file = single_file_snapshot && topology.world_size > 1;
+    const std::uint32_t physical_file_count = single_file_snapshot
+        ? 1U
+        : core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot member count");
     const std::filesystem::path shared_run_directory =
         report.shared_run_directory.empty() ? report.run_directory : report.shared_run_directory;
-    const std::filesystem::path snapshot_directory =
-        shared_run_directory / "snapshots";
-    report.snapshot_path = snapshot_directory / snapshotMemberFilename(
-        config.output.output_stem, integrator_state.step_index,
-        topology.world_size, topology.world_rank);
+    const std::filesystem::path snapshot_directory = shared_run_directory / "snapshots";
+    const std::filesystem::path final_single_path = snapshot_directory /
+        singleSnapshotFilename(config.output.output_stem, integrator_state.step_index);
+    const std::filesystem::path partial_single_path =
+        std::filesystem::path(final_single_path.string() + ".partial");
+    report.snapshot_path = single_file_snapshot
+        ? final_single_path
+        : snapshot_directory / snapshotMemberFilename(
+              config.output.output_stem, integrator_state.step_index,
+              topology.world_size, topology.world_rank);
     report.snapshot_set_path = snapshot_directory /
         (config.output.output_stem + "_" +
          formatThreeDigitIndex(integrator_state.step_index) + ".complete");
     const std::string generation_id =
         snapshotGenerationId(frozen_config, integrator_state.step_index);
 
-    // A published completion marker is the commit record for a logical
-    // snapshot set.  Never replace a committed index in-place: otherwise an
-    // old marker could temporarily certify a mixed/partially replaced set.
     std::exception_ptr snapshot_replacement_failure;
-    try {
-      if (std::filesystem::exists(report.snapshot_set_path)) {
-        throw std::runtime_error(
-            "refusing to overwrite a committed snapshot set: " +
-            report.snapshot_set_path.string());
+    if (services.mpi_context.isRoot()) {
+      try {
+        if (std::filesystem::exists(report.snapshot_set_path) ||
+            (single_file_snapshot && std::filesystem::exists(final_single_path))) {
+          throw std::runtime_error(
+              "refusing to overwrite a committed science snapshot: " +
+              report.snapshot_path.string());
+        }
+        if (collective_single_file) {
+          std::error_code ignored;
+          std::filesystem::remove(partial_single_path, ignored);
+        }
+      } catch (...) {
+        snapshot_replacement_failure = std::current_exception();
       }
-    } catch (...) {
-      snapshot_replacement_failure = std::current_exception();
     }
     FailureCoordinator(services).rethrowCollectiveFailure(
         snapshot_replacement_failure, "science snapshot replacement preflight");
@@ -488,45 +538,72 @@ bool maybeWriteOutputs(
     applyExecutionTopologyToProvenance(&snapshot_provenance, topology);
     snapshot_provenance.gravity_treepm_decomposition_epoch =
         gravity_state.decompositionEpoch();
+    if (collective_single_file) {
+      std::vector<std::uint8_t> serialized;
+      if (services.mpi_context.isRoot()) {
+        const std::string text = core::serializeProvenanceRecord(snapshot_provenance);
+        serialized.assign(text.begin(), text.end());
+      }
+      const std::vector<std::uint8_t> root_bytes =
+          services.mpi_context.broadcastBytesFromRoot(serialized, 0);
+      snapshot_provenance = core::deserializeProvenanceRecord(
+          std::string_view(reinterpret_cast<const char*>(root_bytes.data()), root_bytes.size()));
+    }
+
+    io::SnapshotWritePayload snapshot_payload;
+    snapshot_payload.state = &state;
+    snapshot_payload.memory_governor = services.memory_governor;
+    snapshot_payload.config = &config;
+    snapshot_payload.normalized_config_text = frozen_config.normalized_text;
+    snapshot_payload.provenance = snapshot_provenance;
+    snapshot_payload.set_member.member_index = single_file_snapshot
+        ? 0U
+        : core::checkedIntegralNarrow<std::uint32_t>(topology.world_rank, "snapshot member index");
+    snapshot_payload.set_member.num_files_per_snapshot = physical_file_count;
+    snapshot_payload.set_member.global_part_count = global_counts;
+    snapshot_payload.set_member.has_global_part_count = true;
+    snapshot_payload.set_member.generation_id = generation_id;
+    snapshot_payload.collective_single_file = collective_single_file;
+    if (collective_single_file) {
+      for (std::size_t type = 0; type < 6U; ++type) {
+        snapshot_payload.collective_file_row_offset[type] =
+            services.mpi_context.exclusiveScanSumUint64(local_counts[type]);
+      }
+      snapshot_payload.collective_write_particle_softening =
+          services.mpi_context.allreduceSumUint64(
+              state.particle_sidecar.gravity_softening_comoving.empty() ? 0U : 1U) > 0U;
+      snapshot_payload.collective_write_particle_softening_override =
+          services.mpi_context.allreduceSumUint64(
+              state.particle_sidecar.has_gravity_softening_override.empty() ? 0U : 1U) > 0U;
+    }
+
+    io::SnapshotIoPolicy snapshot_policy;
+    snapshot_policy.dialect = config.units.coordinate_frame == core::CoordinateFrame::kComoving
+        ? io::SnapshotDialect::kArepoFormat3
+        : io::SnapshotDialect::kChuiNative;
+    snapshot_policy.durable_publication = false;
+    snapshot_policy.caller_managed_publication = collective_single_file;
 
     std::exception_ptr local_snapshot_write_failure;
     try {
-      io::SnapshotWritePayload snapshot_payload;
-      snapshot_payload.state = &state;
-      snapshot_payload.memory_governor = services.memory_governor;
-      snapshot_payload.config = &config;
-      snapshot_payload.normalized_config_text = frozen_config.normalized_text;
-      snapshot_payload.provenance = snapshot_provenance;
-      snapshot_payload.set_member.member_index =
-          core::checkedIntegralNarrow<std::uint32_t>(topology.world_rank, "snapshot member index");
-      snapshot_payload.set_member.num_files_per_snapshot =
-          core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot member count");
-      snapshot_payload.set_member.global_part_count = global_counts;
-      snapshot_payload.set_member.has_global_part_count = true;
-      snapshot_payload.set_member.generation_id = generation_id;
-
-      io::SnapshotIoPolicy snapshot_policy;
-      snapshot_policy.dialect = config.units.coordinate_frame == core::CoordinateFrame::kComoving
-          ? io::SnapshotDialect::kArepoFormat3
-          : io::SnapshotDialect::kChuiNative;
-      snapshot_policy.durable_publication = false;
-      io::writeScienceSnapshotHdf5(report.snapshot_path, snapshot_payload, snapshot_policy);
+      io::writeScienceSnapshotHdf5(
+          collective_single_file ? partial_single_path : report.snapshot_path,
+          snapshot_payload, snapshot_policy);
     } catch (...) {
       local_snapshot_write_failure = std::current_exception();
     }
     FailureCoordinator(services).rethrowCollectiveFailure(
-        local_snapshot_write_failure, "science snapshot member write");
+        local_snapshot_write_failure, "science snapshot write");
 
-    // Admission for the rank-local readback is agreed collectively before any
-    // rank enters HDF5.  This keeps a rank-local memory rejection from letting
-    // peers begin a governed phase that the rejecting rank will never enter.
     core::MemoryReservation snapshot_readback_reservation;
     std::exception_ptr snapshot_readback_admission_failure;
     try {
       snapshot_readback_reservation = reserveOutputStaging(
           services,
-          simulationOwnedCapacityBytes(state),
-          "io.snapshot.readback");
+          collective_single_file ? snapshotPartitionVerificationPeakBytes()
+                                 : simulationOwnedCapacityBytes(state),
+          collective_single_file ? "io.snapshot.partition_readback"
+                                 : "io.snapshot.readback");
     } catch (...) {
       snapshot_readback_admission_failure = std::current_exception();
     }
@@ -537,49 +614,76 @@ bool maybeWriteOutputs(
     std::string local_verification_detail;
     try {
       report.snapshot_roundtrip_executed = true;
-      io::SnapshotReadOptions local_read_options;
-      local_read_options.require_complete_chui_set = false;
-      const io::SnapshotReadResult snapshot_read =
-          io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config, local_read_options);
-      const SnapshotRoundtripVerification snapshot_verification =
-          verifySnapshotRoundtrip(
-              snapshot_read, state, config, frozen_config.normalized_text,
-              snapshot_provenance);
-      report.snapshot_roundtrip_ok = snapshot_verification.ok;
-      local_verification_detail = snapshot_verification.detail;
-      if (!report.snapshot_roundtrip_ok) {
-        throw std::runtime_error(
-            "snapshot scientific roundtrip verification failed: " +
-            snapshot_verification.detail);
+      if (collective_single_file) {
+        io::verifySingleFileScienceSnapshotPartitionHdf5(
+            partial_single_path, snapshot_payload, snapshot_policy);
+        report.snapshot_roundtrip_ok = true;
+        local_verification_detail = "distributed_rank_partition_exact_readback";
+      } else {
+        io::SnapshotReadOptions local_read_options;
+        local_read_options.require_complete_chui_set = false;
+        const io::SnapshotReadResult snapshot_read =
+            io::readGadgetArepoSnapshotHdf5(report.snapshot_path, config, local_read_options);
+        const SnapshotRoundtripVerification snapshot_verification =
+            verifySnapshotRoundtrip(
+                snapshot_read, state, config, frozen_config.normalized_text,
+                snapshot_provenance);
+        report.snapshot_roundtrip_ok = snapshot_verification.ok;
+        local_verification_detail = snapshot_verification.detail;
+        if (!report.snapshot_roundtrip_ok) {
+          throw std::runtime_error(
+              "snapshot scientific roundtrip verification failed: " +
+              snapshot_verification.detail);
+        }
       }
     } catch (...) {
       local_snapshot_readback_failure = std::current_exception();
     }
     FailureCoordinator(services).rethrowCollectiveFailure(
-        local_snapshot_readback_failure, "science snapshot member readback");
+        local_snapshot_readback_failure, "science snapshot readback");
 
     std::exception_ptr completion_failure;
     if (services.mpi_context.isRoot()) {
+      bool single_file_published = false;
       try {
-        io::writeSnapshotSetCompletionMarker(
-            report.snapshot_path, generation_id,
-            core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot completion member count"),
-            global_counts, false);
+        if (collective_single_file) {
+          io::publishSingleFileScienceSnapshot(
+              partial_single_path, final_single_path,
+              snapshot_payload.set_member, false);
+          single_file_published = true;
+          io::writeSnapshotSetCompletionMarker(
+              final_single_path, generation_id, 1U, global_counts, false,
+              io::SnapshotCompletionIntegrityMode::kDistributedScienceReadback);
+        } else {
+          io::writeSnapshotSetCompletionMarker(
+              report.snapshot_path, generation_id, physical_file_count,
+              global_counts, false);
+        }
+        io::SnapshotReadOptions validation_options;
+        if (collective_single_file) {
+          validation_options.validate_global_id_uniqueness = false;
+        }
         const io::SnapshotValidationReport validation =
-            io::validateSnapshotSetHdf5(report.snapshot_set_path);
+            io::validateSnapshotSetHdf5(report.snapshot_set_path, validation_options);
         validation.requireValid();
         if (validation.inspection.global_part_count != global_counts ||
-            validation.inspection.num_files_per_snapshot !=
-                static_cast<std::uint32_t>(topology.world_size)) {
+            validation.inspection.num_files_per_snapshot != physical_file_count) {
           throw std::runtime_error(
               "independent snapshot-set validation disagrees with runtime global metadata");
         }
       } catch (...) {
         completion_failure = std::current_exception();
+        if (collective_single_file && single_file_published) {
+          // A failed completion/independent-validation phase must not leave a
+          // final-named science product that the workflow itself rejected.
+          std::error_code ignored;
+          std::filesystem::remove(report.snapshot_set_path, ignored);
+          std::filesystem::remove(final_single_path, ignored);
+        }
       }
     }
     FailureCoordinator(services).rethrowCollectiveFailure(
-        completion_failure, "science snapshot set completion");
+        completion_failure, "science snapshot completion/publication");
 
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "snapshot.write.complete",
@@ -588,19 +692,17 @@ bool maybeWriteOutputs(
         .step_index = integrator_state.step_index,
         .simulation_time_code = integrator_state.current_time_code,
         .scale_factor = integrator_state.current_scale_factor,
-        .message = "snapshot member written, scientifically read back, and independently validated as one logical set",
-        .payload = {{"member_path", report.snapshot_path.string()},
+        .message = "science snapshot written, scientifically read back, and transactionally published",
+        .payload = {{"science_path", report.snapshot_path.string()},
                     {"set_path", report.snapshot_set_path.string()},
                     {"generation_id", generation_id},
+                    {"layout", single_file_snapshot ? "single" : "sharded"},
                     {"verification", local_verification_detail}},
     });
     if (services.console_reporter != nullptr) {
       services.console_reporter->emitSnapshotCommitted(
-          integrator_state.step_index,
-          report.snapshot_path,
-          report.snapshot_set_path,
-          core::checkedIntegralNarrow<std::uint32_t>(
-              topology.world_size, "snapshot console member count"));
+          integrator_state.step_index, report.snapshot_path,
+          report.snapshot_set_path, physical_file_count);
     }
     output_flushed = true;
   }
@@ -1256,6 +1358,68 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
     m_pending_output.next_snapshot_time_code =
         persisted_next_snapshot_time_code;
     m_pending_output.restart_resume_dt_time_code = 0.0;
+  }
+}
+
+void OutputRestartRuntime::ensureFinalEndpointSnapshot(
+    const core::SimulationState& state,
+    const core::IntegratorState& integrator_state) {
+  if (!m_write_outputs_enabled || integrator_state.step_index == 0U) return;
+  const double endpoint_tolerance = 1.0e-12 * std::max(
+      {1.0, std::abs(integrator_state.current_time_code),
+       std::abs(m_config.numerics.t_code_end)});
+  if (integrator_state.current_time_code + endpoint_tolerance <
+      m_config.numerics.t_code_end) {
+    return;  // bounded segment/restart probe, not authoritative normal endpoint
+  }
+  core::assertCanWriteSnapshotAtBoundary(integrator_state);
+
+  const std::filesystem::path shared_run_directory =
+      m_report.shared_run_directory.empty() ? m_report.run_directory
+                                            : m_report.shared_run_directory;
+  const std::filesystem::path completion_path = shared_run_directory / "snapshots" /
+      (m_config.output.output_stem + "_" +
+       formatThreeDigitIndex(integrator_state.step_index) + ".complete");
+  std::uint64_t root_already_committed = 0U;
+  std::exception_ptr inspection_failure;
+  if (m_services.mpi_context.isRoot()) {
+    try {
+      if (std::filesystem::exists(completion_path)) {
+        io::SnapshotReadOptions options;
+        options.require_complete_chui_set = true;
+        const io::SnapshotSetInspection inspection =
+            io::inspectSnapshotSet(completion_path, options);
+        if (!inspection.complete ||
+            !timelineTimesEqual(
+                inspection.scale_factor, integrator_state.current_scale_factor)) {
+          throw std::runtime_error(
+              "snapshot at final step index exists but does not represent the authoritative endpoint state");
+        }
+        root_already_committed = 1U;
+      }
+    } catch (...) {
+      inspection_failure = std::current_exception();
+    }
+  }
+  FailureCoordinator(m_services).rethrowCollectiveFailure(
+      inspection_failure, "final endpoint snapshot identity check");
+  if (m_services.mpi_context.allreduceSumUint64(root_already_committed) != 0U) {
+    return;
+  }
+
+  const bool flushed = maybeWriteOutputs(
+      m_frozen_config, m_config, state, integrator_state, m_scheduler,
+      m_gas_cell_scheduler, m_gravity_state, m_analysis_state, m_services,
+      m_report, m_profiler, true,
+      true, false,
+      m_pending_output.snapshot_interval_steps,
+      m_pending_output.next_snapshot_step_index,
+      m_pending_output.snapshot_interval_time_code,
+      m_pending_output.next_snapshot_time_code,
+      0.0);
+  if (!flushed) {
+    throw std::runtime_error(
+        "failed to commit required final endpoint science snapshot at an output-safe boundary");
   }
 }
 

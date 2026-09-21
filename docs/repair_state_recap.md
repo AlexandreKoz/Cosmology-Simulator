@@ -2435,3 +2435,11 @@ per-snapshot directories to stem-scoped sets inside one `snapshots/` directory
 without changing science snapshot schema v6. The config-driven DMO smoke and
 focused HDF5 IC/snapshot tests pass locally; MPI and FFTW runtime matrices remain
 dependency-blocked.
+
+## 2026-09-21 — 64^3 three-rank external-IC and science-output production closure
+
+The successful 64^3/3-rank first-light campaign exposed remaining interoperability rather than solver defects. The source now treats zero-containing external GADGET/AREPO/MONOFONIC ParticleIDs as an order-independent external identity domain and applies one overflow-checked `+1` mapping before internal use. Distributed source/final species masses use compensated local accumulation and one shared MPI reduction lane order, retaining the existing tight tolerance and explicit loss/duplication failures.
+
+Science snapshots now have a typed topology policy. `auto`/`single` selects one analysis-ready `snap_###.hdf5` for MPI only when MPI-enabled Parallel HDF5 is present; every rank writes owned global hyperslabs without gathering global state to rank zero. Publication is `.partial` -> distributed exact partition readback -> collective success agreement -> atomic final name -> completion marker. Root post-publication validation keeps bounded structural/scientific checks without materializing the redundant global ID set. Explicit `sharded` remains a compatibility backend; fixed-count `aggregated` is reserved and fails closed until implemented. Restart remains rank-oriented and unchanged. Normal completion guarantees one endpoint snapshot if cadence did not already commit that exact step/epoch.
+
+The launcher now obtains `parallel.mpi_ranks_expected` from a narrow authoritative C++ preflight for known builds, so ordinary `./chui run CONFIG` can compose MPI without a second Python config parser. Configure probes actual C++20 `std::span` support, reports compiler/dependency providers, distinguishes serial from Parallel HDF5, and warns on suspicious mixed Conda/system stacks. Serial/HDF5 focused validation passes in the repair environment; real MPI/Parallel-HDF5/FFTW qualification remains environment-blocked where those development dependencies are absent.

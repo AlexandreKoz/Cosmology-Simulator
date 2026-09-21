@@ -777,6 +777,24 @@ parseInitialConditionMissingFieldPolicy(
   throw ConfigError("unhandled ZoomLongRangeStrategy enum value during serialization");
 }
 
+[[nodiscard]] ScienceSnapshotLayout parseScienceSnapshotLayout(const std::string& value) {
+  if (value == "auto") return ScienceSnapshotLayout::kAuto;
+  if (value == "single") return ScienceSnapshotLayout::kSingle;
+  if (value == "aggregated") return ScienceSnapshotLayout::kAggregated;
+  if (value == "sharded") return ScienceSnapshotLayout::kSharded;
+  throw ConfigError("output.snapshot_layout must be one of: auto, single, aggregated, sharded");
+}
+
+[[nodiscard]] std::string_view scienceSnapshotLayoutLabel(ScienceSnapshotLayout layout) {
+  switch (layout) {
+    case ScienceSnapshotLayout::kAuto: return "auto";
+    case ScienceSnapshotLayout::kSingle: return "single";
+    case ScienceSnapshotLayout::kAggregated: return "aggregated";
+    case ScienceSnapshotLayout::kSharded: return "sharded";
+  }
+  throw ConfigError("unhandled output.snapshot_layout enum value");
+}
+
 [[nodiscard]] StarFormationModelKind parseStarFormationModelKind(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "legacy_schmidt_threshold") {
@@ -1265,6 +1283,8 @@ struct ConfigKeySpec {
       {"output.restart_stem", "restart"},
       {"output.snapshot_interval_steps", "64"},
       {"output.snapshot_interval_time_code", "0.0"},
+      {"output.snapshot_layout", "auto"},
+      {"output.snapshot_num_files", "0"},
       {"output.write_restarts", "true"},
       {"parallel.mpi_ranks_expected", "1"},
       {"parallel.omp_threads", "1"},
@@ -1504,6 +1524,11 @@ void validateConfig(const SimulationConfig& config) {
       config.output.snapshot_interval_time_code == 0.0) {
     throw ConfigError(
         "output requires snapshot_interval_steps > 0 or snapshot_interval_time_code > 0");
+  }
+  if (config.output.snapshot_layout != ScienceSnapshotLayout::kAggregated &&
+      config.output.snapshot_num_files > 1U) {
+    throw ConfigError(
+        "output.snapshot_num_files > 1 is only valid with snapshot_layout=aggregated");
   }
   if (config.parallel.mpi_ranks_expected <= 0) {
     throw ConfigError("parallel.mpi_ranks_expected must be positive");
@@ -2419,6 +2444,10 @@ class NormalizedConfigStream {
   stream << "snapshot_interval_steps = " << frozen.config.output.snapshot_interval_steps << '\n';
   stream << "snapshot_interval_time_code = "
          << frozen.config.output.snapshot_interval_time_code << '\n';
+  stream << "snapshot_layout = "
+         << scienceSnapshotLayoutLabel(frozen.config.output.snapshot_layout) << '\n';
+  stream << "snapshot_num_files = "
+         << frozen.config.output.snapshot_num_files << '\n';
   stream << "write_restarts = " << (frozen.config.output.write_restarts ? "true" : "false") << '\n';
   stream << "\n[parallel]\n";
   stream << "mpi_ranks_expected = " << frozen.config.parallel.mpi_ranks_expected << '\n';
@@ -3270,6 +3299,11 @@ class NormalizedConfigStream {
   frozen.config.output.snapshot_interval_time_code = parseFloating(
       requireString(entries, consumed, "output.snapshot_interval_time_code", "0.0"),
       "output.snapshot_interval_time_code");
+  frozen.config.output.snapshot_layout = parseScienceSnapshotLayout(
+      requireString(entries, consumed, "output.snapshot_layout", "auto"));
+  frozen.config.output.snapshot_num_files = parseNumber<std::uint32_t>(
+      requireString(entries, consumed, "output.snapshot_num_files", "0"),
+      "output.snapshot_num_files");
   frozen.config.output.write_restarts = parseBool(
       requireString(entries, consumed, "output.write_restarts", "true"), "output.write_restarts");
 

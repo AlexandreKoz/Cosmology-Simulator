@@ -191,10 +191,14 @@ void validateRecordScientificState(
       !std::isfinite(record.vz)) {
     throw std::runtime_error("IC velocity components must be finite");
   }
-  if (record.id == 0U || !(record.mass > 0.0) ||
-      !std::isfinite(record.mass)) {
-    throw std::runtime_error(
-        "IC particle IDs must be nonzero and masses finite/positive");
+  if (record.id == 0U) {
+    throw std::runtime_error("IC particle ID must be nonzero after external identity normalization");
+  }
+  if (!std::isfinite(record.mass)) {
+    throw std::runtime_error("IC particle mass must be finite");
+  }
+  if (!(record.mass > 0.0)) {
+    throw std::runtime_error("IC particle mass must be positive");
   }
   if (policy == IcSpeciesPolicy::kGas) {
     if (!std::isfinite(record.gas_density) || record.gas_density < 0.0 ||
@@ -310,15 +314,15 @@ void validateRecordScientificState(
       ids[i] = base + i;
     }
   }
-  if (inspection.normalize_zero_based_contiguous_ids) {
-    const std::uint64_t base =
-        precedingRecordCount(manifest, file_index, type_index) + start;
+  if (inspection.normalize_external_zero_based_ids) {
     for (std::size_t i = 0U; i < ids.size(); ++i) {
-      const std::uint64_t expected = base + i;
-      if (ids[i] != expected || ids[i] == std::numeric_limits<std::uint64_t>::max()) {
-        throw std::runtime_error(
-            "external zero-based ParticleIDs are not globally contiguous; "
-            "refusing an ambiguous identity remap");
+      if (ids[i] == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error(
+            "external ParticleID normalization overflow: file=" +
+            manifest.source_files.at(file_index).string() +
+            " PartType=" + std::to_string(type_index) +
+            " row=" + std::to_string(start + i) +
+            " value=UINT64_MAX");
       }
       ids[i] += 1U;
     }
@@ -429,6 +433,18 @@ void validateRecordScientificState(
         session,
         requireField(manifest, file_index, prefix + "ParentParticleIDs"),
         start, count, tracer_parent, counters);
+    if (inspection.normalize_external_zero_based_ids) {
+      for (std::size_t i = 0; i < tracer_parent.size(); ++i) {
+        if (tracer_parent[i] == std::numeric_limits<std::uint64_t>::max()) {
+          throw std::runtime_error(
+              "external ParentParticleIDs normalization would overflow uint64: file=" +
+              manifest.source_files.at(file_index).string() +
+              " PartType=" + std::to_string(type_index) +
+              " row=" + std::to_string(start + i));
+        }
+        tracer_parent[i] += 1U;
+      }
+    }
     readChunkU64(
         session,
         requireField(manifest, file_index, prefix + "InjectionStep"),

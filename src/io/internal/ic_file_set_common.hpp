@@ -30,7 +30,7 @@ struct Inspection {
   IcManifest manifest;
   std::vector<IcSchemaSummary> schemas;
   IcImportCounters counters;
-  bool normalize_zero_based_contiguous_ids = false;
+  bool normalize_external_zero_based_ids = false;
 };
 
 struct SourceFileInspection {

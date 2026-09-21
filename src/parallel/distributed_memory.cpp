@@ -3641,6 +3641,22 @@ std::uint64_t MpiContext::allreduceSumUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+std::uint64_t MpiContext::exclusiveScanSumUint64(std::uint64_t local_value) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled) {
+    std::uint64_t prefix = 0U;
+    const int rc = MPI_Exscan(
+        &local_value, &prefix, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+    if (rc != MPI_SUCCESS) {
+      throw std::runtime_error(
+          "MPI_Exscan failed while computing distributed snapshot row offsets");
+    }
+    return m_world_rank == 0 ? 0U : prefix;
+  }
+#endif
+  return 0U;
+}
+
 std::uint64_t MpiContext::allreduceMaxUint64(std::uint64_t local_value) const {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   if (m_is_enabled) {

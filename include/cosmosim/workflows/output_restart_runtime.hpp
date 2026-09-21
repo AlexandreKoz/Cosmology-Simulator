@@ -75,6 +75,11 @@ class OutputRestartRuntime final {
       bool write_outputs_enabled);
 
   void execute(OutputRestartStageView& view);
+  // At normal workflow completion, ensure the authoritative endpoint has one
+  // and only one committed science snapshot. Cadence state remains unchanged.
+  void ensureFinalEndpointSnapshot(
+      const core::SimulationState& state,
+      const core::IntegratorState& integrator_state);
   [[nodiscard]] RuntimeTaskMemoryEstimate estimateMemory(
       const core::SimulationState& state,
       const core::IntegratorState& integrator_state) const;

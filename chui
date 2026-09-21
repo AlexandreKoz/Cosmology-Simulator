@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from typing import Any
 
@@ -298,6 +299,32 @@ def _mpi_launcher(build_dir: Path) -> tuple[str, str]:
     return mpi_exec, numproc_flag
 
 
+def _infer_mpi_ranks_from_authoritative_config(
+    executable: Path, config_path: str
+) -> int:
+    completed = subprocess.run(
+        [str(executable), "--print-mpi-ranks-expected", config_path],
+        check=False, capture_output=True, text=True
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise LauncherError(
+            "authoritative config preflight failed while reading "
+            "parallel.mpi_ranks_expected" + (f": {detail}" if detail else "")
+        )
+    try:
+        ranks = int(completed.stdout.strip(), 10)
+    except ValueError as exc:
+        raise LauncherError(
+            "authoritative config preflight returned an invalid MPI rank count"
+        ) from exc
+    if ranks <= 0:
+        raise LauncherError(
+            "authoritative config preflight returned a non-positive MPI rank count"
+        )
+    return ranks
+
+
 def _harness_console_args(args: argparse.Namespace) -> list[str]:
     result: list[str] = []
     if args.quiet:
@@ -339,14 +366,37 @@ def _run(args: argparse.Namespace, mpi_passthrough: list[str]) -> int:
         )
     data = _load_presets()
     executable, build_dir = _select_executable(args, data)
+    mpi_enabled = _cmake_cache_bool(build_dir, "COSMOSIM_ENABLE_MPI")
+    # Only known CMake builds use the authoritative C++ preflight. Explicit
+    # external executables without build metadata remain an intentional expert
+    # override and let the runtime validate communicator truth itself.
+    if mpi_enabled is not None:
+        expected_ranks = _infer_mpi_ranks_from_authoritative_config(
+            executable, args.config
+        )
+        if args.mpi is None and expected_ranks > 1:
+            if mpi_enabled is False:
+                raise LauncherError(
+                    f"authoritative configuration expects {expected_ranks} MPI ranks, "
+                    "but selected build has COSMOSIM_ENABLE_MPI=OFF. "
+                    "Select an MPI-enabled preset/build."
+                )
+            args.mpi = expected_ranks
+        elif args.mpi is not None and args.mpi != expected_ranks:
+            raise LauncherError(
+                f"--mpi {args.mpi} contradicts authoritative "
+                f"parallel.mpi_ranks_expected={expected_ranks}; config truth is not rewritten"
+            )
+
     harness_args = [str(executable), args.config, *_harness_console_args(args)]
 
     if args.mpi is None:
         if mpi_passthrough:
-            raise LauncherError("arguments after '--' are MPI-launcher arguments and require --mpi N")
+            raise LauncherError(
+                "arguments after '--' are MPI-launcher arguments but authoritative config expects one rank"
+            )
         command = harness_args
     else:
-        mpi_enabled = _cmake_cache_bool(build_dir, "COSMOSIM_ENABLE_MPI")
         if mpi_enabled is False:
             raise LauncherError(
                 "--mpi was requested for a build whose CMake cache has "

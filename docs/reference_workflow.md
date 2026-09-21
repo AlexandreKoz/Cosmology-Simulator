@@ -67,6 +67,7 @@ The runner honors these config fields directly:
 - `output.restart_stem`
 - `output.snapshot_interval_steps`
 - `output.snapshot_interval_time_code`
+- `output.snapshot_layout` / `output.snapshot_num_files`
 - `output.write_restarts`
 - `numerics.treepm_pm_grid_nx`
 - `numerics.treepm_pm_grid_ny`
@@ -91,7 +92,12 @@ continues through the established ownership initialization path.
 Before stepping, distributed import verifies a canonical manifest digest, exact global
 ID uniqueness, exact file/chunk coverage, per-chunk source-to-final ID balance,
 ownership completeness and exclusivity, species counts and mass totals, all-axis
-finite/domain-valid fields, and sidecar invariants. File inspection and payload
+finite/domain-valid fields, and sidecar invariants. External GADGET/AREPO/MONOFONIC
+ParticleIDs are audited independently of storage order; if the external identity domain
+contains zero, one deterministic `external_id + 1` mapping is applied to the complete
+source set after an overflow preflight. Source and routed species masses use the same
+compensated local accumulation contract and are reduced in one MPI lane order before
+tolerance comparison. File inspection and payload
 reading are assigned by stable `file_index % world_size` ownership. Full-file hashing
 is bounded by three passes per source file and does not grow with routing batches.
 Potentially throwing digest, session construction, serialization/accounting,
@@ -117,6 +123,24 @@ directory. Every rank emits `io.ic_ingestion.summary` counters through the share
 profiler.
 
 TreePM runtime mapping is explicit and auditable:
+
+Science snapshot topology is independent of restart topology. `output.snapshot_layout=auto`
+uses one ordinary `snap_###.hdf5` file in serial and, for MPI, when the selected build
+has MPI-enabled Parallel HDF5. All ranks create the shared file/schema and write only
+their owned non-overlapping global hyperslabs; no full-state rank-0 gather exists. The
+file is first written as `.partial`, each rank exactly reads back its own partition, ranks
+agree success, and only then rank 0 atomically publishes the final name and completion
+marker. The post-publication structural validator keeps its bounded field checks but
+skips the redundant root-global ID uniqueness buffer on this path because exact
+partition readback already proved file IDs equal the authoritative globally unique
+runtime IDs. Explicit `sharded` preserves the compatibility topology; `aggregated` is
+reserved and fails closed until a fixed-file-count backend is qualified.
+
+At normal integration completion, the output runtime checks the authoritative final step
+and epoch against an already committed snapshot. If cadence already emitted that exact
+state, no second snapshot is written; otherwise one endpoint snapshot is forced at the
+safe boundary. Restart cadence authority remains checkpoint-owned, so this finalization
+does not recompute or rewrite cadence state.
 
 Output dispatch supports both step-modulo cadence and code-time cadence. A positive
 `snapshot_interval_time_code` creates ordered events anchored at

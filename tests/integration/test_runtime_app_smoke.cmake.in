@@ -104,8 +104,8 @@ endif()
 if(NOT runtime_ops MATCHES "snapshot.write.complete")
   message(FATAL_ERROR "runtime smoke operational report must record snapshot.write.complete")
 endif()
-if(NOT runtime_ops MATCHES "scientifically read back, and independently validated as one logical set")
-  message(FATAL_ERROR "runtime smoke must record successful scientific snapshot-set validation")
+if(NOT runtime_ops MATCHES "scientifically read back, and transactionally published")
+  message(FATAL_ERROR "runtime smoke must record successful scientific snapshot publication")
 endif()
 
 file(READ "${runtime_smoke_run_dir}/normalized_config.param.txt" runtime_normalized)
@@ -146,6 +146,36 @@ foreach(quiet_record IN ITEMS
     message(FATAL_ERROR "--quiet must suppress routine native CHUI console record ${quiet_record}")
   endif()
 endforeach()
+
+# Off-cadence endpoint: cadence cannot fire on step 1, so normal completion must
+# force exactly one science snapshot at the authoritative final endpoint.
+file(REMOVE_RECURSE "${runtime_smoke_run_root}")
+set(runtime_smoke_off_cadence_config "${runtime_smoke_root}/runtime_smoke_off_cadence.param.txt")
+file(READ "${runtime_smoke_config}" runtime_smoke_off_cadence_text)
+string(REPLACE "snapshot_interval_steps = 1" "snapshot_interval_steps = 8"
+       runtime_smoke_off_cadence_text "${runtime_smoke_off_cadence_text}")
+file(WRITE "${runtime_smoke_off_cadence_config}" "${runtime_smoke_off_cadence_text}")
+execute_process(
+  COMMAND "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_smoke_off_cadence_config}" --quiet
+  RESULT_VARIABLE runtime_off_cadence_result
+  OUTPUT_FILE "${runtime_smoke_root}/runtime_off_cadence_stdout.txt"
+  ERROR_FILE "${runtime_smoke_root}/runtime_off_cadence_stderr.txt"
+  TIMEOUT 30)
+if(NOT runtime_off_cadence_result EQUAL 0)
+  file(READ "${runtime_smoke_root}/runtime_off_cadence_stderr.txt" runtime_off_cadence_err)
+  message(FATAL_ERROR "off-cadence endpoint runtime smoke failed: ${runtime_off_cadence_err}")
+endif()
+file(GLOB runtime_off_cadence_snapshots "${runtime_smoke_snapshot_dir}/snap_*.hdf5")
+file(GLOB runtime_off_cadence_markers "${runtime_smoke_snapshot_dir}/snap_*.complete")
+list(LENGTH runtime_off_cadence_snapshots runtime_off_cadence_snapshot_count)
+list(LENGTH runtime_off_cadence_markers runtime_off_cadence_marker_count)
+if(NOT runtime_off_cadence_snapshot_count EQUAL 1 OR
+   NOT runtime_off_cadence_marker_count EQUAL 1 OR
+   NOT EXISTS "${runtime_smoke_snapshot_dir}/snap_001.hdf5" OR
+   NOT EXISTS "${runtime_smoke_snapshot_dir}/snap_001.complete")
+  message(FATAL_ERROR
+    "off-cadence endpoint must publish exactly one snap_001.hdf5 and one completion marker")
+endif()
 
 # The smoke proves artifact creation above, then removes its temporary run tree
 # so ordinary CTest execution does not leave runtime products in the source package.

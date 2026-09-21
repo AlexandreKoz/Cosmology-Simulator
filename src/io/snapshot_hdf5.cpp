@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -35,6 +36,9 @@
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
+#endif
+#if COSMOSIM_ENABLE_MPI && COSMOSIM_HDF5_PARALLEL
+#include <mpi.h>
 #endif
 
 namespace cosmosim::io {
@@ -957,6 +961,21 @@ void writeScienceSnapshotHdf5(
     throw std::runtime_error(
         "snapshot writer requires a non-empty provenance configuration hash");
   }
+  if (payload.collective_single_file) {
+#if !(COSMOSIM_ENABLE_MPI && COSMOSIM_HDF5_PARALLEL)
+    throw std::runtime_error(
+        "collective single-file science snapshots require MPI-enabled Parallel HDF5");
+#else
+    if (!policy.caller_managed_publication) {
+      throw std::runtime_error(
+          "collective single-file science snapshots require caller-managed transactional publication");
+    }
+    if (policy.enable_compression) {
+      throw std::runtime_error(
+          "collective single-file science snapshots do not enable filtered compression in the qualified backend");
+    }
+#endif
+  }
 
   const core::SimulationState& state = *payload.state;
   const core::SimulationConfig& config = *payload.config;
@@ -1034,20 +1053,51 @@ void writeScienceSnapshotHdf5(
     throw std::invalid_argument(
         "snapshot writer: multifile output requires explicit global particle counts");
   }
+  if (payload.collective_single_file) {
+    if (member.member_index != 0U || member.num_files_per_snapshot != 1U ||
+        !member.has_global_part_count) {
+      throw std::invalid_argument(
+          "collective single-file snapshot requires member_index=0, NumFilesPerSnapshot=1, and global counts");
+    }
+    for (std::size_t type = 0; type < 6U; ++type) {
+      if (payload.collective_file_row_offset[type] > global_count_by_type[type] ||
+          count_by_type[type] > global_count_by_type[type] - payload.collective_file_row_offset[type]) {
+        throw std::runtime_error("collective snapshot rank hyperslab exceeds global dataset extent");
+      }
+    }
+  }
 
-  internal::TransactionalFileTarget transaction(
-      output_path, ".part",
-      policy.durable_publication
-          ? internal::FileDurability::kDurablePublication
-          : internal::FileDurability::kAtomicVisibility);
+  std::unique_ptr<internal::TransactionalFileTarget> transaction;
+  std::filesystem::path write_path = output_path;
+  if (!policy.caller_managed_publication) {
+    transaction = std::make_unique<internal::TransactionalFileTarget>(
+        output_path, ".part",
+        policy.durable_publication
+            ? internal::FileDurability::kDurablePublication
+            : internal::FileDurability::kAtomicVisibility);
+    write_path = transaction->temporaryPath();
+  }
   SnapshotWriteMetrics write_metrics;
   {
+  Hdf5Handle file_access;
+#if COSMOSIM_ENABLE_MPI && COSMOSIM_HDF5_PARALLEL
+  if (payload.collective_single_file) {
+    file_access = Hdf5Handle(H5Pcreate(H5P_FILE_ACCESS));
+    if (!file_access.valid() ||
+        H5Pset_fapl_mpio(file_access.get(), MPI_COMM_WORLD, MPI_INFO_NULL) < 0 ||
+        H5Pset_all_coll_metadata_ops(file_access.get(), 1) < 0 ||
+        H5Pset_coll_metadata_write(file_access.get(), 1) < 0) {
+      throw std::runtime_error(
+          "failed configuring Parallel-HDF5 MPI-IO/collective-metadata file access");
+    }
+  }
+#endif
   Hdf5Handle file(H5Fcreate(
-      transaction.temporaryPath().string().c_str(), H5F_ACC_TRUNC,
-      H5P_DEFAULT, H5P_DEFAULT));
+      write_path.string().c_str(), H5F_ACC_TRUNC,
+      H5P_DEFAULT, file_access.valid() ? file_access.get() : H5P_DEFAULT));
   if (!file.valid()) {
     throw std::runtime_error(
-        "failed creating snapshot file: " + transaction.temporaryPath().string());
+        "failed creating snapshot file: " + write_path.string());
   }
 
   const auto& schema = scienceSnapshotSchemaMap();
@@ -1060,8 +1110,9 @@ void writeScienceSnapshotHdf5(
   }
 
   writeHeaderArrays(
-      header_group.get(), count_by_type, global_count_by_type, mass_table, config,
-      state, member, conversion);
+      header_group.get(),
+      payload.collective_single_file ? global_count_by_type : count_by_type,
+      global_count_by_type, mass_table, config, state, member, conversion);
   writeScalarStringAttribute(header_group.get(), "CosmoSimSchemaName", schema.schema_name);
   writeScalarUint32Attribute(header_group.get(), "CosmoSimSchemaVersion", schema.schema_version);
   writeScalarStringAttribute(
@@ -1265,7 +1316,11 @@ void writeScienceSnapshotHdf5(
 
   for (std::size_t type_index = 0; type_index < schema.part_type_group.size(); ++type_index) {
     const std::size_t row_count = static_cast<std::size_t>(count_by_type[type_index]);
-    if (row_count == 0U) {
+    const std::size_t file_row_count = static_cast<std::size_t>(
+        payload.collective_single_file ? global_count_by_type[type_index] : count_by_type[type_index]);
+    const std::size_t file_row_base = static_cast<std::size_t>(
+        payload.collective_single_file ? payload.collective_file_row_offset[type_index] : 0U);
+    if (file_row_count == 0U) {
       continue;
     }
 
@@ -1278,48 +1333,52 @@ void writeScienceSnapshotHdf5(
 
     auto coords_ds = createStreamingDataset(
         type_group.get(), schema.coordinates.canonical_name, H5T_IEEE_F64LE,
-        row_count, 3, policy);
+        file_row_count, 3, policy);
     auto velocities_ds = createStreamingDataset(
         type_group.get(), schema.velocities.canonical_name, H5T_IEEE_F64LE,
-        row_count, 3, policy);
+        file_row_count, 3, policy);
     auto masses_ds = createStreamingDataset(
         type_group.get(), schema.masses.canonical_name, H5T_IEEE_F64LE,
-        row_count, 1, policy);
+        file_row_count, 1, policy);
     auto ids_ds = createStreamingDataset(
         type_group.get(), schema.particle_ids.canonical_name, H5T_STD_U64LE,
-        row_count, 1, policy);
+        file_row_count, 1, policy);
 
     std::optional<StreamingDataset> softening_ds;
     std::optional<StreamingDataset> softening_override_ds;
-    const bool has_particle_softening =
-        type_index != 0U && !state.particle_sidecar.gravity_softening_comoving.empty();
+    const bool has_particle_softening = type_index != 0U &&
+        (payload.collective_single_file
+             ? payload.collective_write_particle_softening
+             : !state.particle_sidecar.gravity_softening_comoving.empty());
     if (has_particle_softening) {
       softening_ds.emplace(createStreamingDataset(
           type_group.get(), "GravitySofteningComoving", H5T_IEEE_F64LE,
-          row_count, 1, policy));
-      if (!state.particle_sidecar.has_gravity_softening_override.empty()) {
+          file_row_count, 1, policy));
+      if (payload.collective_single_file
+              ? payload.collective_write_particle_softening_override
+              : !state.particle_sidecar.has_gravity_softening_override.empty()) {
         softening_override_ds.emplace(createStreamingDataset(
             type_group.get(), "GravitySofteningOverrideMask", H5T_STD_U8LE,
-            row_count, 1, policy));
+            file_row_count, 1, policy));
       }
     }
 
     std::unordered_map<std::string, StreamingDataset> extra;
     auto add_double = [&](std::string name) {
       extra.emplace(name, createStreamingDataset(
-          type_group.get(), name, H5T_IEEE_F64LE, row_count, 1, policy));
+          type_group.get(), name, H5T_IEEE_F64LE, file_row_count, 1, policy));
     };
     auto add_u64 = [&](std::string name) {
       extra.emplace(name, createStreamingDataset(
-          type_group.get(), name, H5T_STD_U64LE, row_count, 1, policy));
+          type_group.get(), name, H5T_STD_U64LE, file_row_count, 1, policy));
     };
     auto add_u32 = [&](std::string name) {
       extra.emplace(name, createStreamingDataset(
-          type_group.get(), name, H5T_STD_U32LE, row_count, 1, policy));
+          type_group.get(), name, H5T_STD_U32LE, file_row_count, 1, policy));
     };
     auto add_u8 = [&](std::string name) {
       extra.emplace(name, createStreamingDataset(
-          type_group.get(), name, H5T_STD_U8LE, row_count, 1, policy));
+          type_group.get(), name, H5T_STD_U8LE, file_row_count, 1, policy));
     };
 
     if (type_index == 0U) {
@@ -1358,28 +1417,28 @@ void writeScienceSnapshotHdf5(
     particle_indices.reserve(chunk_rows);
 
     const auto write_double_extra = [&](std::string_view name, const double* values, std::size_t offset, std::size_t count) {
-      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_DOUBLE, values, offset, count);
+      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_DOUBLE, values, file_row_base + offset, count);
     };
     const auto write_u64_extra = [&](std::string_view name, const std::uint64_t* values, std::size_t offset, std::size_t count) {
-      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_UINT64, values, offset, count);
+      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_UINT64, values, file_row_base + offset, count);
     };
     const auto write_u32_extra = [&](std::string_view name, const std::uint32_t* values, std::size_t offset, std::size_t count) {
-      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_UINT32, values, offset, count);
+      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_UINT32, values, file_row_base + offset, count);
     };
     const auto write_u8_extra = [&](std::string_view name, const std::uint8_t* values, std::size_t offset, std::size_t count) {
-      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_UINT8, values, offset, count);
+      writeStreamingChunk(extra.at(std::string(name)), H5T_NATIVE_UINT8, values, file_row_base + offset, count);
     };
 
     auto write_base = [&](std::size_t output_offset, std::size_t count) {
-      writeStreamingChunk(coords_ds, H5T_NATIVE_DOUBLE, coords.data(), output_offset, count);
-      writeStreamingChunk(velocities_ds, H5T_NATIVE_DOUBLE, velocities.data(), output_offset, count);
-      writeStreamingChunk(masses_ds, H5T_NATIVE_DOUBLE, masses.data(), output_offset, count);
-      writeStreamingChunk(ids_ds, H5T_NATIVE_UINT64, ids.data(), output_offset, count);
+      writeStreamingChunk(coords_ds, H5T_NATIVE_DOUBLE, coords.data(), file_row_base + output_offset, count);
+      writeStreamingChunk(velocities_ds, H5T_NATIVE_DOUBLE, velocities.data(), file_row_base + output_offset, count);
+      writeStreamingChunk(masses_ds, H5T_NATIVE_DOUBLE, masses.data(), file_row_base + output_offset, count);
+      writeStreamingChunk(ids_ds, H5T_NATIVE_UINT64, ids.data(), file_row_base + output_offset, count);
       if (softening_ds.has_value()) {
-        writeStreamingChunk(*softening_ds, H5T_NATIVE_DOUBLE, softening.data(), output_offset, count);
+        writeStreamingChunk(*softening_ds, H5T_NATIVE_DOUBLE, softening.data(), file_row_base + output_offset, count);
       }
       if (softening_override_ds.has_value()) {
-        writeStreamingChunk(*softening_override_ds, H5T_NATIVE_UINT8, override_mask.data(), output_offset, count);
+        writeStreamingChunk(*softening_override_ds, H5T_NATIVE_UINT8, override_mask.data(), file_row_base + output_offset, count);
       }
     };
 
@@ -1628,9 +1687,139 @@ void writeScienceSnapshotHdf5(
     throw std::runtime_error("failed to flush snapshot file");
   }
   }  // close all HDF5 identifiers before filesystem publication
-  transaction.publish();
-  internal::writeSnapshotMemberIntegritySidecar(
-      output_path, member, policy.durable_publication);
+  if (transaction) {
+    transaction->publish();
+    internal::writeSnapshotMemberIntegritySidecar(
+        output_path, member, policy.durable_publication);
+  }
+#endif
+}
+
+void verifySingleFileScienceSnapshotPartitionHdf5(
+    const std::filesystem::path& input_path,
+    const SnapshotWritePayload& payload,
+    const SnapshotIoPolicy& policy) {
+#if !COSMOSIM_ENABLE_HDF5
+  static_cast<void>(input_path);
+  static_cast<void>(payload);
+  static_cast<void>(policy);
+  throw std::runtime_error("COSMOSIM_ENABLE_HDF5=OFF: snapshot verifier unavailable");
+#else
+  if (!payload.collective_single_file || payload.state == nullptr || payload.config == nullptr) {
+    throw std::invalid_argument("single-file partition verification requires a collective payload with state/config");
+  }
+  const core::SimulationState& state = *payload.state;
+  const core::SimulationConfig& config = *payload.config;
+  const SnapshotDialect dialect = internal::resolveSnapshotWriteDialect(policy.dialect, config);
+  const internal::SnapshotConversionContext conversion = internal::makeSnapshotConversionContext(
+      dialect, config, state.metadata.scale_factor);
+  Hdf5Handle file(H5Fopen(input_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT));
+  if (!file.valid()) {
+    throw std::runtime_error("failed opening collective science snapshot for partition readback: " + input_path.string());
+  }
+  const auto& schema = scienceSnapshotSchemaMap();
+  constexpr std::size_t k_verify_chunk = 4096U;
+  const auto require_double_equal = [](double actual, double expected, std::string_view what) {
+    if (actual != expected) {
+      throw std::runtime_error("collective science snapshot partition readback mismatch in " + std::string(what));
+    }
+  };
+
+  // Gas rows preserve dense local CellSoa ordering within each rank's global hyperslab.
+  if (state.cells.size() != 0U) {
+    Hdf5Handle group(H5Gopen2(file.get(), std::string(schema.part_type_group[0]).c_str(), H5P_DEFAULT));
+    if (!group.valid()) throw std::runtime_error("collective science snapshot missing /PartType0");
+    const std::size_t base = static_cast<std::size_t>(payload.collective_file_row_offset[0]);
+    for (std::size_t offset = 0; offset < state.cells.size(); offset += k_verify_chunk) {
+      const std::size_t count = std::min(k_verify_chunk, state.cells.size() - offset);
+      std::vector<double> coords, velocities, masses;
+      std::vector<std::uint64_t> ids;
+      readDatasetChunk2d(group.get(), std::string(schema.coordinates.canonical_name), base + offset, count, coords);
+      readDatasetChunk2d(group.get(), std::string(schema.velocities.canonical_name), base + offset, count, velocities);
+      readDatasetChunk1d(group.get(), std::string(schema.masses.canonical_name), base + offset, count, masses);
+      readDatasetChunkIds(group.get(), std::string(schema.particle_ids.canonical_name), base + offset, count, ids);
+      for (std::size_t j = 0; j < count; ++j) {
+        const std::size_t row = offset + j;
+        const auto* identity = state.gas_cell_identity.findByLocalRow(
+            core::checkedLocalCellRow(row, "collective snapshot readback gas row"));
+        if (identity == nullptr || ids[j] != identity->gas_cell_id) {
+          throw std::runtime_error("collective science snapshot gas ParticleIDs readback mismatch");
+        }
+        require_double_equal(coords[3*j+0], conversion.positionToStored(state.cells.center_x_comoving[row]), "gas Coordinates");
+        require_double_equal(coords[3*j+1], conversion.positionToStored(state.cells.center_y_comoving[row]), "gas Coordinates");
+        require_double_equal(coords[3*j+2], conversion.positionToStored(state.cells.center_z_comoving[row]), "gas Coordinates");
+        require_double_equal(velocities[3*j+0], conversion.velocityToStored(state.gas_cells.velocity_x_peculiar[row]), "gas Velocities");
+        require_double_equal(velocities[3*j+1], conversion.velocityToStored(state.gas_cells.velocity_y_peculiar[row]), "gas Velocities");
+        require_double_equal(velocities[3*j+2], conversion.velocityToStored(state.gas_cells.velocity_z_peculiar[row]), "gas Velocities");
+        require_double_equal(masses[j], conversion.massToStored(state.cells.mass_code[row]), "gas Masses");
+      }
+    }
+  }
+
+  for (std::size_t type_index = 1U; type_index < 6U; ++type_index) {
+    std::vector<std::uint32_t> rows;
+    rows.reserve(std::min<std::size_t>(k_verify_chunk, state.particles.size()));
+    std::size_t output_offset = 0U;
+    Hdf5Handle group;
+    const std::size_t base = static_cast<std::size_t>(payload.collective_file_row_offset[type_index]);
+    auto flush = [&]() {
+      if (rows.empty()) return;
+      if (!group.valid()) {
+        group = Hdf5Handle(H5Gopen2(file.get(), std::string(schema.part_type_group[type_index]).c_str(), H5P_DEFAULT));
+        if (!group.valid()) throw std::runtime_error("collective science snapshot missing populated PartType group");
+      }
+      std::vector<double> coords, velocities, masses;
+      std::vector<std::uint64_t> ids;
+      readDatasetChunk2d(group.get(), std::string(schema.coordinates.canonical_name), base + output_offset, rows.size(), coords);
+      readDatasetChunk2d(group.get(), std::string(schema.velocities.canonical_name), base + output_offset, rows.size(), velocities);
+      readDatasetChunk1d(group.get(), std::string(schema.masses.canonical_name), base + output_offset, rows.size(), masses);
+      readDatasetChunkIds(group.get(), std::string(schema.particle_ids.canonical_name), base + output_offset, rows.size(), ids);
+      for (std::size_t j = 0; j < rows.size(); ++j) {
+        const std::size_t row = rows[j];
+        if (ids[j] != state.particle_sidecar.particle_id[row]) {
+          throw std::runtime_error("collective science snapshot particle ID readback mismatch");
+        }
+        require_double_equal(coords[3*j+0], conversion.positionToStored(state.particles.position_x_comoving[row]), "particle Coordinates");
+        require_double_equal(coords[3*j+1], conversion.positionToStored(state.particles.position_y_comoving[row]), "particle Coordinates");
+        require_double_equal(coords[3*j+2], conversion.positionToStored(state.particles.position_z_comoving[row]), "particle Coordinates");
+        require_double_equal(velocities[3*j+0], conversion.velocityToStored(state.particles.velocity_x_peculiar[row]), "particle Velocities");
+        require_double_equal(velocities[3*j+1], conversion.velocityToStored(state.particles.velocity_y_peculiar[row]), "particle Velocities");
+        require_double_equal(velocities[3*j+2], conversion.velocityToStored(state.particles.velocity_z_peculiar[row]), "particle Velocities");
+        require_double_equal(masses[j], conversion.massToStored(state.particles.mass_code[row]), "particle Masses");
+      }
+      output_offset += rows.size();
+      rows.clear();
+    };
+    for (std::size_t row = 0; row < state.particles.size(); ++row) {
+      if (mapSpeciesTagToPartType(state.particle_sidecar.species_tag[row]) != type_index) continue;
+      rows.push_back(core::checkedLocalParticleRow(row, "collective snapshot readback particle row"));
+      if (rows.size() == k_verify_chunk) flush();
+    }
+    flush();
+  }
+#endif
+}
+
+void publishSingleFileScienceSnapshot(
+    const std::filesystem::path& temporary_path,
+    const std::filesystem::path& final_path,
+    const SnapshotSetMemberInfo& member,
+    bool durable_publication) {
+#if !COSMOSIM_ENABLE_HDF5
+  static_cast<void>(temporary_path);
+  static_cast<void>(final_path);
+  static_cast<void>(member);
+  static_cast<void>(durable_publication);
+  throw std::runtime_error("COSMOSIM_ENABLE_HDF5=OFF: snapshot publication unavailable");
+#else
+  if (member.member_index != 0U || member.num_files_per_snapshot != 1U ||
+      !member.has_global_part_count || member.generation_id.empty()) {
+    throw std::invalid_argument("single-file snapshot publication received invalid logical member metadata");
+  }
+  internal::atomicReplaceFile(
+      temporary_path, final_path,
+      durable_publication ? internal::FileDurability::kDurablePublication
+                          : internal::FileDurability::kAtomicVisibility);
 #endif
 }
 
@@ -1803,7 +1992,8 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
   const core::ModePolicy mode_policy = core::buildModePolicy(config.mode);
   const bool periodic_external_positions = !chui_authored &&
       mode_policy.gravity_boundary == core::GravityBoundaryModel::kPeriodicPoisson;
-  bool source_id_policy_decided = chui_authored || total_count == 0U;
+  bool source_id_has_zero = false;
+  bool source_id_has_uint64_max = false;
   bool source_id_affine_plus_one = false;
   std::uint64_t periodically_wrapped_components = 0U;
   std::vector<std::uint32_t> tracer_particle_index;
@@ -2282,20 +2472,10 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         position_x = wrapped_x; position_y = wrapped_y; position_z = wrapped_z;
       }
       std::uint64_t internal_particle_id = ids_chunk[i];
-      if (!source_id_policy_decided) {
-        source_id_affine_plus_one = internal_particle_id == 0U;
-        source_id_policy_decided = true;
-      }
-      if (source_id_affine_plus_one) {
-        if (internal_particle_id != static_cast<std::uint64_t>(global_i) ||
-            internal_particle_id == std::numeric_limits<std::uint64_t>::max()) {
-          throw std::runtime_error(
-              "snapshot reader: zero-based external IDs require contiguous row-ordered IDs for bounded affine normalization");
-        }
-        ++internal_particle_id;
-      } else if (internal_particle_id == 0U) {
-        throw std::runtime_error(
-            "snapshot reader: external ParticleID zero appeared outside the proven contiguous zero-based mapping");
+      if (!chui_authored) {
+        source_id_has_zero = source_id_has_zero || internal_particle_id == 0U;
+        source_id_has_uint64_max = source_id_has_uint64_max ||
+            internal_particle_id == std::numeric_limits<std::uint64_t>::max();
       }
       if (chui_authored) {
         const double tolerance = 1.0e-10 * std::max(
@@ -2409,6 +2589,33 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
     }
 
     global_offset += local_count;
+  }
+
+  source_id_affine_plus_one = !chui_authored && source_id_has_zero;
+  if (source_id_affine_plus_one) {
+    if (source_id_has_uint64_max) {
+      throw std::runtime_error(
+          "snapshot reader: external ParticleIDs contain both 0 and UINT64_MAX; +1 normalization would overflow");
+    }
+    for (std::uint64_t& particle_id : result.state.particle_sidecar.particle_id) {
+      ++particle_id;
+    }
+    for (std::size_t i = 0; i < gas_parent_particle_id.size(); ++i) {
+      if (gas_has_parent_particle[i] != 0U) {
+        if (gas_parent_particle_id[i] == std::numeric_limits<std::uint64_t>::max()) {
+          throw std::runtime_error(
+              "snapshot reader: gas ParentParticleIDs overflow +1 external-ID normalization");
+        }
+        ++gas_parent_particle_id[i];
+      }
+    }
+    for (std::uint64_t& parent_id : tracer_parent_particle_id) {
+      if (parent_id == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::runtime_error(
+            "snapshot reader: tracer parent ParticleID overflows +1 external-ID normalization");
+      }
+      ++parent_id;
+    }
   }
 
   result.state.metadata.run_name = config.output.run_name;
@@ -2686,7 +2893,7 @@ SnapshotReadResult readGadgetArepoSnapshotHdf5(
         "snapshot reader: actual materialized SimulationState exceeds max_materialized_bytes");
   }
   if (source_id_affine_plus_one) {
-    result.report.present_aliases.push_back("external_id_mapping=contiguous_zero_based_plus_one");
+    result.report.present_aliases.push_back("external_id_mapping=zero_present_plus_one_v1");
   }
   if (periodically_wrapped_components > 0U) {
     result.report.present_aliases.push_back(

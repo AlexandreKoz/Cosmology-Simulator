@@ -5,6 +5,8 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <limits>
 #include <optional>
 #include <random>
@@ -23,6 +25,23 @@
 #endif
 
 namespace cosmosim::io::distributed_audit_internal {
+
+SpeciesMassAuditResult evaluateSpeciesMassAudit(
+    double source_mass, double final_mass, double relative_tolerance) {
+  if (!std::isfinite(source_mass) || !std::isfinite(final_mass) ||
+      !std::isfinite(relative_tolerance) || relative_tolerance < 0.0) {
+    throw std::invalid_argument("mass-audit inputs and tolerance must be finite and tolerance non-negative");
+  }
+  SpeciesMassAuditResult result;
+  result.source_mass = source_mass;
+  result.final_mass = final_mass;
+  const double scale = std::max({1.0, std::abs(source_mass), std::abs(final_mass)});
+  result.absolute_delta = std::abs(source_mass - final_mass);
+  result.relative_delta = result.absolute_delta / scale;
+  result.tolerance = relative_tolerance * scale;
+  result.within_tolerance = result.absolute_delta <= result.tolerance;
+  return result;
+}
 
 #if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_MPI
 
@@ -608,17 +627,29 @@ void validateDistributedTotals(
       });
 
   std::array<std::uint64_t, 5> global_counts{};
-  std::array<double, 5> global_final_mass{};
-  std::array<double, 5> global_source_mass{};
   mpiAllreduce(
       local.counts.data(), global_counts.data(), 5, MPI_UINT64_T, MPI_SUM,
       MPI_COMM_WORLD);
+
+  // Source and final totals are reduced in the same collective and lane order
+  // after compensated local accumulation. This intentionally avoids comparing
+  // totals produced by different MPI reduction trees. The scientific contract
+  // remains tolerance equivalence rather than bitwise rank-count invariance.
+  std::array<double, 10> local_mass_lanes{};
+  std::array<double, 10> global_mass_lanes{};
+  for (std::size_t species = 0; species < 5U; ++species) {
+    local_mass_lanes[species] = local.masses[species];
+    local_mass_lanes[5U + species] = local_source_mass[species];
+  }
   mpiAllreduce(
-      local.masses.data(), global_final_mass.data(), 5, MPI_DOUBLE, MPI_SUM,
-      MPI_COMM_WORLD);
-  mpiAllreduce(
-      local_source_mass.data(), global_source_mass.data(), 5, MPI_DOUBLE,
-      MPI_SUM, MPI_COMM_WORLD);
+      local_mass_lanes.data(), global_mass_lanes.data(),
+      static_cast<int>(global_mass_lanes.size()), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+  std::array<double, 5> global_final_mass{};
+  std::array<double, 5> global_source_mass{};
+  for (std::size_t species = 0; species < 5U; ++species) {
+    global_final_mass[species] = global_mass_lanes[species];
+    global_source_mass[species] = global_mass_lanes[5U + species];
+  }
 
   const std::array<std::uint64_t, 5> expected_counts =
       runCollectivePhase<std::array<std::uint64_t, 5>>(
@@ -645,14 +676,18 @@ void validateDistributedTotals(
         "distributed IC global species counts do not match the manifest");
   }
   for (std::size_t species = 0; species < expected_counts.size(); ++species) {
-    const double tolerance = 1.0e-12 * std::max(
-        {1.0, std::abs(global_source_mass[species]),
-         std::abs(global_final_mass[species])});
-    if (std::abs(
-            global_source_mass[species] - global_final_mass[species]) >
-        tolerance) {
-      throw std::runtime_error(
-          "distributed IC global species mass total changed during routing");
+    const SpeciesMassAuditResult audit = evaluateSpeciesMassAudit(
+        global_source_mass[species], global_final_mass[species]);
+    if (!audit.within_tolerance) {
+      std::ostringstream message;
+      message << std::setprecision(std::numeric_limits<double>::max_digits10)
+              << "distributed IC global species mass total changed during routing: species=" << species
+              << " source_mass=" << audit.source_mass
+              << " final_mass=" << audit.final_mass
+              << " absolute_delta=" << audit.absolute_delta
+              << " relative_delta=" << audit.relative_delta
+              << " tolerance=" << audit.tolerance;
+      throw std::runtime_error(message.str());
     }
   }
 }

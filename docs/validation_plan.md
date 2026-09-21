@@ -601,3 +601,16 @@ upper-edge coordinates, and fixed DM mass. Snapshot HDF5 roundtrip acceptance
 uses two logical sets in one `snapshots/` directory and rejects missing members
 and stale/misnamed completion markers. MPI variants remain runtime evidence, not
 a pass, until executed with a real MPI C++ toolchain.
+
+## 2026-09-21 — 64^3 three-rank first-light production-closure gate
+
+The first-light closure adds acceptance coverage for the external-IC to analysis-snapshot path without changing TreePM or restart numerics. Required focused evidence is:
+
+- `unit_ic_reader`: zero-containing external IDs map with one source-wide `+1` policy independent of row order; shuffled zero-based IDs are accepted; duplicate IDs and `0 + UINT64_MAX` overflow cases are rejected; source/final mass-audit helpers still reject injected loss and duplication.
+- `integration_snapshot_hdf5_roundtrip`: ordinary external HDF5 readback accepts shuffled zero-based IDs and the single-file completion contract remains backward compatible. The production-validator mode is also exercised with a zero-byte global-ID budget to prove the post-publication structural pass does not require an O(N_global) root ID buffer.
+- `integration_snapshot_set_mpi_{2,3,4,8}_rank`: on a Parallel-HDF5 build, all ranks write one `snap_007.hdf5` through non-overlapping global hyperslabs. The fixture uses uneven ownership and an empty final rank, then verifies global counts, direct readback, persistent IDs, and the one-member completion marker. A serial-HDF5 MPI build retains the explicit sharded compatibility branch only.
+- `integration_runtime_app_smoke`: an on-cadence endpoint produces exactly one committed science file. The same real harness is rerun with a cadence that cannot fire on step one and must still publish exactly one final endpoint snapshot.
+- `integration_runtime_app_mpi_treepm_smoke_two_rank`: requires MPI + FFTW + Parallel HDF5 and verifies one rank-0 human stream, one logical `snap_001.hdf5`, transactional completion, and rank-qualified restart artifacts.
+- existing restart roundtrip/equivalence tests remain required because science snapshot topology is not allowed to alter checkpoint schema or same-topology continuation semantics.
+
+Dependency-complete MPI/Parallel-HDF5/FFTW execution is a mandatory production qualification gate. A host that lacks those development libraries may establish source/configure/serial-HDF5 evidence but must report the MPI matrix as blocked rather than silently substituting the sharded backend.

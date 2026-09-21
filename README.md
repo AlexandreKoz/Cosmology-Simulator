@@ -99,7 +99,7 @@ The runtime now emits compact rank-0 native status records such as `[CHUI][START
 ./chui run configs/chui_firstlight_32_smoke.param.txt --quiet
 ```
 
-For distributed qualification, use the documented `mpi-hdf5-fftw-*` presets only on a machine with MPI, HDF5, FFTW, and FFTW-MPI development support. The launcher provides the MPI convenience form without rewriting the `.param.txt` contract and rejects a selected build when its CMake cache explicitly records `COSMOSIM_ENABLE_MPI=OFF`:
+For distributed qualification, use the documented `mpi-hdf5-fftw-*` presets only on a machine with MPI, **Parallel HDF5**, FFTW, and FFTW-MPI development support. For known CMake builds, `./chui run CONFIG` asks the C++ harness preflight for the authoritative typed `parallel.mpi_ranks_expected` value and composes MPI automatically when it is greater than one; Python does not parse or rewrite the scientific parameter file. An explicit `--mpi N` remains available and must agree with the typed config. The launcher rejects a selected build when its CMake cache explicitly records `COSMOSIM_ENABLE_MPI=OFF`:
 
 ```bash
 ./chui run configs/production.param.txt --preset mpi-hdf5-fftw-release --mpi 8
@@ -131,16 +131,14 @@ outputs/<run_name>/
     └── ...
 ```
 
-For MPI output, the logical set is stem-scoped in the same directory:
+For current small/moderate-rank production MPI runs, `output.snapshot_layout = auto` selects the same analysis-ready **single-file** science product when the build has MPI-enabled Parallel HDF5:
 
 ```text
-snap_042.0.hdf5
-snap_042.1.hdf5
-...
+snap_042.hdf5
 snap_042.complete
 ```
 
-The `.complete` file is the commit record for the logical snapshot set and is published only after the expected members pass the repository's completion checks. New writes do not create one `snapdir_###/` directory per snapshot; legacy layouts remain read-compatible where documented. See [`docs/output_schema.md`](docs/output_schema.md) and [`docs/snapshot_hdf5_io.md`](docs/snapshot_hdf5_io.md).
+All ranks write their owned rows directly into global HDF5 datasets; the implementation does not gather the universe onto rank 0. The final `.hdf5` name is published atomically only after distributed exact partition readback succeeds. The `.complete` sidecar remains transactional CHUÍ evidence, but ordinary analysis opens `snap_042.hdf5` directly. `snapshot_layout = sharded` retains the legacy one-member-per-rank compatibility backend explicitly; `aggregated` is a reserved future fixed-file-count topology and currently fails closed rather than pretending to be implemented. Restart/checkpoint topology remains independent and rank-oriented. See [`docs/output_schema.md`](docs/output_schema.md) and [`docs/snapshot_hdf5_io.md`](docs/snapshot_hdf5_io.md).
 
 ## Architecture at a glance
 

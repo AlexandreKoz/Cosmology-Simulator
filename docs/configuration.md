@@ -436,6 +436,12 @@ Tracers:
 - `snapshot_interval_steps` (zero disables step-modulo events)
 - `snapshot_interval_time_code` (zero disables code-time events; positive values are
   anchored at `numerics.time_begin_code` and steps are clipped rather than crossing them)
+- `snapshot_layout` (`auto`, `single`, `aggregated`, or `sharded`; default `auto`)
+  - serial output is one ordinary HDF5 science file;
+  - MPI `auto`/`single` requires an MPI-enabled Parallel-HDF5 build and writes one collective `snap_NNN.hdf5` without a root gather;
+  - `sharded` explicitly selects the legacy one-file-per-rank compatibility topology;
+  - `aggregated` reserves a future fixed-file-count topology and currently fails closed at runtime.
+- `snapshot_num_files` (default `0`, automatic; values greater than one are accepted only with `snapshot_layout = aggregated` and do not currently activate an unimplemented backend)
 - `write_restarts`
 
 At least one snapshot interval must be positive. Code-time cadence is part of the

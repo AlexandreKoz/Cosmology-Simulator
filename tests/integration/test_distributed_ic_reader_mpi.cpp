@@ -254,7 +254,8 @@ void writeMember(
     std::uint32_t member,
     bool duplicate_ids,
     bool canonical_header = false,
-    bool alternate_convention = false) {
+    bool alternate_convention = false,
+    bool zero_based_ids = false) {
   Hdf5Handle file(
       H5Fcreate(path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(
@@ -330,7 +331,8 @@ void writeMember(
   Hdf5Handle gas(H5Gcreate2(
       file.get(), "/PartType0", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeCommonParticleFields(
-      gas.get(), member, K_LOCAL_COUNTS[0], 0U, 1000U, 1.0F,
+      gas.get(), member, K_LOCAL_COUNTS[0], 0U,
+      zero_based_ids ? 0U : 1000U, 1.0F,
       duplicate_ids && member == 1U);
   std::vector<float> internal_energy(K_LOCAL_COUNTS[0]);
   std::vector<float> density(K_LOCAL_COUNTS[0]);
@@ -745,6 +747,7 @@ int main(int argc, char** argv) {
 
   const std::string mode = argc > 1 ? argv[1] : "normal";
   const bool duplicate_ids = mode == "duplicate";
+  const bool zero_based_ids = mode == "zero_ids";
   const bool fault_mode = startsWith(mode, "fault_");
   const bool route_mutation =
       mode == "route_loss" || mode == "route_duplicate";
@@ -836,9 +839,11 @@ int main(int argc, char** argv) {
       writePolicyMember(second, 1U);
     } else {
       writeMember(
-          first, 0U, duplicate_ids, canonical_mode, alternate_mode);
+          first, 0U, duplicate_ids, canonical_mode, alternate_mode,
+          zero_based_ids);
       writeMember(
-          second, 1U, duplicate_ids, canonical_mode, alternate_mode);
+          second, 1U, duplicate_ids, canonical_mode, alternate_mode,
+          zero_based_ids);
     }
   }
   MPI_Barrier(MPI_COMM_WORLD);
@@ -930,6 +935,20 @@ int main(int argc, char** argv) {
     }
     assert(result.report.already_partitioned);
     assert(result.state.validateOwnershipInvariants());
+    if (zero_based_ids) {
+      std::uint64_t local_internal_id_one = 0U;
+      for (const std::uint64_t id : result.state.particle_sidecar.particle_id) {
+        assert(id != 0U);
+        if (id == 1U) ++local_internal_id_one;
+      }
+      assert(mpi_context.allreduceSumUint64(local_internal_id_one) == 1U);
+      assert(result.report.manifest.has_value());
+      const auto& warnings = result.report.manifest->warnings;
+      assert(std::any_of(
+          warnings.begin(), warnings.end(), [](const std::string& warning) {
+            return warning.find("zero_present_plus_one_v1") != std::string::npos;
+          }));
+    }
     if (canonical_mode) {
       assert(result.report.manifest_verified);
       assert(!result.report.verified_manifest_sha256.empty());

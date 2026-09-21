@@ -91,8 +91,9 @@ axis-aware modulo into `[0,L)`, and the aggregate number of wrapped coordinate
 components is recorded. Isolated/open ingestion does not require cosmological
 placeholder fields and does not periodically wrap legitimate negative positions.
 
-CHUÍ keeps zero reserved in its internal particle-ID domain. A proven contiguous
-zero-based external file ordering is normalized deterministically with checked
+CHUÍ keeps zero reserved in its internal particle-ID domain. External GADGET/AREPO/MONOFONIC identity is audited independently of row ordering across the complete file set. If any external particle ID is zero, the import applies one deterministic mapping to the entire external identity domain: `internal_id = external_id + 1`. A shuffled unique zero-based set is therefore valid; contiguity in storage order is not required. The mapping is rejected if any source ID is `UINT64_MAX`, because `+1` would overflow, and the existing exact distributed duplicate-ID audit still rejects collisions. Tracer parent IDs follow the same mapping. Import diagnostics record `source_particle_id_mapping=zero_present_plus_one_v1`.
+
+The mapping is performed with checked
 `internal_id = source_id + 1`; uniqueness and overflow are verified without an
 O(N) remap table, and the mapping policy is recorded in manifest provenance.
 Arbitrary or ambiguous ID domains still fail closed rather than recycling IDs.

@@ -5,7 +5,7 @@ This page is the authoritative build and dependency workflow for CosmoSim.
 ## Supported toolchain baseline
 
 - CMake >= 3.24
-- C++20 compiler (Clang/GCC/MSVC with C++20 mode)
+- C++20 compiler **and standard library** with the facilities used by CHUÍ. Configure probes `#include <span>` / `std::span` instead of trusting `CMAKE_CXX_STANDARD` alone. GCC 9 / libstdc++ 9 is therefore unsupported for the current tree; newer toolchains are accepted by capability rather than by a hard-coded compiler brand/version.
 - Ninja (recommended generator)
 
 Optional dependencies are feature-gated and preset-driven:
@@ -57,14 +57,14 @@ If multiple preset build trees contain `cosmosim_harness`, the launcher fails wi
 ./chui run CONFIG --exe /absolute/path/to/cosmosim_harness
 ```
 
-For MPI runs, `--mpi N` prepends the MPI launcher recorded in the selected build's `CMakeCache.txt` when available, otherwise it uses `mpiexec`/`mpirun` from `PATH`. If the selected build metadata explicitly says `COSMOSIM_ENABLE_MPI=OFF`, the launcher fails instead of starting multiple independent serial processes. It does not inspect or rewrite `parallel.mpi_ranks_expected`; the authoritative runtime still validates communicator size before expensive simulation work. Arguments after `--` are passed to the MPI launcher:
+For a known CMake build, `./chui run CONFIG` asks the C++ harness preflight to parse the authoritative `.param.txt` and return `parallel.mpi_ranks_expected`. If the value is greater than one, the launcher composes the MPI command automatically; Python does not implement a second scientific parser and never rewrites the config. An explicit `--mpi N` remains supported but must agree with the typed config. The MPI launcher is taken from the selected build's `CMakeCache.txt` when available, otherwise `mpiexec`/`mpirun` is resolved from `PATH`. If the selected build explicitly has `COSMOSIM_ENABLE_MPI=OFF`, automatic or explicit multi-rank launch fails before starting multiple independent serial processes. Arguments after `--` remain expert MPI-launcher passthrough:
 
 ```bash
 ./chui run CONFIG --preset mpi-hdf5-fftw-release --mpi 8
 ./chui run CONFIG --preset mpi-hdf5-fftw-debug --mpi 2 -- --bind-to core
 ```
 
-Native progress reporting is owned by the C++ runtime, not the launcher. The default direct harness and launcher paths emit bounded rank-0 status. Under MPI, `run_directory` is the shared/logical run location while `rank_directory` identifies rank 0's rank-local artifacts. A committed snapshot line reports the logical member count and `.complete` manifest; the rank-0 member is labeled explicitly rather than being presented as the complete snapshot. Presentation controls are:
+Native progress reporting is owned by the C++ runtime, not the launcher. The default direct harness and launcher paths emit bounded rank-0 status. Under MPI, `run_directory` is the shared/logical run location while `rank_directory` identifies rank 0's rank-local artifacts. With the normal Parallel-HDF5 science layout a committed snapshot record names the one ordinary `snap_###.hdf5` analysis product plus its transactional `.complete` marker. Explicit legacy `sharded` mode instead reports the logical member count and labels rank 0's member as a member, never as the complete science state. Presentation controls are:
 
 ```text
 --quiet
@@ -89,7 +89,7 @@ The direct executable remains fully supported:
 
 ## HDF5 path
 
-The supported HDF5 source/API range is **1.10.x through 1.14.x**. Object inspection uses stable handle/type queries rather than version-sensitive unversioned `H5Oget_info_by_name` signatures. CMake fails closed below 1.10 and on unqualified HDF5 2.x.
+The supported HDF5 source/API range is **1.10.x through 1.14.x**. Object inspection uses stable handle/type queries rather than version-sensitive unversioned `H5Oget_info_by_name` signatures. CMake fails closed below 1.10 and on unqualified HDF5 2.x. CMake also records whether the selected library is actually Parallel-HDF5 capable (`HDF5_IS_PARALLEL` / `feature_hdf5_parallel`); `HDF5 enabled` and `Parallel HDF5 capable` are distinct build facts. Serial HDF5 is valid for serial output and the explicit legacy `output.snapshot_layout=sharded` MPI compatibility backend, but MPI `auto`/`single` analysis snapshots fail closed unless Parallel HDF5 is linked.
 
 ```bash
 cmake --preset hdf5-debug
@@ -115,9 +115,18 @@ ctest --preset test-mpi-hdf5-fftw-debug --output-on-failure
 
 This preset is the required CI lane for accepted distributed PM/TreePM, workflow restart, gas migration,
 hydro interface, AMR boundary/reflux, and multi-rank gravity validation. It requires MPI C++ tooling, HDF5,
-serial FFTW, and FFTW-MPI (`fftw3_mpi`; Debian/Ubuntu package `libfftw3-mpi-dev`). The `mpi-release` preset
-is intentionally MPI-only smoke coverage and must not be cited as FFT-PM, HDF5, restart-topology, or
-parallel-HDF5 evidence.
+serial FFTW, and FFTW-MPI (`fftw3_mpi`; Debian/Ubuntu package `libfftw3-mpi-dev`). To qualify the default
+analysis-ready one-file MPI science snapshot backend, the HDF5 selected by this preset must additionally be
+MPI-enabled Parallel HDF5; a serial-HDF5 MPI build is reported explicitly and cannot silently masquerade as
+that capability. The `mpi-release` preset is intentionally MPI-only smoke coverage and must not be cited as
+FFT-PM, HDF5, restart-topology, or Parallel-HDF5 evidence.
+
+
+## Toolchain and dependency provenance
+
+Every configure reports the selected C++ compiler path/version and the resolved MPI, HDF5, FFTW, and FFTW-MPI providers that are relevant to the chosen preset. `cosmosim_build_metadata.json` also records `feature_hdf5_parallel`, so launcher/runtime diagnostics can distinguish a normal HDF5 build from a build capable of the one-file MPI science backend. If a Conda MPI wrapper is combined with a system compiler/HDF5 stack, CMake emits a mixed-prefix warning instead of silently overriding the user's selection. This is a risk diagnostic, not a blanket Conda prohibition.
+
+For a normal native Linux stack, prefer one coherent compiler/MPI/HDF5/FFTW provider family (distribution packages or one HPC module stack). If an explicit custom stack is required, use local `CMakeUserPresets.json` overrides and verify the configure provenance before building.
 
 ## MPI and GPU paths
 

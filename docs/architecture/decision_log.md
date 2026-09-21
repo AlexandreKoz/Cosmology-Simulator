@@ -1044,3 +1044,11 @@ memory-refinement preparation boundaries. The SFC ownership geometry and
 feasibility-first cut algorithm are unchanged. Full MPI fault/restart and
 whole-process memory certification remain required before production M2D
 acceptance. Incomplete owner contracts cannot authorize overlap.
+
+## 2026-09-21 — ADR-FIRSTLIGHT-SCIENCE-IO-001: Decouple science-snapshot topology from compute/restart topology
+
+**Status:** Accepted for the small/moderate-rank production path; fixed-count aggregation remains future work.
+
+Science snapshots are analysis products, not restart partitions. The authoritative typed `output.snapshot_layout` policy therefore selects one shared HDF5 science file for serial execution and for MPI when the linked HDF5 is Parallel-HDF5 capable. MPI ranks write only owned non-overlapping global hyperslabs; no complete particle state is gathered onto rank zero. The writer uses collective Parallel-HDF5 file/metadata construction with direct MPI-IO hyperslab payload writes, bounded per-rank staging, distributed exact partition readback, collective failure agreement, and atomic publication from `.partial` to `snap_###.hdf5`. Root post-publication validation may omit its otherwise O(N_global) duplicate ID buffer only after the distributed exact readback has established file IDs equal globally unique authoritative runtime IDs.
+
+`sharded` remains an explicit compatibility topology. `aggregated` plus `snapshot_num_files` reserves a future fixed-count I/O topology but fails closed until a real backend is qualified. Restart/checkpoint ownership, schema, rank-local files, and same-topology continuation remain unchanged. This decision changes output topology and operator interoperability only; TreePM, timesteps, particle physical state, deterministic reductions, and restart semantics are unaffected.
