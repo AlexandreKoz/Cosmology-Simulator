@@ -1,0 +1,69 @@
+set(runtime_rank_count "@COSMOSIM_MPI_SNAPSHOT_SMOKE_RANKS@")
+set(runtime_root "@CMAKE_BINARY_DIR@/runtime_app_mpi_snapshot_smoke_${runtime_rank_count}")
+set(runtime_run_root "${runtime_root}/outputs")
+set(runtime_config "${runtime_root}/runtime_mpi_snapshot.param.txt")
+set(runtime_stdout "${runtime_root}/runtime_stdout.txt")
+set(runtime_stderr "${runtime_root}/runtime_stderr.txt")
+set(runtime_shared_run_dir "${runtime_run_root}/runtime_app_mpi_snapshot_smoke_${runtime_rank_count}")
+set(runtime_snapshot_dir "${runtime_shared_run_dir}/snapshots")
+
+file(REMOVE_RECURSE "${runtime_root}")
+file(MAKE_DIRECTORY "${runtime_root}")
+
+# Narrow Parallel-HDF5 qualification: diagnostics and restarts are explicitly
+# disabled so unrelated subsystems cannot mask the science-snapshot contract.
+# snapshot_interval_steps=8 makes this a one-step off-cadence endpoint test.
+file(WRITE "${runtime_config}" "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\nzoom_high_res_region = false\n\n[numerics]\ntime_begin_code = 0.01\ntime_end_code = 0.0101\nmax_global_steps = 1\nhierarchical_max_rung = 0\ngravity_solver = treepm\nhydro_solver = godunov_fv\ntreepm_pm_grid_nx = 16\ntreepm_pm_grid_ny = 16\ntreepm_pm_grid_nz = 16\ntreepm_asmth_cells = 1.5\ntreepm_rcut_cells = 4.5\ntreepm_assignment_scheme = cic\ntreepm_enable_window_deconvolution = true\ntreepm_update_cadence_steps = 1\n\n[analysis]\nenable_diagnostics = false\nenable_halo_workflow = false\n\n[output]\nrun_name = runtime_app_mpi_snapshot_smoke_${runtime_rank_count}\noutput_directory = ${runtime_run_root}\noutput_stem = snap\nrestart_stem = restart\nsnapshot_interval_steps = 8\nsnapshot_layout = single\nwrite_restarts = false\n\n[parallel]\nmpi_ranks_expected = ${runtime_rank_count}\nomp_threads = 1\ngpu_devices = 0\n\n[units]\ncoordinate_frame = comoving\n")
+
+execute_process(
+  COMMAND "@MPIEXEC_EXECUTABLE@" "@MPIEXEC_NUMPROC_FLAG@" "${runtime_rank_count}" @MPIEXEC_PREFLAGS@
+          "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_config}" @MPIEXEC_POSTFLAGS@
+  RESULT_VARIABLE runtime_result
+  OUTPUT_FILE "${runtime_stdout}"
+  ERROR_FILE "${runtime_stderr}")
+if(NOT runtime_result EQUAL 0)
+  file(READ "${runtime_stderr}" runtime_err)
+  message(FATAL_ERROR "narrow MPI snapshot smoke failed with exit code ${runtime_result}:\n${runtime_err}")
+endif()
+
+set(snapshot_file "${runtime_snapshot_dir}/snap_001.hdf5")
+set(snapshot_marker "${runtime_snapshot_dir}/snap_001.complete")
+if(NOT EXISTS "${snapshot_file}" OR NOT EXISTS "${snapshot_marker}")
+  message(FATAL_ERROR "narrow MPI snapshot smoke did not publish snap_001.hdf5 + snap_001.complete")
+endif()
+if(EXISTS "${runtime_snapshot_dir}/snap_001.hdf5.partial")
+  message(FATAL_ERROR "narrow MPI snapshot smoke left a final .partial artifact")
+endif()
+file(GLOB shard_files "${runtime_snapshot_dir}/snap_001.*.hdf5")
+if(shard_files)
+  message(FATAL_ERROR "production single-file MPI snapshot smoke produced legacy rank shards: ${shard_files}")
+endif()
+file(GLOB science_files "${runtime_snapshot_dir}/snap_*.hdf5")
+list(LENGTH science_files science_file_count)
+if(NOT science_file_count EQUAL 1)
+  message(FATAL_ERROR "off-cadence endpoint must commit exactly one science file, found ${science_file_count}")
+endif()
+
+file(READ "${snapshot_marker}" marker_text)
+foreach(required_manifest_contract IN ITEMS
+    "schema=chui_snapshot_set_v3"
+    "num_files_per_snapshot=1"
+    "member_count=1"
+    "member.0.filename=snap_001.hdf5"
+    "member.0.integrity=distributed_science_readback_v1")
+  if(NOT marker_text MATCHES "${required_manifest_contract}")
+    message(FATAL_ERROR "narrow MPI snapshot smoke marker missing ${required_manifest_contract}")
+  endif()
+endforeach()
+
+file(READ "${runtime_stdout}" stdout_text)
+string(REGEX MATCHALL "\\[CHUI\\]\\[STEP\\]" step_records "${stdout_text}")
+list(LENGTH step_records step_record_count)
+if(NOT step_record_count EQUAL 1)
+  message(FATAL_ERROR "narrow MPI snapshot smoke expected exactly one rank-zero heartbeat, got ${step_record_count}")
+endif()
+string(REGEX MATCHALL "\\[CHUI\\]\\[SNAPSHOT\\]" snapshot_records "${stdout_text}")
+list(LENGTH snapshot_records snapshot_record_count)
+if(NOT snapshot_record_count EQUAL 1)
+  message(FATAL_ERROR "narrow MPI snapshot smoke expected exactly one endpoint snapshot record, got ${snapshot_record_count}")
+endif()

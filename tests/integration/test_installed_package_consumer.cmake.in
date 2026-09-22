@@ -1,0 +1,42 @@
+set(test_root "@CMAKE_BINARY_DIR@/installed_package_consumer")
+set(prefix "${test_root}/prefix")
+set(consumer "${test_root}/consumer")
+set(consumer_build "${test_root}/build")
+file(REMOVE_RECURSE "${test_root}")
+file(MAKE_DIRECTORY "${consumer}")
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --install "@CMAKE_BINARY_DIR@" --prefix "${prefix}"
+  RESULT_VARIABLE install_result
+  OUTPUT_VARIABLE install_stdout
+  ERROR_VARIABLE install_stderr)
+if(NOT install_result EQUAL 0)
+  message(FATAL_ERROR "CosmoSim install step failed (${install_result}):\n${install_stdout}\n${install_stderr}")
+endif()
+
+file(WRITE "${consumer}/main.cpp"
+  "#include <cosmosim/io/snapshot_hdf5.hpp>\nint main(){ const auto& schema = cosmosim::io::scienceSnapshotSchemaMap(); return schema.header_group.empty() ? 1 : 0; }\n")
+file(WRITE "${consumer}/CMakeLists.txt" [=[
+cmake_minimum_required(VERSION 3.24)
+project(cosmosim_consumer LANGUAGES C CXX)
+find_package(CosmoSim CONFIG REQUIRED)
+add_executable(cosmosim_consumer main.cpp)
+target_link_libraries(cosmosim_consumer PRIVATE CosmoSim::io)
+]=])
+
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" -S "${consumer}" -B "${consumer_build}" "-DCMAKE_PREFIX_PATH=${prefix}"
+  RESULT_VARIABLE configure_result
+  OUTPUT_VARIABLE configure_stdout
+  ERROR_VARIABLE configure_stderr)
+if(NOT configure_result EQUAL 0)
+  message(FATAL_ERROR "Installed-package consumer configure failed (${configure_result}):\n${configure_stdout}\n${configure_stderr}")
+endif()
+execute_process(
+  COMMAND "@CMAKE_COMMAND@" --build "${consumer_build}"
+  RESULT_VARIABLE build_result
+  OUTPUT_VARIABLE build_stdout
+  ERROR_VARIABLE build_stderr)
+if(NOT build_result EQUAL 0)
+  message(FATAL_ERROR "Installed-package consumer build failed (${build_result}):\n${build_stdout}\n${build_stderr}")
+endif()

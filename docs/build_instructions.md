@@ -89,7 +89,11 @@ The direct executable remains fully supported:
 
 ## HDF5 path
 
-The supported HDF5 source/API range is **1.10.x through 1.14.x**. Object inspection uses stable handle/type queries rather than version-sensitive unversioned `H5Oget_info_by_name` signatures. CMake fails closed below 1.10 and on unqualified HDF5 2.x. CMake also records whether the selected library is actually Parallel-HDF5 capable (`HDF5_IS_PARALLEL` / `feature_hdf5_parallel`); `HDF5 enabled` and `Parallel HDF5 capable` are distinct build facts. Serial HDF5 is valid for serial output and the explicit legacy `output.snapshot_layout=sharded` MPI compatibility backend, but MPI `auto`/`single` analysis snapshots fail closed unless Parallel HDF5 is linked.
+The supported HDF5 source/API range is **1.10.x through 1.14.x** and CHUÍ consumes the **HDF5 C API**; the unused HDF5 C++ bindings are not a source or installed-package dependency. Object inspection uses stable handle/type queries rather than version-sensitive unversioned `H5Oget_info_by_name` signatures. CMake fails closed below 1.10 and on unqualified HDF5 2.x.
+
+`HDF5_IS_PARALLEL` is recorded only as provider metadata. Production capability truth comes from a compile/link probe against the exact selected headers/libraries and MPI stack using `H5Pset_fapl_mpio` and `H5Pset_dxpl_mpio`. On distro systems that install serial and OpenMPI HDF5 together, CHUÍ prefers the parallel C wrapper (`h5pcc`, `h5pcc.openmpi`, or `h5pcc.mpich`) unless the user explicitly selected `HDF5_ROOT`, `HDF5_DIR`, or `HDF5_C_COMPILER_EXECUTABLE`. `feature_hdf5_parallel=true` therefore means the MPIO calls actually linked, not merely that aggregate CMake metadata claimed parallel support. Serial HDF5 is valid for serial output and the explicit legacy `output.snapshot_layout=sharded` MPI compatibility backend.
+
+`COSMOSIM_REQUIRE_PARALLEL_HDF5=ON` turns that capability into a configure-time hard requirement. The production `mpi-hdf5-fftw-debug` and `mpi-hdf5-fftw-release` presets enable it, so they cannot configure successfully against serial HDF5 and later fail during a normal `snapshot_layout=auto` run. `mpi-serial-hdf5-fftw-debug` is the explicitly named compatibility configure surface when sharded output is intentionally being tested.
 
 ```bash
 cmake --preset hdf5-debug

@@ -1,0 +1,32 @@
+set(runtime_root "@CMAKE_BINARY_DIR@/runtime_app_mpi_restart_smoke")
+set(runtime_run_root "${runtime_root}/outputs")
+set(runtime_config "${runtime_root}/runtime_mpi_restart.param.txt")
+set(runtime_stdout "${runtime_root}/runtime_stdout.txt")
+set(runtime_stderr "${runtime_root}/runtime_stderr.txt")
+set(runtime_shared_run_dir "${runtime_run_root}/runtime_app_mpi_restart_smoke")
+set(runtime_rank0 "${runtime_run_root}/runtime_app_mpi_restart_smoke_rank000")
+set(runtime_rank1 "${runtime_run_root}/runtime_app_mpi_restart_smoke_rank001")
+file(REMOVE_RECURSE "${runtime_root}")
+file(MAKE_DIRECTORY "${runtime_root}")
+file(WRITE "${runtime_config}" "schema_version = 1\n\n[mode]\nmode = zoom_in\nic_file = generated\nzoom_high_res_region = false\n\n[numerics]\ntime_begin_code = 0.01\ntime_end_code = 0.0101\nmax_global_steps = 1\nhierarchical_max_rung = 0\ngravity_solver = treepm\nhydro_solver = godunov_fv\ntreepm_pm_grid_nx = 16\ntreepm_pm_grid_ny = 16\ntreepm_pm_grid_nz = 16\ntreepm_assignment_scheme = cic\ntreepm_enable_window_deconvolution = true\ntreepm_update_cadence_steps = 1\n\n[analysis]\nenable_diagnostics = false\nenable_halo_workflow = false\n\n[output]\nrun_name = runtime_app_mpi_restart_smoke\noutput_directory = ${runtime_run_root}\noutput_stem = snap\nrestart_stem = restart\nsnapshot_interval_steps = 8\nsnapshot_layout = single\nwrite_restarts = true\n\n[parallel]\nmpi_ranks_expected = 2\nomp_threads = 1\ngpu_devices = 0\n\n[units]\ncoordinate_frame = comoving\n")
+execute_process(
+  COMMAND "@MPIEXEC_EXECUTABLE@" "@MPIEXEC_NUMPROC_FLAG@" "2" @MPIEXEC_PREFLAGS@
+          "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_config}" @MPIEXEC_POSTFLAGS@
+  RESULT_VARIABLE runtime_result OUTPUT_FILE "${runtime_stdout}" ERROR_FILE "${runtime_stderr}")
+if(NOT runtime_result EQUAL 0)
+  file(READ "${runtime_stderr}" runtime_err)
+  message(FATAL_ERROR "MPI restart smoke failed (${runtime_result}):\n${runtime_err}")
+endif()
+foreach(restart_file IN ITEMS
+    "${runtime_rank0}/restart_001_rank000.hdf5"
+    "${runtime_rank1}/restart_001_rank001.hdf5")
+  if(NOT EXISTS "${restart_file}")
+    message(FATAL_ERROR "MPI restart smoke missing ${restart_file}")
+  endif()
+endforeach()
+file(READ "${runtime_stdout}" stdout_text)
+string(REGEX MATCHALL "\\[CHUI\\]\\[RESTART\\]" restart_records "${stdout_text}")
+list(LENGTH restart_records restart_record_count)
+if(NOT restart_record_count EQUAL 1)
+  message(FATAL_ERROR "MPI restart smoke expected one rank-zero restart success record, got ${restart_record_count}")
+endif()

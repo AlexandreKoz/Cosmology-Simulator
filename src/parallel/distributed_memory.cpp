@@ -3619,6 +3619,23 @@ double MpiContext::allreduceSumDouble(double local_value) const {
   return local_value;
 }
 
+void MpiContext::allreduceSumDoublesInPlace(std::span<double> values) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled && !values.empty()) {
+    if (values.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("MPI double-vector reduction exceeds int count range");
+    }
+    if (MPI_Allreduce(
+            MPI_IN_PLACE, values.data(), static_cast<int>(values.size()),
+            MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("MPI_Allreduce failed for distributed double diagnostics");
+    }
+  }
+#else
+  (void)values;
+#endif
+}
+
 double MpiContext::allreduceMinDouble(double local_value) const {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   if (m_is_enabled) {
@@ -3639,6 +3656,23 @@ std::uint64_t MpiContext::allreduceSumUint64(std::uint64_t local_value) const {
   }
 #endif
   return local_value;
+}
+
+void MpiContext::allreduceSumUint64sInPlace(std::span<std::uint64_t> values) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled && !values.empty()) {
+    if (values.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("MPI uint64-vector reduction exceeds int count range");
+    }
+    if (MPI_Allreduce(
+            MPI_IN_PLACE, values.data(), static_cast<int>(values.size()),
+            MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("MPI_Allreduce failed for distributed uint64 diagnostics");
+    }
+  }
+#else
+  (void)values;
+#endif
 }
 
 std::uint64_t MpiContext::exclusiveScanSumUint64(std::uint64_t local_value) const {

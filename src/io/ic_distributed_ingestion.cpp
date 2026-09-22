@@ -852,7 +852,8 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
 
   std::set<std::size_t> assigned_files;
   std::array<double, 5> local_source_mass{};
-  std::array<double, 5> local_source_mass_compensation{};
+  std::array<distributed_audit_internal::CompensatedMassAccumulator, 5>
+      local_source_mass_accumulators{};
   std::unordered_map<std::size_t, IcReaderSession> reader_sessions;
   for (std::size_t file_index = 0;
        file_index < inspection.manifest.source_files.size(); ++file_index) {
@@ -926,12 +927,9 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
                       throw std::runtime_error(
                           "source IC record has invalid species tag");
                     }
-                    const double corrected =
-                        record.mass - local_source_mass_compensation[record.species];
-                    const double updated = local_source_mass[record.species] + corrected;
-                    local_source_mass_compensation[record.species] =
-                        (updated - local_source_mass[record.species]) - corrected;
-                    local_source_mass[record.species] = updated;
+                    local_source_mass_accumulators[record.species].add(record.mass);
+                    local_source_mass[record.species] =
+                        local_source_mass_accumulators[record.species].value();
                   }
                   return local_records;
                 });

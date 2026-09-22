@@ -13,6 +13,8 @@
 #include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/time_integration.hpp"
 
+namespace cosmosim::parallel { class MpiContext; }
+
 namespace cosmosim::analysis {
 
 enum class DiagnosticClass : std::uint8_t {
@@ -158,6 +160,11 @@ struct RunHealthCounters {
   std::uint64_t non_finite_cells = 0;
   std::uint64_t non_finite_gravity_softening = 0;
   std::uint64_t non_positive_particle_mass = 0;
+  // These remain zero in a local bundle. Distributed reduction fills them so
+  // a global false invariant still identifies how many ranks violated it.
+  std::uint64_t ownership_invariants_failed_ranks = 0;
+  std::uint64_t unique_particle_ids_failed_ranks = 0;
+  std::uint64_t gravity_softening_sidecar_size_failed_ranks = 0;
 };
 
 struct MetalBudgetDiagnostics {
@@ -237,11 +244,26 @@ struct DiagnosticsBundle {
   std::vector<StarFormationHistoryBin> star_formation_history;
   AngularMomentumBudget angular_momentum;
   std::vector<double> xy_slice_density_code;
+  // Local sample counts are retained only until an MPI global slice average
+  // is formed; they are not serialized as a science product.
+  std::vector<std::uint64_t> xy_slice_sample_count;
   std::vector<double> xy_projection_density_code;
   std::size_t quicklook_grid_n = 0;
+  bool globally_reduced = false;
+  int contributing_rank_count = 1;
   std::string quicklook_projection_csv_path;
   core::MemoryReport memory_report;
 };
+
+
+// Convert rank-local diagnostics into one communicator-global bundle. Counts
+// and grid fields are reduced with their mathematically correct operations;
+// angular-momentum vectors are summed component-wise before norms are formed.
+// Distributed power spectrum is deliberately marked unavailable until a true
+// global density/FFT contract is provided; rank-local spectra are never averaged.
+void reduceDiagnosticsBundleAcrossRanks(
+    DiagnosticsBundle& bundle,
+    const parallel::MpiContext& mpi_context);
 
 struct DiagnosticsTiming {
   double cumulative_run_health_ms = 0.0;
@@ -325,7 +347,8 @@ class DiagnosticsEngine {
       double scale_factor,
       DiagnosticClass diagnostic_class,
       const core::TransientStepWorkspace* workspace = nullptr,
-      core::MemoryReservation* enclosing_reservation = nullptr) const;
+      core::MemoryReservation* enclosing_reservation = nullptr,
+      bool allow_power_spectrum = true) const;
 
   void writeBundle(const DiagnosticsBundle& bundle) const;
   void enforceRetentionPolicy() const;

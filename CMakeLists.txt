@@ -4,11 +4,12 @@ project(
   cosmosim
   VERSION 0.1.0
   DESCRIPTION "CosmoSim: desktop-first cosmological simulation framework skeleton"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(cosmosim_feature_summary)
 include(cosmosim_find_fftw)
+include(cosmosim_toolchain_path_checks)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
@@ -75,6 +76,8 @@ option(COSMOSIM_ENABLE_BENCHMARKS "Build benchmark/profiling hooks" ON)
 option(COSMOSIM_ENABLE_PROFILING "Enable built-in profiling instrumentation" ON)
 option(COSMOSIM_ENABLE_LTO "Enable interprocedural optimization (LTO)" OFF)
 option(COSMOSIM_STRICT_IO_WARNINGS "Treat first-party cosmosim_io warnings as errors" OFF)
+option(COSMOSIM_REQUIRE_PARALLEL_HDF5
+  "Fail configure unless the selected HDF5 installation links the MPIO APIs required by collective science snapshots" OFF)
 
 set(COSMOSIM_FFTW_PLAN_RIGOR
     "ESTIMATE"
@@ -212,6 +215,8 @@ if(COSMOSIM_ENABLE_OPENMP)
   endif()
 endif()
 
+find_package(Threads REQUIRED)
+
 if(COSMOSIM_ENABLE_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
   message(STATUS
@@ -219,16 +224,33 @@ if(COSMOSIM_ENABLE_MPI)
 endif()
 
 set(COSMOSIM_HDF5_PARALLEL OFF)
+set(COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE OFF)
+set(COSMOSIM_HDF5_C_WRAPPER "")
 if(COSMOSIM_ENABLE_HDF5)
   if(COSMOSIM_ENABLE_MPI)
     set(HDF5_PREFER_PARALLEL TRUE)
+    # Ubuntu/Debian can install serial hdf5-config.cmake beside an OpenMPI C
+    # wrapper. Prefer the parallel C wrapper for automatic discovery, but never
+    # override an explicit HDF5_ROOT/HDF5_DIR/HDF5_C_COMPILER_EXECUTABLE choice.
+    if(NOT DEFINED HDF5_C_COMPILER_EXECUTABLE AND
+       NOT DEFINED HDF5_ROOT AND NOT DEFINED HDF5_DIR)
+      find_program(_cosmosim_hdf5_parallel_c_wrapper
+        NAMES h5pcc h5pcc.openmpi h5pcc.mpich)
+      if(_cosmosim_hdf5_parallel_c_wrapper)
+        set(HDF5_C_COMPILER_EXECUTABLE "${_cosmosim_hdf5_parallel_c_wrapper}" CACHE FILEPATH
+            "HDF5 C compiler wrapper selected by CHUI" FORCE)
+        # Force FindHDF5's wrapper interrogation in this ambiguous distro case
+        # instead of accepting an unrelated serial config package first.
+        set(HDF5_NO_FIND_PACKAGE_CONFIG_FILE TRUE)
+      endif()
+    endif()
   endif()
-  find_package(HDF5 QUIET COMPONENTS C CXX)
+  find_package(HDF5 QUIET COMPONENTS C)
   if(NOT HDF5_FOUND)
     message(FATAL_ERROR
-      "COSMOSIM_ENABLE_HDF5=ON but HDF5 was not found.\n"
-      "Install libhdf5 development packages and reconfigure with preset 'hdf5-debug' "
-      "or provide -DHDF5_ROOT=/path/to/hdf5.")
+      "COSMOSIM_ENABLE_HDF5=ON but the HDF5 C API was not found.\n"
+      "Install the HDF5 C development package (Parallel HDF5 for production MPI), "
+      "or provide -DHDF5_ROOT=/path/to/a/coherent/hdf5 installation.")
   endif()
   if(HDF5_VERSION VERSION_LESS "1.10")
     message(FATAL_ERROR
@@ -239,22 +261,70 @@ if(COSMOSIM_ENABLE_HDF5)
       "CosmoSim's currently qualified HDF5 API range is 1.10.x through 1.14.x; found ${HDF5_VERSION}. "
       "Newer HDF5 families must be qualified explicitly before enabling production I/O.")
   endif()
-  if(HDF5_IS_PARALLEL)
-    set(COSMOSIM_HDF5_PARALLEL ON)
+
+  if(DEFINED HDF5_C_COMPILER_EXECUTABLE)
+    set(COSMOSIM_HDF5_C_WRAPPER "${HDF5_C_COMPILER_EXECUTABLE}")
+  endif()
+
+  # HDF5_IS_PARALLEL is useful provenance, but the production truth is whether
+  # the exact selected headers/libraries link the MPIO APIs CHUI calls.
+  if(COSMOSIM_ENABLE_MPI)
+    include(CheckCXXSourceCompiles)
+    set(_cosmosim_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
+    set(_cosmosim_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+    set(CMAKE_REQUIRED_INCLUDES ${HDF5_INCLUDE_DIRS})
+    if(TARGET HDF5::HDF5)
+      set(CMAKE_REQUIRED_LIBRARIES HDF5::HDF5 MPI::MPI_CXX)
+    else()
+      set(CMAKE_REQUIRED_LIBRARIES ${HDF5_LIBRARIES} MPI::MPI_CXX)
+    endif()
+    check_cxx_source_compiles(
+      "#include <mpi.h>\n#include <hdf5.h>\nint main(){ hid_t f=H5Pcreate(H5P_FILE_ACCESS); hid_t x=H5Pcreate(H5P_DATASET_XFER); if(f<0||x<0) return 1; if(H5Pset_fapl_mpio(f,MPI_COMM_WORLD,MPI_INFO_NULL)<0) return 2; if(H5Pset_dxpl_mpio(x,H5FD_MPIO_COLLECTIVE)<0) return 3; H5Pclose(x); H5Pclose(f); return 0; }"
+      COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE)
+    set(CMAKE_REQUIRED_INCLUDES "${_cosmosim_saved_required_includes}")
+    set(CMAKE_REQUIRED_LIBRARIES "${_cosmosim_saved_required_libraries}")
+    if(COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE)
+      set(COSMOSIM_HDF5_PARALLEL ON)
+    endif()
+  endif()
+
+  set(_cosmosim_hdf5_primary_include "<target-provided>")
+  if(HDF5_INCLUDE_DIRS)
+    list(GET HDF5_INCLUDE_DIRS 0 _cosmosim_hdf5_primary_include)
+  endif()
+  set(_cosmosim_hdf5_primary_library "<target-provided>")
+  if(HDF5_LIBRARIES)
+    list(GET HDF5_LIBRARIES 0 _cosmosim_hdf5_primary_library)
   endif()
   message(STATUS
-    "CHUI dependency: HDF5 version=${HDF5_VERSION} parallel=${COSMOSIM_HDF5_PARALLEL} includes=${HDF5_INCLUDE_DIRS} libraries=${HDF5_LIBRARIES}")
+    "CHUI HDF5: version=${HDF5_VERSION} include=${_cosmosim_hdf5_primary_include} "
+    "library=${_cosmosim_hdf5_primary_library} wrapper=${COSMOSIM_HDF5_C_WRAPPER} "
+    "declared_parallel=${HDF5_IS_PARALLEL} mpio_probe=${COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE} "
+    "require_parallel=${COSMOSIM_REQUIRE_PARALLEL_HDF5}")
+
+  if(COSMOSIM_REQUIRE_PARALLEL_HDF5 AND NOT COSMOSIM_HDF5_PARALLEL)
+    message(FATAL_ERROR
+      "COSMOSIM_REQUIRE_PARALLEL_HDF5=ON, but the selected HDF5 C installation cannot compile/link "
+      "H5Pset_fapl_mpio/H5Pset_dxpl_mpio with the selected MPI stack. "
+      "Select one coherent Parallel-HDF5 installation (for Ubuntu/OpenMPI, the h5pcc.openmpi family).")
+  endif()
   if(COSMOSIM_ENABLE_MPI AND NOT COSMOSIM_HDF5_PARALLEL)
     message(WARNING
-      "MPI is enabled but selected HDF5 is serial. Multi-rank output.snapshot_layout=auto/single will fail closed; use Parallel HDF5 or explicitly select sharded.")
+      "MPI is enabled but the selected HDF5 C installation failed the MPIO capability probe. "
+      "Multi-rank output.snapshot_layout=auto/single will fail closed; use a qualified Parallel HDF5 "
+      "or explicitly select the legacy sharded compatibility layout.")
   endif()
 endif()
 
+set(COSMOSIM_HAVE_FFTW_MPI OFF)
 if(COSMOSIM_ENABLE_FFTW)
   if(COSMOSIM_ENABLE_MPI)
     cosmosim_find_fftw(COSMOSIM_FFTW_TARGET REQUIRE_MPI)
   else()
     cosmosim_find_fftw(COSMOSIM_FFTW_TARGET)
+  endif()
+  if(COSMOSIM_ENABLE_MPI AND NOT "${COSMOSIM_FFTW_MPI_TARGET}" STREQUAL "")
+    set(COSMOSIM_HAVE_FFTW_MPI ON)
   endif()
   message(STATUS
     "CHUI dependency: FFTW target=${COSMOSIM_FFTW_TARGET} version=${FFTW_VERSION} mpi_target=${COSMOSIM_FFTW_MPI_TARGET}")
@@ -264,20 +334,16 @@ endif()
 # A system compiler/dependency stack paired accidentally with a Conda MPI wrapper is
 # a common first-light failure mode; warn without overriding the user's selection.
 if(COSMOSIM_ENABLE_MPI)
-  string(TOLOWER "${MPI_CXX_COMPILER}" _cosmosim_mpi_compiler_lower)
-  string(TOLOWER "${CMAKE_CXX_COMPILER}" _cosmosim_cxx_compiler_lower)
-  set(_cosmosim_mpi_looks_conda OFF)
-  if(_cosmosim_mpi_compiler_lower MATCHES "(anaconda|miniconda|/conda/|\\conda\\)")
-    set(_cosmosim_mpi_looks_conda ON)
-  endif()
+  cosmosim_path_looks_conda("${MPI_CXX_COMPILER}" _cosmosim_mpi_looks_conda)
   if(_cosmosim_mpi_looks_conda)
     set(_cosmosim_mixed_prefix_risk OFF)
-    if(NOT _cosmosim_cxx_compiler_lower MATCHES "(anaconda|miniconda|/conda/|\\conda\\)")
+    cosmosim_path_looks_conda("${CMAKE_CXX_COMPILER}" _cosmosim_cxx_looks_conda)
+    if(NOT _cosmosim_cxx_looks_conda)
       set(_cosmosim_mixed_prefix_risk ON)
     endif()
     if(COSMOSIM_ENABLE_HDF5)
-      string(TOLOWER "${HDF5_LIBRARIES}" _cosmosim_hdf5_libraries_lower)
-      if(NOT _cosmosim_hdf5_libraries_lower MATCHES "(anaconda|miniconda|/conda/|\\conda\\)")
+      cosmosim_path_looks_conda("${HDF5_LIBRARIES}" _cosmosim_hdf5_looks_conda)
+      if(NOT _cosmosim_hdf5_looks_conda)
         set(_cosmosim_mixed_prefix_risk ON)
       endif()
     endif()
@@ -805,7 +871,7 @@ if(COSMOSIM_ENABLE_TESTS)
   add_test(NAME unit_particle_id_registry COMMAND test_unit_particle_id_registry)
 
   add_executable(test_unit_memory_governor tests/unit/test_memory_governor.cpp)
-  target_link_libraries(test_unit_memory_governor PRIVATE cosmosim_core)
+  target_link_libraries(test_unit_memory_governor PRIVATE cosmosim_core Threads::Threads)
   add_test(NAME unit_memory_governor COMMAND test_unit_memory_governor)
   add_executable(test_unit_retained_capacity_transaction tests/unit/test_retained_capacity_transaction.cpp)
   target_link_libraries(test_unit_retained_capacity_transaction PRIVATE cosmosim_core)
@@ -1360,6 +1426,22 @@ if(COSMOSIM_ENABLE_TESTS)
     set_tests_properties(integration_distributed_sfc_rebalance_mpi_four_rank PROPERTIES PROCESSORS 4)
   endif()
 
+  if(COSMOSIM_ENABLE_MPI)
+    add_executable(test_integration_diagnostics_mpi_global
+      tests/integration/test_diagnostics_mpi_global.cpp)
+    target_link_libraries(test_integration_diagnostics_mpi_global PRIVATE cosmosim_all)
+    foreach(diagnostics_rank_count IN ITEMS 2 3 4)
+      add_test(
+        NAME integration_diagnostics_mpi_global_${diagnostics_rank_count}_rank
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${diagnostics_rank_count} ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_integration_diagnostics_mpi_global> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(
+        integration_diagnostics_mpi_global_${diagnostics_rank_count}_rank
+        PROPERTIES PROCESSORS ${diagnostics_rank_count} TIMEOUT 60
+                   LABELS "mpi;distributed;diagnostics;global_science;runtime_truth;p0")
+    endforeach()
+  endif()
+
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5)
     add_executable(test_integration_snapshot_set_mpi
       tests/integration/test_snapshot_set_mpi.cpp)
@@ -1372,7 +1454,14 @@ if(COSMOSIM_ENABLE_TESTS)
       set_tests_properties(
         integration_snapshot_set_mpi_${snapshot_rank_count}_rank
         PROPERTIES PROCESSORS ${snapshot_rank_count} TIMEOUT 90
-                   LABELS "mpi;hdf5;distributed;snapshot;archive;runtime_truth")
+                   LABELS "mpi;hdf5;distributed;snapshot;archive;runtime_truth;p0")
+      if(COSMOSIM_HDF5_PARALLEL)
+        cosmosim_append_test_labels(
+          integration_snapshot_set_mpi_${snapshot_rank_count}_rank parallel_hdf5 production_single_file)
+      else()
+        cosmosim_append_test_labels(
+          integration_snapshot_set_mpi_${snapshot_rank_count}_rank legacy_sharded_compatibility)
+      endif()
     endforeach()
 
     add_executable(test_integration_distributed_ic_reader_mpi
@@ -1728,6 +1817,23 @@ if(COSMOSIM_ENABLE_TESTS)
            COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_feature_summary.cmake")
 
   configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_toolchain_path_checks.cmake.in"
+    "${CMAKE_BINARY_DIR}/test_toolchain_path_checks.cmake"
+    @ONLY)
+  add_test(NAME integration_toolchain_path_checks
+           COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_toolchain_path_checks.cmake")
+  set_tests_properties(integration_toolchain_path_checks PROPERTIES LABELS "integration;cmake;toolchain")
+
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_installed_package_consumer.cmake.in"
+    "${CMAKE_BINARY_DIR}/test_installed_package_consumer.cmake"
+    @ONLY)
+  add_test(NAME integration_installed_package_consumer
+           COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_installed_package_consumer.cmake")
+  set_tests_properties(integration_installed_package_consumer PROPERTIES
+    LABELS "integration;install;package;consumer" RUN_SERIAL TRUE TIMEOUT 300)
+
+  configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_configure_presets.cmake.in"
     "${CMAKE_BINARY_DIR}/test_configure_presets.cmake"
     @ONLY)
@@ -1849,13 +1955,65 @@ if(COSMOSIM_ENABLE_TESTS)
   endif()
 
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW AND COSMOSIM_HDF5_PARALLEL)
+    foreach(cosmosim_mpi_snapshot_smoke_ranks IN ITEMS 2 3)
+      set(COSMOSIM_MPI_SNAPSHOT_SMOKE_RANKS ${cosmosim_mpi_snapshot_smoke_ranks})
+      configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_mpi_snapshot_smoke.cmake.in"
+        "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_snapshot_smoke_${cosmosim_mpi_snapshot_smoke_ranks}.cmake"
+        @ONLY)
+      add_test(
+        NAME integration_runtime_app_mpi_snapshot_smoke_${cosmosim_mpi_snapshot_smoke_ranks}_rank
+        COMMAND ${CMAKE_COMMAND} -P
+                "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_snapshot_smoke_${cosmosim_mpi_snapshot_smoke_ranks}.cmake")
+      set_tests_properties(
+        integration_runtime_app_mpi_snapshot_smoke_${cosmosim_mpi_snapshot_smoke_ranks}_rank
+        PROPERTIES PROCESSORS ${cosmosim_mpi_snapshot_smoke_ranks}
+                   LABELS "mpi;hdf5;parallel_hdf5;snapshot;runtime;endpoint;runtime_truth;p0")
+    endforeach()
+    unset(COSMOSIM_MPI_SNAPSHOT_SMOKE_RANKS)
+
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_mpi_restart_smoke.cmake.in"
+      "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_restart_smoke.cmake"
+      @ONLY)
+    add_test(NAME integration_runtime_app_mpi_restart_smoke_two_rank
+             COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_restart_smoke.cmake")
+    set_tests_properties(
+      integration_runtime_app_mpi_restart_smoke_two_rank
+      PROPERTIES PROCESSORS 2 LABELS "mpi;hdf5;parallel_hdf5;restart;runtime;runtime_truth;p0")
+
+    configure_file(
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_mpi_diagnostics_smoke.cmake.in"
+      "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_diagnostics_smoke.cmake"
+      @ONLY)
+    add_test(NAME integration_runtime_app_mpi_diagnostics_smoke_two_rank
+             COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_diagnostics_smoke.cmake")
+    set_tests_properties(
+      integration_runtime_app_mpi_diagnostics_smoke_two_rank
+      PROPERTIES PROCESSORS 2 LABELS "mpi;hdf5;parallel_hdf5;diagnostics;global_science;runtime;runtime_truth;p0")
+
     configure_file(
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_runtime_app_mpi_treepm_smoke.cmake.in"
       "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_treepm_smoke.cmake"
       @ONLY)
     add_test(NAME integration_runtime_app_mpi_treepm_smoke_two_rank
              COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_runtime_app_mpi_treepm_smoke.cmake")
-    set_tests_properties(integration_runtime_app_mpi_treepm_smoke_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(
+      integration_runtime_app_mpi_treepm_smoke_two_rank
+      PROPERTIES PROCESSORS 2 LABELS "mpi;hdf5;parallel_hdf5;runtime;combined;runtime_truth;p0")
+
+    if(NOT COSMOSIM_SELECTED_PRESET STREQUAL "manual")
+      configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/test_chui_launcher_mpi_runtime.cmake.in"
+        "${CMAKE_BINARY_DIR}/test_chui_launcher_mpi_runtime.cmake"
+        @ONLY)
+      add_test(NAME integration_chui_launcher_mpi_runtime_two_rank
+               COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_chui_launcher_mpi_runtime.cmake")
+      set_tests_properties(
+        integration_chui_launcher_mpi_runtime_two_rank
+        PROPERTIES PROCESSORS 2
+                   LABELS "mpi;hdf5;parallel_hdf5;launcher;runtime;runtime_truth;p0")
+    endif()
   endif()
 
   add_executable(

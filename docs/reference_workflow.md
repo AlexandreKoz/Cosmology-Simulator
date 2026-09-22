@@ -24,7 +24,7 @@ A valid `param.txt` run goes through the following real path:
 5. The live run loop uses `HierarchicalTimeBinScheduler` as the execution driver.
 5. The orchestrator executes the canonical KDK stage sequence through the
    gravity owner and the current hydro callback.
-6. Outputs, restart checkpoints, diagnostics, normalized config, and operational reports are written into the config-driven run directory.
+6. Outputs, restart checkpoints, diagnostics, normalized config, and operational reports are written into the config-driven run directory. Under MPI, shared science diagnostics are communicator-global products: all ranks contribute through explicit reductions and rank 0 alone publishes the shared transactional files; rank-local operational telemetry remains rank-qualified. Distributed power spectrum is deferred unless a scientifically correct global density/FFT path is available.
 
 ## Native console observability
 

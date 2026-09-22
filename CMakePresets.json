@@ -75,7 +75,19 @@
       "displayName": "MPI + HDF5 + FFTW Debug",
       "description": "Distributed gravity development preset (Phase 2 contract path).",
       "cacheVariables": {
-        "COSMOSIM_ENABLE_MPI": "ON"
+        "COSMOSIM_ENABLE_MPI": "ON",
+        "COSMOSIM_REQUIRE_PARALLEL_HDF5": "ON"
+      }
+    },
+    {
+      "name": "mpi-serial-hdf5-fftw-debug",
+      "displayName": "MPI + serial HDF5 + FFTW Debug (legacy sharded compatibility)",
+      "inherits": [
+        "pm-hdf5-fftw-debug"
+      ],
+      "cacheVariables": {
+        "COSMOSIM_ENABLE_MPI": "ON",
+        "COSMOSIM_REQUIRE_PARALLEL_HDF5": "OFF"
       }
     },
     {
@@ -142,7 +154,8 @@
         "COSMOSIM_ENABLE_MPI": "ON",
         "COSMOSIM_ENABLE_HDF5": "ON",
         "COSMOSIM_ENABLE_FFTW": "ON",
-        "COSMOSIM_ENABLE_CUDA": "OFF"
+        "COSMOSIM_ENABLE_CUDA": "OFF",
+        "COSMOSIM_REQUIRE_PARALLEL_HDF5": "ON"
       }
     },
     {
@@ -190,6 +203,10 @@
     {
       "name": "build-pm-hdf5-fftw-debug",
       "configurePreset": "pm-hdf5-fftw-debug"
+    },
+    {
+      "name": "build-mpi-serial-hdf5-fftw-debug",
+      "configurePreset": "mpi-serial-hdf5-fftw-debug"
     },
     {
       "name": "build-mpi-hdf5-fftw-debug",
@@ -244,6 +261,13 @@
     {
       "name": "test-pm-hdf5-fftw-debug",
       "configurePreset": "pm-hdf5-fftw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-mpi-serial-hdf5-fftw-debug",
+      "configurePreset": "mpi-serial-hdf5-fftw-debug",
       "output": {
         "outputOnFailure": true
       }

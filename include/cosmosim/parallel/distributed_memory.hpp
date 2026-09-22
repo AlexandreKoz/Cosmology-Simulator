@@ -689,8 +689,10 @@ class MpiContext {
   void validateExpectedWorldSizeOrThrow(int expected_world_size) const;
 
   [[nodiscard]] double allreduceSumDouble(double local_value) const;
+  void allreduceSumDoublesInPlace(std::span<double> values) const;
   [[nodiscard]] double allreduceMinDouble(double local_value) const;
   [[nodiscard]] std::uint64_t allreduceSumUint64(std::uint64_t local_value) const;
+  void allreduceSumUint64sInPlace(std::span<std::uint64_t> values) const;
   [[nodiscard]] std::uint64_t exclusiveScanSumUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceMaxUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceMinUint64(std::uint64_t local_value) const;

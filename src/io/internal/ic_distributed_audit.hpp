@@ -14,6 +14,14 @@
 
 namespace cosmosim::io::distributed_audit_internal {
 
+struct CompensatedMassAccumulator {
+  double sum = 0.0;
+  double correction = 0.0;
+
+  void add(double value);
+  [[nodiscard]] double value() const noexcept { return sum; }
+};
+
 struct SpeciesMassAuditResult {
   double source_mass = 0.0;
   double final_mass = 0.0;

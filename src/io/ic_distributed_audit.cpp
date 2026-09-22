@@ -26,6 +26,16 @@
 
 namespace cosmosim::io::distributed_audit_internal {
 
+void CompensatedMassAccumulator::add(double value) {
+  if (!std::isfinite(value)) {
+    throw std::invalid_argument("compensated mass accumulation requires finite values");
+  }
+  const double corrected = value - correction;
+  const double updated = sum + corrected;
+  correction = (updated - sum) - corrected;
+  sum = updated;
+}
+
 SpeciesMassAuditResult evaluateSpeciesMassAudit(
     double source_mass, double final_mass, double relative_tolerance) {
   if (!std::isfinite(source_mass) || !std::isfinite(final_mass) ||
@@ -603,7 +613,7 @@ void validateDistributedTotals(
   const LocalTotals local = runCollectivePhase<LocalTotals>(
       mpi_context, "IC distributed local totals", [&]() {
         LocalTotals totals;
-        std::array<double, 5> compensation{};
+        std::array<CompensatedMassAccumulator, 5> mass_accumulators{};
         for (std::size_t index = 0; index < state.particles.size(); ++index) {
           const std::uint32_t species =
               state.particle_sidecar.species_tag[index];
@@ -617,11 +627,10 @@ void validateDistributedTotals(
             throw std::runtime_error(
                 "distributed IC final mass must be finite and positive");
           }
-          const double corrected = value - compensation[species];
-          const double updated = totals.masses[species] + corrected;
-          compensation[species] =
-              (updated - totals.masses[species]) - corrected;
-          totals.masses[species] = updated;
+          mass_accumulators[species].add(value);
+        }
+        for (std::size_t species = 0; species < mass_accumulators.size(); ++species) {
+          totals.masses[species] = mass_accumulators[species].value();
         }
         return totals;
       });

@@ -19,6 +19,26 @@ ${preset_stderr}")
   endif()
 endfunction()
 
+function(require_parallel_hdf5_summary preset_name)
+  set(summary_path "${source_dir}/build/${preset_name}/cosmosim_feature_summary.txt")
+  if(NOT EXISTS "${summary_path}")
+    message(FATAL_ERROR "${preset_name} did not emit feature summary: ${summary_path}")
+  endif()
+  file(READ "${summary_path}" summary_text)
+  foreach(required_line IN ITEMS
+      "feature_mpi=true"
+      "feature_hdf5=true"
+      "feature_hdf5_parallel=true"
+      "feature_hdf5_mpio_probe=true"
+      "feature_hdf5_parallel_required=true"
+      "feature_fftw=true"
+      "feature_fftw_mpi=true")
+    if(NOT summary_text MATCHES "${required_line}")
+      message(FATAL_ERROR "${preset_name} production summary missing ${required_line}:\n${summary_text}")
+    endif()
+  endforeach()
+endfunction()
+
 require_preset_configure(cpu-only-debug)
 require_preset_configure(cpu-debug)
 
@@ -32,6 +52,9 @@ endif()
 
 if(current_build_has_mpi AND current_build_has_hdf5 AND current_build_has_fftw)
   require_preset_configure(mpi-hdf5-fftw-debug)
+  require_preset_configure(mpi-hdf5-fftw-release)
+  require_parallel_hdf5_summary(mpi-hdf5-fftw-debug)
+  require_parallel_hdf5_summary(mpi-hdf5-fftw-release)
 endif()
 
 if(current_build_has_python)

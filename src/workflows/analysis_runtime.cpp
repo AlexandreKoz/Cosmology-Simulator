@@ -12,6 +12,7 @@
 #include "cosmosim/analysis/diagnostics.hpp"
 #include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/profiling.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/optional_diagnostic_cadence.hpp"
@@ -83,10 +84,38 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
     }
     const auto run = [&](analysis::DiagnosticClass diagnostic_class,
                          core::MemoryReservation* reservation = nullptr) {
-      const analysis::DiagnosticsBundle bundle = m_diagnostics.generateBundle(
-          context.state, step, scale_factor, diagnostic_class,
-          context.workspace, reservation);
-      m_diagnostics.writeBundle(bundle);
+      analysis::DiagnosticsBundle bundle;
+      std::exception_ptr generation_failure;
+      try {
+        bundle = m_diagnostics.generateBundle(
+            context.state, step, scale_factor, diagnostic_class,
+            context.workspace, reservation,
+            m_services.mpi_context.worldSize() == 1);
+      } catch (...) {
+        generation_failure = std::current_exception();
+      }
+      // No rank may enter diagnostics collectives after a peer failed local
+      // bundle construction. This is the same prepare-then-collective rule used
+      // by distributed I/O.
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          generation_failure, "distributed diagnostics local generation");
+
+      analysis::reduceDiagnosticsBundleAcrossRanks(
+          bundle, m_services.mpi_context);
+      attachDistributedMemoryTelemetry(bundle.memory_report, m_services);
+
+      // Shared ordinary diagnostics have one filesystem owner. Every rank
+      // contributes to the global bundle; only rank zero publishes it.
+      std::exception_ptr publication_failure;
+      if (m_services.mpi_context.isRoot()) {
+        try {
+          m_diagnostics.writeBundle(bundle);
+        } catch (...) {
+          publication_failure = std::current_exception();
+        }
+      }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          publication_failure, "distributed diagnostics publication");
     };
     if (step % static_cast<std::uint64_t>(
                    m_config.analysis.run_health_interval_steps) == 0) {
@@ -233,7 +262,9 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
                     m_science_light_pending, science_light_due_now, "science_light");
     executeOptional(analysis::DiagnosticClass::kScienceHeavy,
                     m_science_heavy_pending, science_heavy_due_now, "science_heavy");
-    m_diagnostics.enforceRetentionPolicy();
+    if (m_services.mpi_context.isRoot()) {
+      m_diagnostics.enforceRetentionPolicy();
+    }
   }
 
   [[nodiscard]] std::string optionalCadenceProvenance() const override {

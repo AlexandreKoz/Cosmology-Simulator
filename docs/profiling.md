@@ -279,3 +279,11 @@ coordination, but it is not an invariant spectral-operator cache dependency.
 Changing only `scale_factor` therefore must leave this counter at zero after an
 operator has already been built for the same mesh, box, split scale, gravity
 constant, assignment scheme, and deconvolution policy.
+
+## MPI global diagnostics ownership
+
+Production `AnalysisRuntime` distinguishes rank-local operational state from shared science/run-health diagnostics. A due shared diagnostic is first prepared locally on every rank; local preparation failures are coordinated before any diagnostic reduction. Global health counters and SFR bins use communicator sums, invariant booleans use communicator-wide AND semantics with failing-rank counts, and angular-momentum **vectors** are summed component-wise before any norm is reported. Slice quicklooks reduce density sums plus sample counts before forming the global average; projection grids are element-wise sums.
+
+Only rank 0 publishes ordinary shared diagnostic JSON/CSV files after those reductions complete, using `.part` then rename transactional publication. Memory reporting preserves publisher-rank local ownership while also exposing distributed rank-sum, rank-max, and imbalance fields; RSS/local ownership is never relabeled as one global process value. Large particle state is not gathered to the publisher.
+
+A correct MPI power spectrum requires a global density field and global/distributed FFT. Until that contract exists, distributed diagnostics record `unsupported_under_mpi_requires_global_density_fft` and publish no averaged rank-local spectrum. Serial power-spectrum behavior is unchanged. Floating reductions retain the repository tolerance-equivalence contract rather than promising bitwise rank-count invariance; integer counts and boolean outcomes are exact.

@@ -504,3 +504,10 @@ until the evidence is recorded. See the dated M2D final admission repair report.
 
 The former SFC and heavy-analysis source defects remain repaired. See the new
 acceptance-gates report for the exact current commands and outcomes.
+
+## 2026-09-22 — Parallel-HDF5 / MPI diagnostics qualification closure
+
+- HDF5 source/package dependency truth is the C API only; C is explicitly enabled and production Parallel-HDF5 capability is established by MPIO compile/link probes rather than `HDF5_IS_PARALLEL` alone. Production MPI+HDF5+FFTW presets require that capability; serial-HDF5 MPI remains explicitly compatibility-only.
+- The mixed-prefix/Conda classifier normalizes separators and cannot abort configure through an invalid backslash regex. `Threads::Threads` is linked to the direct `std::thread` memory-governor test.
+- MPI diagnostics now reduce communicator-global counts, boolean invariant failures, angular-momentum vectors, SFR bins, quicklook fields, and distributed memory summaries before one publisher writes shared files. MPI power spectrum is explicitly deferred instead of averaging rank-local spectra.
+- Qualification is layered into narrow snapshot, restart, diagnostics, endpoint, real-launcher, feature-summary/runtime-truth, and installed-package-consumer gates. The real 64^3/3-rank first-light rerun remains a dependency/host acceptance gate and is not claimed by source inspection alone.

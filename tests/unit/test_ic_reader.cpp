@@ -994,7 +994,40 @@ void testMonofonicZeroBasedIdsAreOrderIndependentAndOverflowSafe() {
 }
 
 void testDistributedMassAuditDetectsLossAndDuplication() {
+  using cosmosim::io::distributed_audit_internal::CompensatedMassAccumulator;
   using cosmosim::io::distributed_audit_internal::evaluateSpeciesMassAudit;
+
+  // Regress the first-light scale that exposed naive-vs-compensated drift: a
+  // 64^3 equal-mass population.  This deliberately exercises accumulation,
+  // not a full TreePM step.
+  constexpr std::size_t kFirstLightCount = 64U * 64U * 64U;
+  constexpr double kRepresentativeMassCode = 1.0 / 7.0;
+  CompensatedMassAccumulator source_accumulator;
+  CompensatedMassAccumulator final_accumulator;
+  for (std::size_t index = 0; index < kFirstLightCount; ++index) {
+    source_accumulator.add(kRepresentativeMassCode);
+    final_accumulator.add(kRepresentativeMassCode);
+  }
+  const auto high_n_exact = evaluateSpeciesMassAudit(
+      source_accumulator.value(), final_accumulator.value());
+  assert(high_n_exact.within_tolerance);
+  assert(high_n_exact.absolute_delta == 0.0);
+
+  CompensatedMassAccumulator missing_one;
+  for (std::size_t index = 0; index + 1U < kFirstLightCount; ++index) {
+    missing_one.add(kRepresentativeMassCode);
+  }
+  const auto high_n_loss = evaluateSpeciesMassAudit(
+      source_accumulator.value(), missing_one.value());
+  assert(!high_n_loss.within_tolerance);
+  assert(high_n_loss.absolute_delta > high_n_loss.tolerance);
+
+  CompensatedMassAccumulator duplicate_one = final_accumulator;
+  duplicate_one.add(kRepresentativeMassCode);
+  const auto high_n_duplicate = evaluateSpeciesMassAudit(
+      source_accumulator.value(), duplicate_one.value());
+  assert(!high_n_duplicate.within_tolerance);
+  assert(high_n_duplicate.absolute_delta > high_n_duplicate.tolerance);
   const auto exact = evaluateSpeciesMassAudit(1234.5, 1234.5);
   assert(exact.within_tolerance);
   assert(exact.absolute_delta == 0.0);

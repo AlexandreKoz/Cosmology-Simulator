@@ -1,0 +1,15 @@
+include("@PROJECT_SOURCE_DIR@/cmake/cosmosim_toolchain_path_checks.cmake")
+
+function(expect_conda path expected)
+  cosmosim_path_looks_conda("${path}" actual)
+  if(NOT "${actual}" STREQUAL "${expected}")
+    message(FATAL_ERROR "Conda path classification mismatch for '${path}': expected=${expected} actual=${actual}")
+  endif()
+endfunction()
+
+expect_conda("/usr/bin/mpicxx" FALSE)
+expect_conda("/opt/openmpi/bin/mpicxx" FALSE)
+expect_conda("/home/user/anaconda3/bin/mpicxx" TRUE)
+expect_conda("/home/user/miniconda3/bin/mpicxx" TRUE)
+expect_conda([=[C:\Users\x\miniconda3\Library\bin\mpiexec.exe]=] TRUE)
+message(STATUS "CHUI toolchain path classifier regression passed")

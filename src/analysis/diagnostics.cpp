@@ -3,6 +3,7 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/openmp_runtime.hpp"
+#include "cosmosim/parallel/distributed_memory.hpp"
 
 #include <algorithm>
 #include <array>
@@ -40,6 +41,44 @@ constexpr double k_two_pi = 2.0 * std::numbers::pi_v<double>;
 }
 
 [[nodiscard]] std::size_t flatten2(std::size_t ix, std::size_t iy, std::size_t n) { return ix * n + iy; }
+
+
+struct SliceDensityAccumulation {
+  std::vector<double> density_sum;
+  std::vector<std::uint64_t> sample_count;
+};
+
+[[nodiscard]] SliceDensityAccumulation accumulateGasXySliceDensity(
+    const GasDiagnosticsView& gas_cells,
+    std::size_t grid_n,
+    double box_size_code) {
+  if (grid_n == 0U || !std::isfinite(box_size_code) || box_size_code <= 0.0) {
+    throw std::invalid_argument("gas xy slice requires positive grid size and box size");
+  }
+  const double dz_half = box_size_code / static_cast<double>(grid_n) * 0.5;
+  const double z_mid = box_size_code * 0.5;
+  const double cell_size = box_size_code / static_cast<double>(grid_n);
+  SliceDensityAccumulation accumulation{
+      .density_sum = std::vector<double>(grid_n * grid_n, 0.0),
+      .sample_count = std::vector<std::uint64_t>(grid_n * grid_n, 0U),
+  };
+  for (std::size_t i = 0; i < gas_cells.mass_code.size(); ++i) {
+    const double z = gas_cells.center_z_comoving[i];
+    if (std::abs(z - z_mid) > dz_half) {
+      continue;
+    }
+    const auto periodic_index = [&](double value) {
+      const double wrapped = std::fmod(std::fmod(value, box_size_code) + box_size_code, box_size_code);
+      return std::min(grid_n - 1U, static_cast<std::size_t>(wrapped / cell_size));
+    };
+    const std::size_t idx = flatten2(
+        periodic_index(gas_cells.center_x_comoving[i]),
+        periodic_index(gas_cells.center_y_comoving[i]), grid_n);
+    accumulation.density_sum[idx] += gas_cells.density_code[i];
+    ++accumulation.sample_count[idx];
+  }
+  return accumulation;
+}
 
 [[nodiscard]] bool finite3(double x, double y, double z) {
   return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
@@ -1132,32 +1171,15 @@ AngularMomentumBudget DiagnosticsEngine::computeAngularMomentumBudget(const core
 std::vector<double> DiagnosticsEngine::computeGasXySliceDensity(
     const GasDiagnosticsView& gas_cells,
     std::size_t grid_n) const {
-  const double box = m_config.cosmology.box_size_mpc_comoving;
-  const double dz_half = box / static_cast<double>(grid_n) * 0.5;
-  const double z_mid = box * 0.5;
-  const double cell_size = box / static_cast<double>(grid_n);
-
-  std::vector<double> slice(grid_n * grid_n, 0.0);
-  std::vector<std::uint32_t> count(grid_n * grid_n, 0);
-  for (std::size_t i = 0; i < gas_cells.mass_code.size(); ++i) {
-    const double z = gas_cells.center_z_comoving[i];
-    if (std::abs(z - z_mid) > dz_half) {
-      continue;
-    }
-
-    const std::size_t ix = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(gas_cells.center_x_comoving[i], box) + box, box) / cell_size));
-    const std::size_t iy = std::min(grid_n - 1, static_cast<std::size_t>(std::fmod(std::fmod(gas_cells.center_y_comoving[i], box) + box, box) / cell_size));
-    const std::size_t idx = flatten2(ix, iy, grid_n);
-    slice[idx] += gas_cells.density_code[i];
-    ++count[idx];
-  }
-
-  for (std::size_t i = 0; i < slice.size(); ++i) {
-    if (count[i] > 0) {
-      slice[i] /= static_cast<double>(count[i]);
+  auto accumulation = accumulateGasXySliceDensity(
+      gas_cells, grid_n, m_config.cosmology.box_size_mpc_comoving);
+  for (std::size_t i = 0; i < accumulation.density_sum.size(); ++i) {
+    if (accumulation.sample_count[i] != 0U) {
+      accumulation.density_sum[i] /=
+          static_cast<double>(accumulation.sample_count[i]);
     }
   }
-  return slice;
+  return accumulation.density_sum;
 }
 
 std::vector<double> DiagnosticsEngine::computeGasXySliceDensity(
@@ -1229,7 +1251,8 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
     double scale_factor,
     DiagnosticClass diagnostic_class,
     const core::TransientStepWorkspace* workspace,
-    core::MemoryReservation* enclosing_reservation) const {
+    core::MemoryReservation* enclosing_reservation,
+    bool allow_power_spectrum) const {
   core::MemoryReservation local_reservation;
   core::MemoryReservation* reservation = enclosing_reservation != nullptr
       ? enclosing_reservation : &local_reservation;
@@ -1298,7 +1321,17 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
         .policy_note = "validated_lightweight_science",
     });
     bundle.quicklook_grid_n = static_cast<std::size_t>(m_config.analysis.quicklook_grid_n);
-    bundle.xy_slice_density_code = computeGasXySliceDensity(view.gas_cells, bundle.quicklook_grid_n);
+    auto slice_accumulation = accumulateGasXySliceDensity(
+        view.gas_cells, bundle.quicklook_grid_n,
+        m_config.cosmology.box_size_mpc_comoving);
+    bundle.xy_slice_sample_count = std::move(slice_accumulation.sample_count);
+    bundle.xy_slice_density_code = std::move(slice_accumulation.density_sum);
+    for (std::size_t i = 0; i < bundle.xy_slice_density_code.size(); ++i) {
+      if (bundle.xy_slice_sample_count[i] != 0U) {
+        bundle.xy_slice_density_code[i] /=
+            static_cast<double>(bundle.xy_slice_sample_count[i]);
+      }
+    }
     bundle.xy_projection_density_code = computeGasXyProjectionDensity(view.gas_cells, bundle.quicklook_grid_n);
     bundle.records.push_back(DiagnosticRecord{
         .name = "gas_xy_slice_density",
@@ -1323,6 +1356,7 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
     // scientifically provisional. The opt-in policy therefore controls scheduling,
     // not which numerical backend is used once scheduled.
     const bool power_spectrum_scheduled =
+        allow_power_spectrum &&
         (m_config.analysis.diagnostics_execution_policy ==
          core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional);
     if (power_spectrum_scheduled) {
@@ -1341,20 +1375,131 @@ DiagnosticsBundle DiagnosticsEngine::generateBundle(
         .executed = power_spectrum_scheduled,
         .policy_note = power_spectrum_scheduled
             ? "scientifically_provisional_scalable_fft"
-            : "blocked_by_scientific_validation_policy",
+            : (allow_power_spectrum
+                ? "blocked_by_scientific_validation_policy"
+                : "unsupported_under_mpi_requires_global_density_fft"),
     });
   }
 
   return bundle;
 }
 
+void reduceDiagnosticsBundleAcrossRanks(
+    DiagnosticsBundle& bundle,
+    const parallel::MpiContext& mpi_context) {
+  const int rank_count = std::max(mpi_context.worldSize(), 1);
+
+  std::array<std::uint64_t, 7> additive_counts{
+      bundle.health.particle_count,
+      bundle.health.cell_count,
+      bundle.health.star_count,
+      bundle.health.non_finite_particles,
+      bundle.health.non_finite_cells,
+      bundle.health.non_finite_gravity_softening,
+      bundle.health.non_positive_particle_mass,
+  };
+  mpi_context.allreduceSumUint64sInPlace(additive_counts);
+  bundle.health.particle_count = additive_counts[0];
+  bundle.health.cell_count = additive_counts[1];
+  bundle.health.star_count = additive_counts[2];
+  bundle.health.non_finite_particles = additive_counts[3];
+  bundle.health.non_finite_cells = additive_counts[4];
+  bundle.health.non_finite_gravity_softening = additive_counts[5];
+  bundle.health.non_positive_particle_mass = additive_counts[6];
+
+  bundle.health.ownership_invariants_failed_ranks = mpi_context.allreduceSumUint64(
+      bundle.health.ownership_invariants_ok ? 0U : 1U);
+  bundle.health.unique_particle_ids_failed_ranks = mpi_context.allreduceSumUint64(
+      bundle.health.unique_particle_ids_ok ? 0U : 1U);
+  bundle.health.gravity_softening_sidecar_size_failed_ranks = mpi_context.allreduceSumUint64(
+      bundle.health.gravity_softening_sidecar_size_ok ? 0U : 1U);
+  bundle.health.ownership_invariants_ok =
+      bundle.health.ownership_invariants_failed_ranks == 0U;
+  bundle.health.unique_particle_ids_ok =
+      bundle.health.unique_particle_ids_failed_ranks == 0U;
+  bundle.health.gravity_softening_sidecar_size_ok =
+      bundle.health.gravity_softening_sidecar_size_failed_ranks == 0U;
+
+  std::array<double, 15> angular{};
+  std::size_t angular_index = 0U;
+  const auto pack = [&](const std::array<double, 3>& vector) {
+    for (double value : vector) {
+      angular[angular_index++] = value;
+    }
+  };
+  pack(bundle.angular_momentum.total_l_code);
+  pack(bundle.angular_momentum.gas_l_code);
+  pack(bundle.angular_momentum.star_l_code);
+  pack(bundle.angular_momentum.dark_matter_l_code);
+  pack(bundle.angular_momentum.black_hole_l_code);
+  mpi_context.allreduceSumDoublesInPlace(angular);
+  angular_index = 0U;
+  const auto unpack = [&](std::array<double, 3>& vector) {
+    for (double& value : vector) {
+      value = angular[angular_index++];
+    }
+  };
+  unpack(bundle.angular_momentum.total_l_code);
+  unpack(bundle.angular_momentum.gas_l_code);
+  unpack(bundle.angular_momentum.star_l_code);
+  unpack(bundle.angular_momentum.dark_matter_l_code);
+  unpack(bundle.angular_momentum.black_hole_l_code);
+
+  if (!bundle.star_formation_history.empty()) {
+    std::vector<double> formed_mass(bundle.star_formation_history.size(), 0.0);
+    for (std::size_t i = 0; i < formed_mass.size(); ++i) {
+      formed_mass[i] = bundle.star_formation_history[i].formed_mass_code;
+    }
+    mpi_context.allreduceSumDoublesInPlace(formed_mass);
+    for (std::size_t i = 0; i < formed_mass.size(); ++i) {
+      bundle.star_formation_history[i].formed_mass_code = formed_mass[i];
+    }
+  }
+
+  if (!bundle.xy_slice_density_code.empty()) {
+    if (bundle.xy_slice_sample_count.size() != bundle.xy_slice_density_code.size()) {
+      throw std::logic_error("distributed diagnostics slice sample-count shape mismatch");
+    }
+    for (std::size_t i = 0; i < bundle.xy_slice_density_code.size(); ++i) {
+      bundle.xy_slice_density_code[i] *=
+          static_cast<double>(bundle.xy_slice_sample_count[i]);
+    }
+    mpi_context.allreduceSumDoublesInPlace(bundle.xy_slice_density_code);
+    mpi_context.allreduceSumUint64sInPlace(bundle.xy_slice_sample_count);
+    for (std::size_t i = 0; i < bundle.xy_slice_density_code.size(); ++i) {
+      if (bundle.xy_slice_sample_count[i] != 0U) {
+        bundle.xy_slice_density_code[i] /=
+            static_cast<double>(bundle.xy_slice_sample_count[i]);
+      }
+    }
+  }
+  if (!bundle.xy_projection_density_code.empty()) {
+    mpi_context.allreduceSumDoublesInPlace(bundle.xy_projection_density_code);
+  }
+
+  if (rank_count > 1 && !bundle.power_spectrum.empty()) {
+    bundle.power_spectrum.clear();
+    for (DiagnosticRecord& record : bundle.records) {
+      if (record.name == "power_spectrum") {
+        record.executed = false;
+        record.policy_note =
+            "unsupported_under_mpi_requires_global_density_fft";
+      }
+    }
+  }
+  bundle.globally_reduced = true;
+  bundle.contributing_rank_count = rank_count;
+}
+
 void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
   const std::filesystem::path output_path = bundlePath(bundle);
   std::filesystem::create_directories(output_path.parent_path());
+  std::filesystem::path output_partial_path = output_path;
+  output_partial_path += ".part";
 
-  std::ofstream out(output_path);
+  std::ofstream out(output_partial_path, std::ios::trunc);
   if (!out) {
-    throw std::runtime_error("failed to open diagnostics bundle path: " + output_path.string());
+    throw std::runtime_error("failed to open diagnostics bundle path: " + output_partial_path.string());
   }
   out << std::setprecision(17);
   out << "{\n";
@@ -1365,6 +1510,8 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
       << "\",\n";
   out << "  \"step_index\": " << bundle.step_index << ",\n";
   out << "  \"scale_factor\": " << bundle.scale_factor << ",\n";
+  out << "  \"scope\": \"" << (bundle.globally_reduced ? "global" : "rank_local") << "\",\n";
+  out << "  \"contributing_rank_count\": " << bundle.contributing_rank_count << ",\n";
   out << "  \"units\": {\"frame\": \"comoving\", \"mass\": \"code\", \"length\": \"code\"},\n";
   out << "  \"health\": {\"particle_count\": " << bundle.health.particle_count
       << ", \"cell_count\": " << bundle.health.cell_count << ", \"star_count\": " << bundle.health.star_count
@@ -1375,11 +1522,24 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
       << ", \"non_finite_particles\": " << bundle.health.non_finite_particles
       << ", \"non_finite_cells\": " << bundle.health.non_finite_cells
       << ", \"non_finite_gravity_softening\": " << bundle.health.non_finite_gravity_softening
-      << ", \"non_positive_particle_mass\": " << bundle.health.non_positive_particle_mass << "},\n";
+      << ", \"non_positive_particle_mass\": " << bundle.health.non_positive_particle_mass
+      << ", \"ownership_invariants_failed_ranks\": " << bundle.health.ownership_invariants_failed_ranks
+      << ", \"unique_particle_ids_failed_ranks\": " << bundle.health.unique_particle_ids_failed_ranks
+      << ", \"gravity_softening_sidecar_size_failed_ranks\": "
+      << bundle.health.gravity_softening_sidecar_size_failed_ranks << "},\n";
 
   out << "  \"memory_report\": {\n";
   out << "    \"persistent_total_bytes\": " << bundle.memory_report.totals.persistent_total_bytes << ",\n";
   out << "    \"transient_total_bytes\": " << bundle.memory_report.totals.transient_total_bytes << ",\n";
+  out << "    \"publisher_rank_local_owned_bytes\": "
+      << (bundle.memory_report.totals.persistent_total_bytes + bundle.memory_report.totals.transient_total_bytes) << ",\n";
+  out << "    \"distributed\": {\"valid\": "
+      << (bundle.memory_report.distributed.valid ? "true" : "false")
+      << ", \"rank_count\": " << bundle.memory_report.distributed.rank_count
+      << ", \"rank_sum_owned_bytes\": " << bundle.memory_report.distributed.global_sum_owned_bytes
+      << ", \"rank_max_owned_bytes\": " << bundle.memory_report.distributed.rank_max_owned_bytes
+      << ", \"max_mean_imbalance\": " << bundle.memory_report.distributed.max_to_mean_imbalance_ratio
+      << "},\n";
   out << "    \"subsystems\": [";
   for (std::size_t i = 0; i < static_cast<std::size_t>(core::MemorySubsystem::kCount); ++i) {
     const auto subsystem = static_cast<core::MemorySubsystem>(i);
@@ -1433,6 +1593,17 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
   }
   out << "]\n";
   out << "}\n";
+  out.close();
+  if (!out) {
+    throw std::runtime_error("failed while writing diagnostics bundle path: " + output_partial_path.string());
+  }
+  std::error_code bundle_remove_error;
+  std::filesystem::remove(output_path, bundle_remove_error);
+  std::error_code bundle_rename_error;
+  std::filesystem::rename(output_partial_path, output_path, bundle_rename_error);
+  if (bundle_rename_error) {
+    throw std::runtime_error("failed to publish diagnostics bundle path: " + bundle_rename_error.message());
+  }
 
   if (!bundle.star_formation_history.empty()) {
     const std::filesystem::path history_path =
@@ -1472,9 +1643,11 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
 
   if (!bundle.xy_projection_density_code.empty()) {
     const std::filesystem::path quicklook = quicklookPath(bundle);
-    std::ofstream csv(quicklook);
+    std::filesystem::path quicklook_partial = quicklook;
+    quicklook_partial += ".part";
+    std::ofstream csv(quicklook_partial, std::ios::trunc);
     if (!csv) {
-      throw std::runtime_error("failed to open quicklook path: " + quicklook.string());
+      throw std::runtime_error("failed to open quicklook path: " + quicklook_partial.string());
     }
     const std::size_t n = bundle.quicklook_grid_n;
     for (std::size_t ix = 0; ix < n; ++ix) {
@@ -1485,6 +1658,17 @@ void DiagnosticsEngine::writeBundle(const DiagnosticsBundle& bundle) const {
         csv << bundle.xy_projection_density_code[flatten2(ix, iy, n)];
       }
       csv << '\n';
+    }
+    csv.close();
+    if (!csv) {
+      throw std::runtime_error("failed while writing quicklook path: " + quicklook_partial.string());
+    }
+    std::error_code quicklook_remove_error;
+    std::filesystem::remove(quicklook, quicklook_remove_error);
+    std::error_code quicklook_rename_error;
+    std::filesystem::rename(quicklook_partial, quicklook, quicklook_rename_error);
+    if (quicklook_rename_error) {
+      throw std::runtime_error("failed to publish quicklook path: " + quicklook_rename_error.message());
     }
   }
 }
@@ -1553,7 +1737,7 @@ std::span<const core::StageContract> DiagnosticsCallback::stageContracts() const
       .mutated_state = core::StageDataDomain::kDiagnostics,
       .produced_outputs = core::StageDataDomain::kDiagnostics,
       .allowed_side_effects = core::StageDataDomain::kDiagnostics,
-      .sync_requirements = core::StageSyncRequirement::kLocalOnly,
+      .sync_requirements = core::StageSyncRequirement::kGlobal,
       .active_set_family = core::StageActiveSetFamily::kNone,
       .restart_safety = core::StageSafety::kSafe,
       .output_safety = core::StageSafety::kSafe,

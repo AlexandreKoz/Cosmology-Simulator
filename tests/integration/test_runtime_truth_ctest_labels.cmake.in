@@ -82,6 +82,42 @@ else()
 endif()
 require_registered_runtime_truth_test(integration_provenance_roundtrip runtime_truth p0 provenance integration)
 
+if("@COSMOSIM_ENABLE_MPI@" STREQUAL "ON" AND
+   "@COSMOSIM_ENABLE_HDF5@" STREQUAL "ON" AND
+   "@COSMOSIM_ENABLE_FFTW@" STREQUAL "ON" AND
+   "@COSMOSIM_HDF5_PARALLEL@" STREQUAL "ON")
+  foreach(snapshot_rank_count IN ITEMS 2 3 4 8)
+    require_registered_runtime_truth_test(
+      integration_snapshot_set_mpi_${snapshot_rank_count}_rank
+      runtime_truth p0 mpi hdf5 snapshot parallel_hdf5 production_single_file)
+  endforeach()
+  require_registered_runtime_truth_test(
+    integration_runtime_app_mpi_snapshot_smoke_2_rank
+    runtime_truth p0 mpi hdf5 parallel_hdf5 snapshot endpoint runtime)
+  require_registered_runtime_truth_test(
+    integration_runtime_app_mpi_snapshot_smoke_3_rank
+    runtime_truth p0 mpi hdf5 parallel_hdf5 snapshot endpoint runtime)
+  require_registered_runtime_truth_test(
+    integration_runtime_app_mpi_restart_smoke_two_rank
+    runtime_truth p0 mpi hdf5 parallel_hdf5 restart runtime)
+  require_registered_runtime_truth_test(
+    integration_runtime_app_mpi_diagnostics_smoke_two_rank
+    runtime_truth p0 mpi hdf5 parallel_hdf5 diagnostics global_science runtime)
+  foreach(diagnostics_rank_count IN ITEMS 2 3 4)
+    require_registered_runtime_truth_test(
+      integration_diagnostics_mpi_global_${diagnostics_rank_count}_rank
+      runtime_truth p0 mpi diagnostics global_science)
+  endforeach()
+  require_registered_runtime_truth_test(
+    integration_runtime_app_mpi_treepm_smoke_two_rank
+    runtime_truth p0 mpi hdf5 parallel_hdf5 runtime combined)
+  if(NOT "@COSMOSIM_SELECTED_PRESET@" STREQUAL "manual")
+    require_registered_runtime_truth_test(
+      integration_chui_launcher_mpi_runtime_two_rank
+      runtime_truth p0 mpi hdf5 parallel_hdf5 launcher runtime)
+  endif()
+endif()
+
 function(require_backend_label_absent_when_disabled backend_label feature_name feature_enabled)
   if(NOT "${feature_enabled}" STREQUAL "ON")
     string(REGEX MATCH
