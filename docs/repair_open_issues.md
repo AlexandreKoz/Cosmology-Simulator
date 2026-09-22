@@ -511,3 +511,11 @@ acceptance-gates report for the exact current commands and outcomes.
 - The mixed-prefix/Conda classifier normalizes separators and cannot abort configure through an invalid backslash regex. `Threads::Threads` is linked to the direct `std::thread` memory-governor test.
 - MPI diagnostics now reduce communicator-global counts, boolean invariant failures, angular-momentum vectors, SFR bins, quicklook fields, and distributed memory summaries before one publisher writes shared files. MPI power spectrum is explicitly deferred instead of averaging rank-local spectra.
 - Qualification is layered into narrow snapshot, restart, diagnostics, endpoint, real-launcher, feature-summary/runtime-truth, and installed-package-consumer gates. The real 64^3/3-rank first-light rerun remains a dependency/host acceptance gate and is not claimed by source inspection alone.
+
+## 2026-09-22 — 64^3 Parallel-HDF5 smoke closure residual acceptance
+
+| ID | Status | Area | Current state | Remaining acceptance |
+| --- | --- | --- | --- | --- |
+| FIRSTLIGHT-MPIO-PROBE-20260922 | Source closed; dependency-host evidence required | CMake / Parallel HDF5 | Probe state is no longer preinitialized and stale cache is invalidated before the actual MPIO compile/link check; regression poisons cached state and includes serial-provider fail-closed coverage. | Execute the registered configure regression on a host with MPI + Parallel HDF5 (and serial HDF5 for the negative subcase). |
+| FIRSTLIGHT-ZERO-ID-MPI-20260922 | Source closed; real-IC evidence required | Distributed IC ingestion | One typed source-set ID mapping survives fragment assembly, serialization/broadcast, and chunk conversion; warnings are diagnostic only; overflow and shuffled/equivalence fixtures are registered. | Run the registered 1/2/3/4/8 MPI matrix and the exact original zero-based 64^3 MONOFONIC IC. |
+| FIRSTLIGHT-SNAPSHOT-NAMESPACE-20260922 | Source closed; Parallel-HDF5 runtime evidence required | Single-file snapshot publication | Rank zero creates/validates `snapshots/`, collective preflight gates HDF5 entry, committed snapshots remain protected, and deterministic path-is-file failure is registered at 2/3 ranks. | Execute the 2/3-rank Parallel-HDF5 snapshot smoke; retain host-level unwritable-directory qualification where permissions can be enforced. |

@@ -77,6 +77,8 @@ There is no full-state gather onto rank zero and no global duplicate particle ar
 
 Construction uses a non-final `snap_042.hdf5.partial` path. After all ranks complete their writes, every rank performs exact bounded readback of the partition it contributed. Distributed failure agreement must succeed before rank zero atomically publishes the final `snap_042.hdf5` name and writes the completion marker. The Parallel-HDF5 path uses `chui_snapshot_set_v3`; its integrity record attests the completed distributed scientific readback instead of forcing rank zero to reread and SHA-256 the entire global HDF5 file. Legacy sharded sets retain the v2 per-member SHA-256 contract. Readers accept both completion versions.
 
+Before any rank enters collective HDF5 creation, rank zero establishes and validates the shared `snapshots/` directory and the existing failure coordinator distributes that preflight result. A missing directory is created by the publication layer; a non-directory path or filesystem error fails collectively before `H5Fcreate`/MPI-IO. Only after namespace preflight succeeds does the existing committed-output collision check and stale `.partial` recovery run. A committed final snapshot remains fail-closed and is never treated as stale scratch.
+
 `output.snapshot_layout = sharded` explicitly retains the compatibility topology:
 
 ```text

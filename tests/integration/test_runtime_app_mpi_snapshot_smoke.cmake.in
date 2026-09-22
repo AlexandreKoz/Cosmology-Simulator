@@ -9,6 +9,10 @@ set(runtime_snapshot_dir "${runtime_shared_run_dir}/snapshots")
 
 file(REMOVE_RECURSE "${runtime_root}")
 file(MAKE_DIRECTORY "${runtime_root}")
+if(EXISTS "${runtime_snapshot_dir}")
+  message(FATAL_ERROR
+    "snapshot qualification must begin with a nonexistent snapshots directory")
+endif()
 
 # Narrow Parallel-HDF5 qualification: diagnostics and restarts are explicitly
 # disabled so unrelated subsystems cannot mask the science-snapshot contract.
@@ -66,4 +70,87 @@ string(REGEX MATCHALL "\\[CHUI\\]\\[SNAPSHOT\\]" snapshot_records "${stdout_text
 list(LENGTH snapshot_records snapshot_record_count)
 if(NOT snapshot_record_count EQUAL 1)
   message(FATAL_ERROR "narrow MPI snapshot smoke expected exactly one endpoint snapshot record, got ${snapshot_record_count}")
+endif()
+
+# A committed science product is not stale scratch: rerunning the exact same
+# output namespace must fail closed before collective HDF5 replacement.
+execute_process(
+  COMMAND "@MPIEXEC_EXECUTABLE@" "@MPIEXEC_NUMPROC_FLAG@" "${runtime_rank_count}" @MPIEXEC_PREFLAGS@
+          "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_config}" @MPIEXEC_POSTFLAGS@
+  RESULT_VARIABLE committed_rerun_result
+  OUTPUT_VARIABLE committed_rerun_stdout
+  ERROR_VARIABLE committed_rerun_stderr)
+if(committed_rerun_result EQUAL 0)
+  message(FATAL_ERROR
+    "rerunning a committed single-file snapshot namespace unexpectedly succeeded")
+endif()
+set(committed_rerun_output
+    "${committed_rerun_stdout}\n${committed_rerun_stderr}")
+if(NOT committed_rerun_output MATCHES
+    "refusing to overwrite a committed science snapshot")
+  message(FATAL_ERROR
+    "committed snapshot rerun failed for an unexpected reason:\n${committed_rerun_output}")
+endif()
+
+# Namespace failure must be coordinated before any rank enters H5Fcreate. A
+# regular file occupying the snapshots path is deterministic even in root CI,
+# unlike chmod-based permission tests.
+set(path_file_run_name
+    "runtime_app_mpi_snapshot_path_file_${runtime_rank_count}")
+set(path_file_shared_run_dir "${runtime_run_root}/${path_file_run_name}")
+set(path_file_snapshot_path "${path_file_shared_run_dir}/snapshots")
+set(path_file_config "${runtime_root}/runtime_mpi_snapshot_path_file.param.txt")
+file(MAKE_DIRECTORY "${path_file_shared_run_dir}")
+file(WRITE "${path_file_snapshot_path}" "not a directory\n")
+file(READ "${runtime_config}" path_file_config_text)
+string(REPLACE
+  "run_name = runtime_app_mpi_snapshot_smoke_${runtime_rank_count}"
+  "run_name = ${path_file_run_name}"
+  path_file_config_text "${path_file_config_text}")
+file(WRITE "${path_file_config}" "${path_file_config_text}")
+execute_process(
+  COMMAND "@MPIEXEC_EXECUTABLE@" "@MPIEXEC_NUMPROC_FLAG@" "${runtime_rank_count}" @MPIEXEC_PREFLAGS@
+          "@CMAKE_BINARY_DIR@/cosmosim_harness" "${path_file_config}" @MPIEXEC_POSTFLAGS@
+  RESULT_VARIABLE path_file_result
+  OUTPUT_VARIABLE path_file_stdout
+  ERROR_VARIABLE path_file_stderr)
+if(path_file_result EQUAL 0)
+  message(FATAL_ERROR
+    "snapshot preflight unexpectedly accepted a regular file as snapshots/")
+endif()
+set(path_file_output "${path_file_stdout}\n${path_file_stderr}")
+if(NOT path_file_output MATCHES
+    "science snapshot path exists but is not a directory")
+  message(FATAL_ERROR
+    "path-is-file preflight failed for an unexpected reason:\n${path_file_output}")
+endif()
+
+# An abandoned .partial is recoverable scratch when no committed final exists.
+set(stale_run_name "runtime_app_mpi_snapshot_stale_partial_${runtime_rank_count}")
+set(stale_shared_run_dir "${runtime_run_root}/${stale_run_name}")
+set(stale_snapshot_dir "${stale_shared_run_dir}/snapshots")
+set(stale_config "${runtime_root}/runtime_mpi_snapshot_stale_partial.param.txt")
+file(MAKE_DIRECTORY "${stale_snapshot_dir}")
+file(WRITE "${stale_snapshot_dir}/snap_001.hdf5.partial" "abandoned partial\n")
+file(READ "${runtime_config}" stale_config_text)
+string(REPLACE
+  "run_name = runtime_app_mpi_snapshot_smoke_${runtime_rank_count}"
+  "run_name = ${stale_run_name}"
+  stale_config_text "${stale_config_text}")
+file(WRITE "${stale_config}" "${stale_config_text}")
+execute_process(
+  COMMAND "@MPIEXEC_EXECUTABLE@" "@MPIEXEC_NUMPROC_FLAG@" "${runtime_rank_count}" @MPIEXEC_PREFLAGS@
+          "@CMAKE_BINARY_DIR@/cosmosim_harness" "${stale_config}" @MPIEXEC_POSTFLAGS@
+  RESULT_VARIABLE stale_result
+  OUTPUT_VARIABLE stale_stdout
+  ERROR_VARIABLE stale_stderr)
+if(NOT stale_result EQUAL 0)
+  message(FATAL_ERROR
+    "stale-partial recovery failed with exit code ${stale_result}:\n${stale_stdout}\n${stale_stderr}")
+endif()
+if(NOT EXISTS "${stale_snapshot_dir}/snap_001.hdf5" OR
+   NOT EXISTS "${stale_snapshot_dir}/snap_001.complete" OR
+   EXISTS "${stale_snapshot_dir}/snap_001.hdf5.partial")
+  message(FATAL_ERROR
+    "stale-partial recovery did not publish a clean committed snapshot")
 endif()

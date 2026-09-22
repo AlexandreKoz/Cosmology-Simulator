@@ -680,6 +680,17 @@ void writeStringArray(
 
 }  // namespace
 
+std::string_view icExternalIdMappingName(
+    IcExternalIdMapping mapping) noexcept {
+  switch (mapping) {
+    case IcExternalIdMapping::kIdentity:
+      return "identity";
+    case IcExternalIdMapping::kZeroPresentPlusOneV1:
+      return "zero_present_plus_one_v1";
+  }
+  return "unknown";
+}
+
 void validateIcManifest(const IcManifest& manifest) {
 
   if (manifest.schema_name != kIcAuditManifestSchemaName ||

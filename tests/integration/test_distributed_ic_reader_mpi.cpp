@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -202,6 +203,14 @@ void writeDatasetVec3(
              H5P_DEFAULT, values.data()) >= 0);
 }
 
+enum class IdFixtureMode : std::uint8_t {
+  kDefault,
+  kZeroBased,
+  kShuffledZeroBased,
+  kZeroWithUint64Max,
+  kPreNormalizedEquivalent,
+};
+
 [[nodiscard]] float positionX(std::uint32_t global_slot) {
   return static_cast<float>(
       (static_cast<double>(global_slot) + 0.5) *
@@ -215,7 +224,9 @@ void writeCommonParticleFields(
     std::uint32_t global_slot_begin,
     std::uint64_t id_begin,
     float mass,
-    bool duplicate_last_id = false) {
+    bool duplicate_last_id = false,
+    bool shuffle_ids = false,
+    bool force_uint64_max_last_id = false) {
   std::vector<float> coordinates;
   std::vector<float> velocities;
   std::vector<float> masses(local_count, mass);
@@ -236,8 +247,14 @@ void writeCommonParticleFields(
         {0.1F * static_cast<float>(local_index + 1U), 0.0F, 0.0F});
     ids[local_index] = id_begin + type_index;
   }
+  if (shuffle_ids && ids.size() > 2U) {
+    std::rotate(ids.begin(), ids.begin() + 3U, ids.end());
+  }
   if (duplicate_last_id && !ids.empty()) {
     ids.back() = 1000U;
+  }
+  if (force_uint64_max_last_id && !ids.empty()) {
+    ids.back() = std::numeric_limits<std::uint64_t>::max();
   }
   writeDatasetVec3(group, "Coordinates", coordinates);
   writeDatasetVec3(group, "Velocities", velocities);
@@ -255,7 +272,7 @@ void writeMember(
     bool duplicate_ids,
     bool canonical_header = false,
     bool alternate_convention = false,
-    bool zero_based_ids = false) {
+    IdFixtureMode id_fixture = IdFixtureMode::kDefault) {
   Hdf5Handle file(
       H5Fcreate(path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT));
   Hdf5Handle header(
@@ -328,12 +345,22 @@ void writeMember(
         K_KM_S_TO_SI);
   }
 
+  const bool zero_based_ids =
+      id_fixture == IdFixtureMode::kZeroBased ||
+      id_fixture == IdFixtureMode::kShuffledZeroBased ||
+      id_fixture == IdFixtureMode::kZeroWithUint64Max;
+  const bool pre_normalized_equivalent =
+      id_fixture == IdFixtureMode::kPreNormalizedEquivalent;
+  const std::uint64_t id_shift = pre_normalized_equivalent ? 1U : 0U;
+
   Hdf5Handle gas(H5Gcreate2(
       file.get(), "/PartType0", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeCommonParticleFields(
       gas.get(), member, K_LOCAL_COUNTS[0], 0U,
-      zero_based_ids ? 0U : 1000U, 1.0F,
-      duplicate_ids && member == 1U);
+      zero_based_ids ? 0U : (pre_normalized_equivalent ? 1U : 1000U), 1.0F,
+      duplicate_ids && member == 1U,
+      id_fixture == IdFixtureMode::kShuffledZeroBased,
+      id_fixture == IdFixtureMode::kZeroWithUint64Max && member == 1U);
   std::vector<float> internal_energy(K_LOCAL_COUNTS[0]);
   std::vector<float> density(K_LOCAL_COUNTS[0]);
   std::vector<float> metallicity(K_LOCAL_COUNTS[0], 0.02F);
@@ -354,12 +381,12 @@ void writeMember(
   Hdf5Handle dm(H5Gcreate2(
       file.get(), "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeCommonParticleFields(
-      dm.get(), member, K_LOCAL_COUNTS[1], 16U, 2000U, 2.0F);
+      dm.get(), member, K_LOCAL_COUNTS[1], 16U, 2000U + id_shift, 2.0F);
 
   Hdf5Handle star(H5Gcreate2(
       file.get(), "/PartType4", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeCommonParticleFields(
-      star.get(), member, K_LOCAL_COUNTS[4], 48U, 4000U, 3.0F);
+      star.get(), member, K_LOCAL_COUNTS[4], 48U, 4000U + id_shift, 3.0F);
   std::vector<float> formation(K_LOCAL_COUNTS[4], 0.5F);
   std::vector<float> initial_mass(K_LOCAL_COUNTS[4], 3.5F);
   std::vector<float> star_metallicity(K_LOCAL_COUNTS[4], 0.015F);
@@ -376,7 +403,7 @@ void writeMember(
   Hdf5Handle black_hole(H5Gcreate2(
       file.get(), "/PartType5", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
   writeCommonParticleFields(
-      black_hole.get(), member, K_LOCAL_COUNTS[5], 56U, 5000U, 4.0F);
+      black_hole.get(), member, K_LOCAL_COUNTS[5], 56U, 5000U + id_shift, 4.0F);
   std::vector<float> black_hole_mass(K_LOCAL_COUNTS[5], 5.0F);
   std::vector<float> black_hole_mdot(K_LOCAL_COUNTS[5], 0.25F);
   writeDataset1d(
@@ -747,7 +774,16 @@ int main(int argc, char** argv) {
 
   const std::string mode = argc > 1 ? argv[1] : "normal";
   const bool duplicate_ids = mode == "duplicate";
-  const bool zero_based_ids = mode == "zero_ids";
+  const bool zero_based_ids =
+      mode == "zero_ids" || mode == "shuffled_zero_ids" ||
+      mode == "zero_ids_equivalence";
+  const bool zero_id_overflow = mode == "zero_id_overflow";
+  const IdFixtureMode id_fixture = zero_id_overflow
+      ? IdFixtureMode::kZeroWithUint64Max
+      : mode == "shuffled_zero_ids"
+          ? IdFixtureMode::kShuffledZeroBased
+          : zero_based_ids ? IdFixtureMode::kZeroBased
+                           : IdFixtureMode::kDefault;
   const bool fault_mode = startsWith(mode, "fault_");
   const bool route_mutation =
       mode == "route_loss" || mode == "route_duplicate";
@@ -840,10 +876,10 @@ int main(int argc, char** argv) {
     } else {
       writeMember(
           first, 0U, duplicate_ids, canonical_mode, alternate_mode,
-          zero_based_ids);
+          id_fixture);
       writeMember(
           second, 1U, duplicate_ids, canonical_mode, alternate_mode,
-          zero_based_ids);
+          id_fixture);
     }
   }
   MPI_Barrier(MPI_COMM_WORLD);
@@ -909,7 +945,7 @@ int main(int argc, char** argv) {
       mode == "canonical_manifest_bridge_dialect" ||
       bridge_manifest_canonical_dialect;
   const bool rejection_expected =
-      duplicate_ids || fault_mode || route_mutation ||
+      duplicate_ids || zero_id_overflow || fault_mode || route_mutation ||
       manifest_rejection_expected;
   bool rejected_as_expected = false;
   try {
@@ -936,18 +972,68 @@ int main(int argc, char** argv) {
     assert(result.report.already_partitioned);
     assert(result.state.validateOwnershipInvariants());
     if (zero_based_ids) {
-      std::uint64_t local_internal_id_one = 0U;
+      assert(
+          result.report.external_id_mapping ==
+          cosmosim::io::IcExternalIdMapping::kZeroPresentPlusOneV1);
+      std::array<std::uint64_t, 4> local_id_ranges{};
       for (const std::uint64_t id : result.state.particle_sidecar.particle_id) {
         assert(id != 0U);
-        if (id == 1U) ++local_internal_id_one;
+        if (id >= 1U && id <= 16U) {
+          ++local_id_ranges[0];
+        } else if (id >= 2001U && id <= 2032U) {
+          ++local_id_ranges[1];
+        } else if (id >= 4001U && id <= 4008U) {
+          ++local_id_ranges[2];
+        } else if (id >= 5001U && id <= 5004U) {
+          ++local_id_ranges[3];
+        } else {
+          assert(false && "zero-based import produced an unexpected normalized ID");
+        }
       }
-      assert(mpi_context.allreduceSumUint64(local_internal_id_one) == 1U);
+      const std::array<std::uint64_t, 4> expected_id_ranges{16U, 32U, 8U, 4U};
+      for (std::size_t i = 0U; i < local_id_ranges.size(); ++i) {
+        assert(
+            mpi_context.allreduceSumUint64(local_id_ranges[i]) ==
+            expected_id_ranges[i]);
+      }
       assert(result.report.manifest.has_value());
       const auto& warnings = result.report.manifest->warnings;
       assert(std::any_of(
           warnings.begin(), warnings.end(), [](const std::string& warning) {
             return warning.find("zero_present_plus_one_v1") != std::string::npos;
           }));
+
+      if (mode == "zero_ids_equivalence") {
+        const auto equivalent_base = workspace.root() / "equivalent_id1";
+        const auto equivalent_first =
+            std::filesystem::path(equivalent_base.string() + ".0.hdf5");
+        const auto equivalent_second =
+            std::filesystem::path(equivalent_base.string() + ".1.hdf5");
+        if (world_rank == 0) {
+          writeMember(
+              equivalent_first, 0U, false, false, false,
+              IdFixtureMode::kPreNormalizedEquivalent);
+          writeMember(
+              equivalent_second, 1U, false, false, false,
+              IdFixtureMode::kPreNormalizedEquivalent);
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+        const auto equivalent = cosmosim::io::readDistributedGadgetArepoHdf5Ic(
+            equivalent_first, config, mpi_context, import_options);
+        assert(
+            equivalent.report.external_id_mapping ==
+            cosmosim::io::IcExternalIdMapping::kIdentity);
+        assertEquivalentImportedState(result.state, equivalent.state);
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (world_rank == 0) {
+          std::filesystem::remove(equivalent_first);
+          std::filesystem::remove(equivalent_second);
+        }
+      }
+    } else if (!policy_mode) {
+      assert(
+          result.report.external_id_mapping ==
+          cosmosim::io::IcExternalIdMapping::kIdentity);
     }
     if (canonical_mode) {
       assert(result.report.manifest_verified);

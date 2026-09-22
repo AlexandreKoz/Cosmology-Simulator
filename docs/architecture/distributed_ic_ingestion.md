@@ -126,12 +126,20 @@ owned records without all-gathering all IDs onto every rank.
 
 The GADGET/AREPO bridge treats external particle labels as an import-domain contract,
 not as CHUÍ internal identity truth. Inspection scans every `ParticleIDs` dataset in
-bounded chunks across the complete source file set. If any valid external ID is zero,
-the whole source identity domain uses `internal_id = external_id + 1`; row order and
-contiguity are irrelevant. A simultaneous `UINT64_MAX` is rejected before ingestion
-because the affine mapping would overflow. Distributed duplicate detection remains exact
-after mapping, and tracer parent particle IDs use the same mapping. Import provenance
-records `source_particle_id_mapping=zero_present_plus_one_v1`.
+bounded chunks across the complete source file set. Each source fragment carries typed
+zero/`UINT64_MAX` observations to rank zero; rank zero resolves one
+`IcExternalIdMapping` for the complete source set and broadcasts that typed policy in
+the distributed-inspection envelope alongside the manifest. The decoded `Inspection`
+therefore presents the same mapping to every chunk reader on every rank. Warning strings
+remain diagnostics only and are not parsed to reconstruct policy.
+
+If any valid external ID is zero, the whole source identity domain uses
+`internal_id = external_id + 1`; row order and contiguity are irrelevant. A simultaneous
+`UINT64_MAX` anywhere in the source set is rejected before ingestion because the affine
+mapping would overflow. Distributed duplicate detection remains exact after mapping, and
+tracer parent particle IDs use the same mapping. `IcImportReport::external_id_mapping`
+records the typed provenance; the existing warning
+`source_particle_id_mapping=zero_present_plus_one_v1` remains a human-readable audit aid.
 
 Mass-conservation auditing deliberately uses one numerical contract on both sides of
 routing: source records and final owned state are accumulated locally with compensated

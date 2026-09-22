@@ -99,6 +99,17 @@ enum class IcByteOrder : std::uint8_t {
   kNative = 3,
 };
 
+// Authoritative mapping from an external IC identity domain into CHUÍ's
+// internal non-zero particle-ID domain. This is source-set semantic metadata,
+// not a row-order inference or a diagnostic string.
+enum class IcExternalIdMapping : std::uint8_t {
+  kIdentity = 0,
+  kZeroPresentPlusOneV1 = 1,
+};
+
+[[nodiscard]] std::string_view icExternalIdMappingName(
+    IcExternalIdMapping mapping) noexcept;
+
 struct IcFieldManifest {
   std::uint32_t source_file_index = 0;
   std::string dataset_path;
@@ -359,6 +370,7 @@ struct IcImportReport {
   bool manifest_verified = false;
   std::string verified_manifest_sha256;
   std::string provenance_authority;
+  IcExternalIdMapping external_id_mapping = IcExternalIdMapping::kIdentity;
 };
 
 struct IcReadResult {

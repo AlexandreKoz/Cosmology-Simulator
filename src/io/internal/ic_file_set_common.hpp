@@ -30,7 +30,7 @@ struct Inspection {
   IcManifest manifest;
   std::vector<IcSchemaSummary> schemas;
   IcImportCounters counters;
-  bool normalize_external_zero_based_ids = false;
+  IcExternalIdMapping external_id_mapping = IcExternalIdMapping::kIdentity;
 };
 
 struct SourceFileInspection {
@@ -47,6 +47,8 @@ struct SourceFileInspection {
   std::vector<std::string> warnings;
   bool canonical_manifest_verified = false;
   std::string canonical_manifest_sha256;
+  bool saw_external_particle_id_zero = false;
+  bool saw_external_particle_id_uint64_max = false;
   IcImportCounters counters;
 };
 

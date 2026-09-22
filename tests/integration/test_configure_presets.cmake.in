@@ -39,6 +39,84 @@ function(require_parallel_hdf5_summary preset_name)
   endforeach()
 endfunction()
 
+function(require_parallel_hdf5_probe_reexecution preset_name)
+  execute_process(
+    COMMAND "@CMAKE_COMMAND@" --preset "${preset_name}"
+            -DCOSMOSIM_HDF5_MPIO_CAPABILITY_PROBE=FALSE
+    WORKING_DIRECTORY "${source_dir}"
+    RESULT_VARIABLE preset_result
+    OUTPUT_VARIABLE preset_stdout
+    ERROR_VARIABLE preset_stderr)
+
+  set(combined_output "${preset_stdout}\n${preset_stderr}")
+  if(NOT preset_result EQUAL 0)
+    message(FATAL_ERROR
+      "${preset_name} failed after poisoning the cached MPIO probe result; "
+      "the configure path must invalidate stale capability state:\n${combined_output}")
+  endif()
+  if(NOT combined_output MATCHES
+      "Performing Test COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE")
+    message(FATAL_ERROR
+      "${preset_name} reused/suppressed the MPIO capability result instead of executing the probe:\n${combined_output}")
+  endif()
+  if(NOT combined_output MATCHES
+      "COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE - Success")
+    message(FATAL_ERROR
+      "${preset_name} executed the MPIO probe but did not prove the selected Parallel-HDF5 stack:\n${combined_output}")
+  endif()
+  require_parallel_hdf5_summary("${preset_name}")
+endfunction()
+
+function(require_serial_hdf5_rejected_when_parallel_required)
+  find_program(serial_hdf5_wrapper NAMES h5cc.serial h5cc)
+  if(NOT serial_hdf5_wrapper)
+    message(STATUS
+      "Skipping serial-HDF5 rejection subcase: no HDF5 C wrapper is available")
+    return()
+  endif()
+  execute_process(
+    COMMAND "${serial_hdf5_wrapper}" -showconfig
+    RESULT_VARIABLE serial_wrapper_result
+    OUTPUT_VARIABLE serial_wrapper_config
+    ERROR_VARIABLE serial_wrapper_error)
+  if(NOT serial_wrapper_result EQUAL 0)
+    message(FATAL_ERROR
+      "failed to classify HDF5 wrapper ${serial_hdf5_wrapper}: ${serial_wrapper_error}")
+  endif()
+  if(serial_wrapper_config MATCHES "Parallel HDF5:[ \t]*yes")
+    message(STATUS
+      "Skipping serial-HDF5 rejection subcase: ${serial_hdf5_wrapper} is parallel")
+    return()
+  endif()
+
+  set(serial_build_dir "@CMAKE_BINARY_DIR@/configure_serial_hdf5_rejection")
+  file(REMOVE_RECURSE "${serial_build_dir}")
+  execute_process(
+    COMMAND "@CMAKE_COMMAND@" -S "${source_dir}" -B "${serial_build_dir}"
+            -DCMAKE_BUILD_TYPE=Debug
+            -DCOSMOSIM_ENABLE_MPI=ON
+            -DCOSMOSIM_ENABLE_HDF5=ON
+            -DCOSMOSIM_ENABLE_FFTW=OFF
+            -DCOSMOSIM_ENABLE_TESTS=OFF
+            -DCOSMOSIM_ENABLE_BENCHMARKS=OFF
+            -DCOSMOSIM_REQUIRE_PARALLEL_HDF5=ON
+            -DHDF5_NO_FIND_PACKAGE_CONFIG_FILE=TRUE
+            "-DHDF5_C_COMPILER_EXECUTABLE=${serial_hdf5_wrapper}"
+    RESULT_VARIABLE serial_result
+    OUTPUT_VARIABLE serial_stdout
+    ERROR_VARIABLE serial_stderr)
+  set(combined_output "${serial_stdout}\n${serial_stderr}")
+  if(serial_result EQUAL 0)
+    message(FATAL_ERROR
+      "COSMOSIM_REQUIRE_PARALLEL_HDF5=ON unexpectedly accepted h5cc.serial:\n${combined_output}")
+  endif()
+  if(NOT combined_output MATCHES
+      "selected HDF5 C installation cannot compile/link")
+    message(FATAL_ERROR
+      "serial-HDF5 rejection failed for an unexpected reason:\n${combined_output}")
+  endif()
+endfunction()
+
 require_preset_configure(cpu-only-debug)
 require_preset_configure(cpu-debug)
 
@@ -55,6 +133,8 @@ if(current_build_has_mpi AND current_build_has_hdf5 AND current_build_has_fftw)
   require_preset_configure(mpi-hdf5-fftw-release)
   require_parallel_hdf5_summary(mpi-hdf5-fftw-debug)
   require_parallel_hdf5_summary(mpi-hdf5-fftw-release)
+  require_parallel_hdf5_probe_reexecution(mpi-hdf5-fftw-debug)
+  require_serial_hdf5_rejected_when_parallel_required()
 endif()
 
 if(current_build_has_python)

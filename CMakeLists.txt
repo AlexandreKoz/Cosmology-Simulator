@@ -224,7 +224,6 @@ if(COSMOSIM_ENABLE_MPI)
 endif()
 
 set(COSMOSIM_HDF5_PARALLEL OFF)
-set(COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE OFF)
 set(COSMOSIM_HDF5_C_WRAPPER "")
 if(COSMOSIM_ENABLE_HDF5)
   if(COSMOSIM_ENABLE_MPI)
@@ -278,6 +277,11 @@ if(COSMOSIM_ENABLE_HDF5)
     else()
       set(CMAKE_REQUIRED_LIBRARIES ${HDF5_LIBRARIES} MPI::MPI_CXX)
     endif()
+    # Check* result variables are cache-backed. The selected HDF5/MPI stack is
+    # itself configuration input, so never let an older TRUE/FALSE suppress the
+    # capability proof after a dependency/toolchain change.
+    unset(COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE CACHE)
+    unset(COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE)
     check_cxx_source_compiles(
       "#include <mpi.h>\n#include <hdf5.h>\nint main(){ hid_t f=H5Pcreate(H5P_FILE_ACCESS); hid_t x=H5Pcreate(H5P_DATASET_XFER); if(f<0||x<0) return 1; if(H5Pset_fapl_mpio(f,MPI_COMM_WORLD,MPI_INFO_NULL)<0) return 2; if(H5Pset_dxpl_mpio(x,H5FD_MPIO_COLLECTIVE)<0) return 3; H5Pclose(x); H5Pclose(f); return 0; }"
       COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE)
@@ -1479,6 +1483,8 @@ if(COSMOSIM_ENABLE_TESTS)
     foreach(acceptance_mode IN ITEMS
         canonical
         zero_ids
+        shuffled_zero_ids
+        zero_ids_equivalence
         manifest
         canonical_manifest
         alternate
@@ -1525,6 +1531,14 @@ if(COSMOSIM_ENABLE_TESTS)
         PROPERTIES PROCESSORS ${rank_count} TIMEOUT 90
                    LABELS "mpi;hdf5;distributed;ic;scaling;memory;runtime_truth")
     endforeach()
+    add_test(
+      NAME integration_distributed_ic_reader_zero_id_overflow_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_distributed_ic_reader_mpi> zero_id_overflow ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(integration_distributed_ic_reader_zero_id_overflow_mpi_two_rank
+      PROPERTIES PROCESSORS 2 TIMEOUT 60
+                 LABELS "mpi;hdf5;distributed;ic;zero_ids;overflow;malformed;runtime_truth")
+
     add_test(
       NAME integration_distributed_ic_reader_duplicate_mpi_two_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}

@@ -78,6 +78,7 @@ IcReadResult readGadgetArepoHdf5Ic(
   IcReadResult result;
   result.report.counters = inspection.counters;
   result.report.manifest = inspection.manifest;
+  result.report.external_id_mapping = inspection.external_id_mapping;
   result.report.schema = inspection.schemas.front();
   result.report.defaulted_fields = inspection.manifest.defaulted_fields;
   for (const auto& value : result.report.defaulted_fields) {
@@ -176,6 +177,7 @@ IcImportReport internal::streamGadgetArepoHdf5Ic(
   IcImportReport report;
   report.counters = inspection.counters;
   report.manifest = inspection.manifest;
+  report.external_id_mapping = inspection.external_id_mapping;
   report.schema = inspection.schemas.front();
   report.defaulted_fields = inspection.manifest.defaulted_fields;
   for (const auto& value : report.defaulted_fields) {

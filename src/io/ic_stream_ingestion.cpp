@@ -314,7 +314,8 @@ void validateRecordScientificState(
       ids[i] = base + i;
     }
   }
-  if (inspection.normalize_external_zero_based_ids) {
+  if (inspection.external_id_mapping ==
+      IcExternalIdMapping::kZeroPresentPlusOneV1) {
     for (std::size_t i = 0U; i < ids.size(); ++i) {
       if (ids[i] == std::numeric_limits<std::uint64_t>::max()) {
         throw std::overflow_error(
@@ -433,7 +434,8 @@ void validateRecordScientificState(
         session,
         requireField(manifest, file_index, prefix + "ParentParticleIDs"),
         start, count, tracer_parent, counters);
-    if (inspection.normalize_external_zero_based_ids) {
+    if (inspection.external_id_mapping ==
+        IcExternalIdMapping::kZeroPresentPlusOneV1) {
       for (std::size_t i = 0; i < tracer_parent.size(); ++i) {
         if (tracer_parent[i] == std::numeric_limits<std::uint64_t>::max()) {
           throw std::runtime_error(

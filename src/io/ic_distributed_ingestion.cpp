@@ -324,6 +324,50 @@ void appendLengthPrefixedString(
   return paths;
 }
 
+struct DistributedInspectionMetadata {
+  IcManifest manifest;
+  IcExternalIdMapping external_id_mapping = IcExternalIdMapping::kIdentity;
+};
+
+[[nodiscard]] std::string encodeDistributedInspectionMetadata(
+    const DistributedInspectionMetadata& metadata) {
+  std::vector<std::uint8_t> bytes;
+  internal::appendLe32(
+      bytes, static_cast<std::uint32_t>(metadata.external_id_mapping));
+  appendLengthPrefixedString(bytes, serializeIcManifestJson(metadata.manifest));
+  return std::string(
+      reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+[[nodiscard]] DistributedInspectionMetadata decodeDistributedInspectionMetadata(
+    std::string_view encoded) {
+  const auto* begin = reinterpret_cast<const std::uint8_t*>(encoded.data());
+  std::span<const std::uint8_t> bytes(begin, encoded.size());
+  std::size_t offset = 0U;
+  const std::uint32_t mapping_code = internal::readLe32(bytes, offset);
+  IcExternalIdMapping mapping = IcExternalIdMapping::kIdentity;
+  switch (mapping_code) {
+    case static_cast<std::uint32_t>(IcExternalIdMapping::kIdentity):
+      mapping = IcExternalIdMapping::kIdentity;
+      break;
+    case static_cast<std::uint32_t>(
+        IcExternalIdMapping::kZeroPresentPlusOneV1):
+      mapping = IcExternalIdMapping::kZeroPresentPlusOneV1;
+      break;
+    default:
+      throw std::runtime_error(
+          "distributed IC metadata contains an unknown external-ID mapping");
+  }
+  IcManifest manifest =
+      deserializeIcManifestJson(readLengthPrefixedString(bytes, offset));
+  if (offset != bytes.size()) {
+    throw std::runtime_error(
+        "distributed IC inspection metadata has trailing bytes");
+  }
+  return DistributedInspectionMetadata{
+      .manifest = std::move(manifest), .external_id_mapping = mapping};
+}
+
 void appendManifestLists(IcManifest& destination, IcManifest&& source) {
   destination.fields.insert(
       destination.fields.end(),
@@ -468,6 +512,11 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
             for (const auto& [file_index, source] : local.sources) {
               internal::appendLe32(bytes, file_index);
               appendSchemaSummary(bytes, source.schema);
+              internal::appendLe32(
+                  bytes, source.saw_external_particle_id_zero ? 1U : 0U);
+              internal::appendLe32(
+                  bytes,
+                  source.saw_external_particle_id_uint64_max ? 1U : 0U);
               const std::string json = serializeIcManifestJson(
                   makeTransferManifest(source, dialect, species_policy));
               appendLengthPrefixedString(bytes, json);
@@ -499,8 +548,13 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
         if (!mpi_context.isRoot()) {
           return assembled;
         }
-        std::vector<std::optional<std::pair<IcSchemaSummary, IcManifest>>>
-            fragments(paths.size());
+        struct SourceFragment {
+          IcSchemaSummary schema;
+          IcManifest manifest;
+          bool saw_external_particle_id_zero = false;
+          bool saw_external_particle_id_uint64_max = false;
+        };
+        std::vector<std::optional<SourceFragment>> fragments(paths.size());
         std::size_t offset = 0U;
         for (int rank = 0; rank < mpi_context.worldSize(); ++rank) {
           if (offset >= gathered.size()) {
@@ -515,10 +569,22 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
                   "distributed IC file fragment is duplicated or out of range");
             }
             IcSchemaSummary schema = readSchemaSummary(gathered, offset);
+            const std::uint32_t saw_zero_code =
+                internal::readLe32(gathered, offset);
+            const std::uint32_t saw_uint64_max_code =
+                internal::readLe32(gathered, offset);
+            if (saw_zero_code > 1U || saw_uint64_max_code > 1U) {
+              throw std::runtime_error(
+                  "distributed IC identity-domain fragment has invalid boolean metadata");
+            }
             IcManifest fragment = deserializeIcManifestJson(
                 readLengthPrefixedString(gathered, offset));
-            fragments[file_index].emplace(
-                std::move(schema), std::move(fragment));
+            fragments[file_index].emplace(SourceFragment{
+                .schema = std::move(schema),
+                .manifest = std::move(fragment),
+                .saw_external_particle_id_zero = saw_zero_code != 0U,
+                .saw_external_particle_id_uint64_max =
+                    saw_uint64_max_code != 0U});
           }
         }
         if (offset != gathered.size()) {
@@ -532,7 +598,7 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
               "distributed IC inspection did not cover every source file");
         }
 
-        const IcSchemaSummary& baseline = fragments.front()->first;
+        const IcSchemaSummary& baseline = fragments.front()->schema;
         IcManifest& manifest = assembled.manifest;
         manifest.dialect = dialect;
         manifest.dialect_version = "1";
@@ -552,10 +618,17 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
         manifest.hubble_param = baseline.hubble_param;
 
         std::array<std::uint64_t, kParticleTypeCount> summed{};
+        bool saw_external_particle_id_zero = false;
+        bool saw_external_particle_id_uint64_max = false;
         for (std::size_t file_index = 0; file_index < fragments.size();
              ++file_index) {
-          IcSchemaSummary schema = fragments[file_index]->first;
-          IcManifest fragment = std::move(fragments[file_index]->second);
+          IcSchemaSummary schema = fragments[file_index]->schema;
+          IcManifest fragment = std::move(fragments[file_index]->manifest);
+          saw_external_particle_id_zero = saw_external_particle_id_zero ||
+              fragments[file_index]->saw_external_particle_id_zero;
+          saw_external_particle_id_uint64_max =
+              saw_external_particle_id_uint64_max ||
+              fragments[file_index]->saw_external_particle_id_uint64_max;
           if (fragment.canonical_source_manifest_verified) {
             if (manifest.canonical_source_manifest_verified &&
                 manifest.canonical_source_manifest_sha256 !=
@@ -608,6 +681,20 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
                 static_cast<std::uint32_t>(file_index);
           }
           appendManifestLists(manifest, std::move(fragment));
+        }
+        if (saw_external_particle_id_zero &&
+            saw_external_particle_id_uint64_max) {
+          throw std::runtime_error(
+              "external ParticleIDs contain both 0 and UINT64_MAX across the "
+              "distributed source file set; zero-based +1 normalization would overflow");
+        }
+        assembled.external_id_mapping = saw_external_particle_id_zero
+            ? IcExternalIdMapping::kZeroPresentPlusOneV1
+            : IcExternalIdMapping::kIdentity;
+        if (assembled.external_id_mapping ==
+            IcExternalIdMapping::kZeroPresentPlusOneV1) {
+          manifest.warnings.push_back(
+              "source_particle_id_mapping=zero_present_plus_one_v1");
         }
         if (summed != manifest.num_part_total) {
           throw std::runtime_error(
@@ -669,28 +756,44 @@ void appendManifestLists(IcManifest& destination, IcManifest&& source) {
           }
           manifest = supplied;
         }
+        if (assembled.external_id_mapping ==
+            IcExternalIdMapping::kZeroPresentPlusOneV1 &&
+            std::find(
+                manifest.warnings.begin(), manifest.warnings.end(),
+                "source_particle_id_mapping=zero_present_plus_one_v1") ==
+                manifest.warnings.end()) {
+          manifest.warnings.push_back(
+              "source_particle_id_mapping=zero_present_plus_one_v1");
+        }
         validateIcManifest(manifest);
         return assembled;
       });
 
-  std::string manifest_json = runCollectivePhase<std::string>(
-      mpi_context, "IC root manifest serialization", [&]() {
+  std::string distributed_metadata = runCollectivePhase<std::string>(
+      mpi_context, "IC root inspection metadata serialization", [&]() {
         return mpi_context.isRoot()
-            ? serializeIcManifestJson(root_inspection.manifest)
+            ? encodeDistributedInspectionMetadata(DistributedInspectionMetadata{
+                  .manifest = root_inspection.manifest,
+                  .external_id_mapping = root_inspection.external_id_mapping})
             : std::string{};
       });
-  manifest_json = broadcastRootString(mpi_context, std::move(manifest_json));
+  distributed_metadata =
+      broadcastRootString(mpi_context, std::move(distributed_metadata));
   runCollectivePhaseVoid(
-      mpi_context, "IC broadcast-manifest accounting", [&]() {
+      mpi_context, "IC broadcast-inspection accounting", [&]() {
         checkedCounterAdd(
             local.counters.manifest_metadata_bytes_communicated,
-            manifest_json.size(), "manifest_metadata_bytes_communicated");
+            distributed_metadata.size(),
+            "manifest_metadata_bytes_communicated");
       });
   Inspection inspection = runCollectivePhase<Inspection>(
-      mpi_context, "IC distributed manifest decode", [&]() {
+      mpi_context, "IC distributed inspection metadata decode", [&]() {
         Inspection decoded;
         decoded.counters = local.counters;
-        decoded.manifest = deserializeIcManifestJson(manifest_json);
+        DistributedInspectionMetadata metadata =
+            decodeDistributedInspectionMetadata(distributed_metadata);
+        decoded.manifest = std::move(metadata.manifest);
+        decoded.external_id_mapping = metadata.external_id_mapping;
         populateSchemasFromManifest(decoded);
         return decoded;
       });
@@ -758,16 +861,19 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
         });
   }
 
-  const std::string local_manifest_json =
+  const std::string local_inspection_metadata =
       runCollectivePhase<std::string>(
-          mpi_context, "IC local manifest serialization", [&]() {
-            return serializeIcManifestJson(inspection.manifest);
+          mpi_context, "IC local inspection metadata serialization", [&]() {
+            return encodeDistributedInspectionMetadata(
+                DistributedInspectionMetadata{
+                    .manifest = inspection.manifest,
+                    .external_id_mapping = inspection.external_id_mapping});
           });
   const std::string local_manifest_digest =
       runCollectivePhase<std::string>(
-          mpi_context, "IC manifest digest", [&]() {
+          mpi_context, "IC inspection metadata digest", [&]() {
             injectIcTestFault(mpi_context, "manifest_digest");
-            return icSha256Hex(std::string_view(local_manifest_json));
+            return icSha256Hex(std::string_view(local_inspection_metadata));
           });
   std::string root_manifest_digest =
       mpi_context.isRoot() ? local_manifest_digest : std::string{};
@@ -787,6 +893,7 @@ IcReadResult readDistributedGadgetArepoHdf5Ic(
   IcReadResult result;
   result.report.counters = inspection.counters;
   result.report.manifest = inspection.manifest;
+  result.report.external_id_mapping = inspection.external_id_mapping;
   result.report.already_partitioned = true;
   result.report.schema.count_by_type =
       inspection.manifest.num_part_this_file.front();

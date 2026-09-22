@@ -516,6 +516,29 @@ bool maybeWriteOutputs(
     std::exception_ptr snapshot_replacement_failure;
     if (services.mpi_context.isRoot()) {
       try {
+        std::error_code directory_error;
+        std::filesystem::create_directories(
+            snapshot_directory, directory_error);
+        if (directory_error) {
+          throw std::runtime_error(
+              "failed to establish science snapshot directory '" +
+              snapshot_directory.string() + "': " +
+              directory_error.message());
+        }
+        const bool snapshot_path_is_directory =
+            std::filesystem::is_directory(
+                snapshot_directory, directory_error);
+        if (directory_error) {
+          throw std::runtime_error(
+              "failed to validate science snapshot directory '" +
+              snapshot_directory.string() + "': " +
+              directory_error.message());
+        }
+        if (!snapshot_path_is_directory) {
+          throw std::runtime_error(
+              "science snapshot path exists but is not a directory: " +
+              snapshot_directory.string());
+        }
         if (std::filesystem::exists(report.snapshot_set_path) ||
             (single_file_snapshot && std::filesystem::exists(final_single_path))) {
           throw std::runtime_error(

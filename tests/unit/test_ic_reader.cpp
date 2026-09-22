@@ -928,6 +928,9 @@ void testMonofonicLikeStructuralCompatibility() {
   assert(result.state.particle_sidecar.particle_id[0] == 1U);
   assert(result.state.particle_sidecar.particle_id[1] == 2U);
   assert(result.state.validatePersistentParticleIds());
+  assert(
+      result.report.external_id_mapping ==
+      cosmosim::io::IcExternalIdMapping::kZeroPresentPlusOneV1);
   assert(std::abs(result.state.particles.position_x_comoving[0] - 9.99) < 1.0e-12);
   assert(std::abs(result.state.particles.position_x_comoving[1]) < 1.0e-12);
   assert(std::abs(result.state.particles.velocity_x_peculiar[0] - 100.0) < 1.0e-12);
@@ -977,6 +980,12 @@ void testMonofonicZeroBasedIdsAreOrderIndependentAndOverflowSafe() {
   assert(zero.state.particles.mass_code == one.state.particles.mass_code);
   assert(zero.state.particle_sidecar.particle_id ==
          one.state.particle_sidecar.particle_id);
+  assert(
+      zero.report.external_id_mapping ==
+      cosmosim::io::IcExternalIdMapping::kZeroPresentPlusOneV1);
+  assert(
+      one.report.external_id_mapping ==
+      cosmosim::io::IcExternalIdMapping::kIdentity);
   std::filesystem::remove(zero_path);
   std::filesystem::remove(one_path);
 
@@ -986,6 +995,9 @@ void testMonofonicZeroBasedIdsAreOrderIndependentAndOverflowSafe() {
   assert(shuffled.state.particle_sidecar.particle_id[0] == 2U);
   assert(shuffled.state.particle_sidecar.particle_id[1] == 1U);
   assert(shuffled.state.validatePersistentParticleIds());
+  assert(
+      shuffled.report.external_id_mapping ==
+      cosmosim::io::IcExternalIdMapping::kZeroPresentPlusOneV1);
   std::filesystem::remove(shuffled_path);
 
   const auto overflow_path = writeMonofonicLikeDmIcFile(
