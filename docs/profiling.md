@@ -57,6 +57,68 @@ Do not claim scientific correctness from benchmark throughput.
 - Preserve deterministic behavior when profiling is disabled.
 - Compare against prior baselines using the same preset and workload size.
 
+## TreePM residual counters, timers, and geometry telemetry
+
+The gravity step event derived from `TreePmDiagnostics` / `TreePmProfileEvent`
+reports:
+
+- **Pair counters.** `local_pair_evaluations` and
+  `incoming_remote_pair_evaluations` are non-overlapping residual bundles.
+  `remote_pair_evaluations` is a compatibility alias of the incoming-remote
+  value; `total_pair_evaluations` is the residual total and equals the exact
+  sum of the two local/incoming components for the same solve.
+- **Wall timers.** `tree_wall_ms_recent` is short-range tree wall time alone;
+  `pm_wall_ms_recent` is `pm_profile.total_ms` alone (PM phase entry through
+  tree short-range start, including long-range refresh when taken).
+  `incoming_request_decode_validation_ms`,
+  `incoming_remote_target_compute_ms`, and
+  `incoming_response_encode_pack_ms` split incoming request
+  decode/validation/hash, pure incoming tree compute (force evaluation of
+  validated targets against this rank's tree only), and response
+  encode/pack respectively;
+  `protocol_validation_ms`, `protocol_consensus_ms`, and
+  `response_exchange_ms` split response layout/payload sizing, failure
+  consensus, and the response `MPI_Neighbor_alltoallv` call respectively.
+  `let_remote_traversal_ms` is a compatibility alias of
+  `incoming_remote_target_compute_ms`. OpenMP provenance
+   fields `openmp_compiled`, `openmp_configured_workers`, and
+   `openmp_observed_workers` come from `TreePmDiagnostics`
+   (configured is the planned configured/runtime maximum; observed is the
+   maximum actual team size recorded across the local, distributed overlap,
+   and incoming-target regions during the last short-range solve; serial
+   execution reports one).
+
+  `residual_local_target_count` / `residual_incoming_target_count` count
+  targets evaluated in each bundle for that solve;
+   `residual_worker_scratch_high_water_bytes` is the retained contiguous
+   worker-stack capacity (`worker_count * (1 + 7 * kMaximumTreeDepth) *
+   sizeof(TreeLocalIndex)`); worker counter bundles are `O(worker_count)` and
+   deterministic block floating diagnostics are `O(ceil(active_targets/64))`.
+   The matching MemoryGovernor estimates are
+   `gravity.estimate.treepm_residual_worker_scratch` and
+   `gravity.estimate.treepm_residual_block_diagnostics`.
+
+- **LET high-water.** `let_wire_buffer_high_water_bytes` is the four reusable
+  short-range payload buffers; `let_known_workspace_high_water_bytes` is the
+   known workspace peak (wire + structured + counts/masks/accumulators +
+   metadata + transient codec). CHUÍ-owned retained storage is read from
+
+  actual `vector.capacity()`; the transient codec term remains a modeled
+  conservative upper envelope. These are capacity high-waters, not bytes
+  communicated and not preflight estimates.
+- **Domain geometry.** `domain_geometry_source_generation`,
+  `current_gravity_source_generation`, `domain_geometry_fresh`,
+  `domain_geometry_refreshed`, `domain_geometry_fallback_used`,
+  `domain_geometry_fallback_reason` (string name of
+  `TreePmDomainGeometryFallbackReason`),
+  `domain_geometry_refreshed_leaf_count`,
+  `domain_geometry_out_of_seed_range_source_count`, and
+  `domain_geometry_uncovered_source_count` record the derived top-domain
+  freshness/refit/fallback path. The published refit is seeded from the
+  stable decomposition-local seed leaf set (not the previous published
+  result), and an ownership commit invalidates freshness until reinstall.
+  They are observational; restart/snapshot schema is unchanged.
+
 ## PM routing runtime events
 
 The `gravity.treepm` runtime event keeps total communication traffic separate from

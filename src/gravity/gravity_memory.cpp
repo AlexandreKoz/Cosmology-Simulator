@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "cosmosim/core/openmp_runtime.hpp"
+#include "internal/tree_pm_transport_planner.hpp"
 #include "cosmosim/parallel/distributed_mesh.hpp"
 
 namespace cosmosim::gravity {
@@ -77,6 +79,125 @@ void copyKnownEntries(
 }
 
 }  // namespace
+
+TreePmExchangeMemoryEstimate estimateTreePmExchangeMemory(
+    const TreePmExchangeMemoryInput& input) {
+  if (input.rank_count == 0U) {
+    throw std::invalid_argument("TreePM exchange memory estimate requires a non-zero rank count");
+  }
+  TreePmExchangeMemoryEstimate estimate;
+  if (input.rank_count == 1U) {
+    return estimate;
+  }
+
+  const std::uint64_t remote_rank_count =
+      static_cast<std::uint64_t>(input.rank_count) - 1U;
+  const std::uint64_t peer_degree = input.runtime_peer_degree != 0U
+      ? static_cast<std::uint64_t>(input.runtime_peer_degree)
+      : remote_rank_count;
+
+  // Wire batch bound: each short-range request occupies a full wire record, so
+  // b = floor(B / request_wire_bytes). Cap by the classic-MPI aggregate-round
+  // planner for the complete-graph degree so preflight and runtime share one
+  // clamp policy.
+  if (input.tree_exchange_batch_bytes < kTreePmShortRangeRequestWireBytes) {
+    throw std::invalid_argument(
+        "TreePM exchange batch budget must fit at least one short-range request wire record");
+  }
+  std::uint64_t batch_targets = input.tree_exchange_batch_bytes /
+      static_cast<std::uint64_t>(kTreePmShortRangeRequestWireBytes);
+  if (batch_targets == 0U) {
+    throw std::invalid_argument("TreePM exchange batch budget yields zero batch targets");
+  }
+  const internal::SparseTreePmRoundPlan round_plan = internal::planSparseTreePmRound(
+      core::checkedIntegralNarrow<std::size_t>(
+          batch_targets, "TreePM exchange batch target count"),
+      core::checkedIntegralNarrow<std::size_t>(
+          peer_degree, "TreePM exchange peer degree"),
+      kTreePmShortRangeRequestWireBytes,
+      kTreePmShortRangeResponseWireBytes);
+  batch_targets = static_cast<std::uint64_t>(round_plan.targets_per_peer_per_round);
+
+  estimate.peer_degree = peer_degree;
+  estimate.batch_targets_per_peer = batch_targets;
+  estimate.wire_request_bytes_per_peer = checkedMul(
+      batch_targets, kTreePmShortRangeRequestWireBytes,
+      "TreePM exchange request wire bytes per peer overflow");
+  estimate.wire_response_bytes_per_peer = checkedMul(
+      batch_targets, kTreePmShortRangeResponseWireBytes,
+      "TreePM exchange response wire bytes per peer overflow");
+  estimate.wire_send_bytes = checkedMul(
+      peer_degree, estimate.wire_request_bytes_per_peer,
+      "TreePM exchange request send bytes overflow");
+  estimate.wire_recv_bytes = estimate.wire_send_bytes;
+  estimate.wire_response_send_bytes = checkedMul(
+      peer_degree, estimate.wire_response_bytes_per_peer,
+      "TreePM exchange response send bytes overflow");
+  estimate.wire_response_recv_bytes = estimate.wire_response_send_bytes;
+  estimate.wire_buffer_total_bytes = checkedAdd(
+      checkedAdd(estimate.wire_send_bytes, estimate.wire_recv_bytes,
+                 "TreePM exchange wire total overflow"),
+      checkedAdd(estimate.wire_response_send_bytes,
+                 estimate.wire_response_recv_bytes,
+                 "TreePM exchange wire total overflow"),
+      "TreePM exchange wire total overflow");
+
+  // Structured host capacity: one reserved request packet vector per non-self
+  // peer (self is never reserved), simultaneous with the four wire buffers.
+  // Host sizeof(ShortRangeTargetRequestPacket) == wire width is enforced by
+  // static_assert in tree_pm_coupling.cpp; wire bytes are used here as host
+  // object bytes only because that proof is compile-time.
+  estimate.structured_request_capacity_bytes = checkedMul(
+      remote_rank_count,
+      checkedMul(batch_targets, kTreePmShortRangeRequestWireBytes,
+                 "TreePM exchange structured request capacity overflow"),
+      "TreePM exchange structured request capacity overflow");
+  // response_expected_by_peer + response_seen_by_peer: R lanes x batch bytes.
+  estimate.response_mask_bytes = checkedMul(
+      static_cast<std::uint64_t>(input.rank_count),
+      checkedMul(batch_targets, 2U, "TreePM exchange response mask capacity overflow"),
+      "TreePM exchange response mask capacity overflow");
+  // expected_response_count + received_response_count: 2 x batch x uint32.
+  estimate.response_count_bytes = checkedMul(
+      batch_targets, 2U * sizeof(std::uint32_t),
+      "TreePM exchange response count capacity overflow");
+  // remote_batch accel x/y/z lanes.
+  estimate.remote_accumulator_bytes = checkedMul(
+      batch_targets, 3U * sizeof(double),
+      "TreePM exchange remote accumulator capacity overflow");
+  // Eight int count/displacement metadata vectors sized to rank_count.
+  estimate.rank_metadata_bytes = checkedMul(
+      static_cast<std::uint64_t>(input.rank_count), 8U * sizeof(int),
+      "TreePM exchange rank metadata capacity overflow");
+  // Transient codec/duplicate-detection peak during a single peer iteration:
+  // temporary encoded request bytes + temporary encoded response bytes +
+  // decoded host request/response vectors + 24-byte duplicate-set payload
+  // per target. This is a conservative upper envelope, not an exact observed
+  // simultaneous peak. Host packet sizes equal wire widths; that identity is
+  // compile-time enforced by static_assert in tree_pm_coupling.cpp.
+  // unordered_set bucket/allocator overhead is intentionally excluded and
+  // remains an explicit uncertainty (covered only by process-level reserves).
+  estimate.transient_codec_bytes = checkedMul(
+      batch_targets,
+      2U * (kTreePmShortRangeRequestWireBytes + kTreePmShortRangeResponseWireBytes) + 24U,
+      "TreePM exchange transient codec capacity overflow");
+
+  std::uint64_t known = estimate.wire_buffer_total_bytes;
+  known = checkedAdd(known, estimate.structured_request_capacity_bytes,
+                     "TreePM exchange known workspace peak overflow");
+  known = checkedAdd(known, estimate.response_mask_bytes,
+                     "TreePM exchange known workspace peak overflow");
+  known = checkedAdd(known, estimate.response_count_bytes,
+                     "TreePM exchange known workspace peak overflow");
+  known = checkedAdd(known, estimate.remote_accumulator_bytes,
+                     "TreePM exchange known workspace peak overflow");
+  known = checkedAdd(known, estimate.rank_metadata_bytes,
+                     "TreePM exchange known workspace peak overflow");
+  known = checkedAdd(known, estimate.transient_codec_bytes,
+                     "TreePM exchange known workspace peak overflow");
+  estimate.known_workspace_peak_bytes = known;
+  return estimate;
+}
 
 GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& input) {
   if (input.tree_leaf_size == 0U || input.mpi_rank_count == 0U) {
@@ -197,9 +318,49 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   const std::uint64_t zoom_bytes = checkedMul(
       zoom_local_cells, 5U * sizeof(double), "gravity zoom PM owned estimate overflow");
 
-  const std::uint64_t tree_mpi_bytes = input.mpi_rank_count > 1U
-      ? checkedMul(input.tree_exchange_batch_bytes, 2U, "gravity tree exchange estimate overflow")
-      : 0U;
+  // TreePM short-range exchange: four wire buffers plus structured request/
+  // response/mask/count/accumulator/metadata workspace and the transient codec
+  // peak. Preflight uses the complete-graph degree so the MemoryGovernor
+  // covers worst-case simultaneous live set (was previously modeled as a
+  // flat 2 * batch_bytes independent of rank count).
+  const TreePmExchangeMemoryEstimate tree_exchange_memory =
+      estimateTreePmExchangeMemory(TreePmExchangeMemoryInput{
+          .rank_count = input.mpi_rank_count,
+          .tree_exchange_batch_bytes = input.tree_exchange_batch_bytes,
+      });
+  const std::uint64_t tree_mpi_bytes =
+      input.mpi_rank_count > 1U ? tree_exchange_memory.known_workspace_peak_bytes : 0U;
+  const core::OpenMpRuntimeInfo openmp_info = core::openMpRuntimeInfo();
+  const std::uint64_t residual_worker_count =
+      openmp_info.compiled
+          ? static_cast<std::uint64_t>(std::max(
+                1,
+                std::max(openmp_info.configured_threads,
+                         openmp_info.maximum_threads)))
+          : 1U;
+  const std::uint64_t residual_depth_bound = kMaximumTreeDepth;
+  const std::uint64_t residual_stack_slots = checkedAdd(
+      1U, checkedMul(7U, residual_depth_bound, "gravity residual stack depth overflow"),
+      "gravity residual stack slot overflow");
+  const std::uint64_t treepm_worker_stack_bytes = checkedMul(
+      checkedMul(residual_worker_count, residual_stack_slots,
+                 "gravity residual worker stack overflow"),
+      static_cast<std::uint64_t>(sizeof(TreeLocalIndex)),
+      "gravity residual worker stack byte overflow");
+  const std::uint64_t treepm_worker_counter_bytes = checkedMul(
+      residual_worker_count,
+      static_cast<std::uint64_t>(kTreePmResidualCounterBytes),
+      "gravity residual worker counter overflow");
+  const std::uint64_t residual_block_count = checkedAdd(
+      input.local_target_count, kTreePmResidualBlockSize - 1U,
+      "gravity residual diagnostic block count overflow") /
+      kTreePmResidualBlockSize;
+  const std::uint64_t treepm_block_diagnostic_bytes = checkedMul(
+      residual_block_count, sizeof(double),
+      "gravity residual block diagnostic overflow");
+  const std::uint64_t treepm_worker_scratch_bytes = checkedAdd(
+      treepm_worker_stack_bytes, treepm_worker_counter_bytes,
+      "gravity residual worker scratch overflow");
   // PM density and force routing retain exactly two reusable wire buffers. The
   // configured policy is a per-peer payload ceiling, so a rank can receive one
   // bounded chunk from every remote peer in the same collective round. This is
@@ -284,8 +445,17 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   if (tree_mpi_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
                 "gravity.estimate.sparse_tree_exchange", tree_mpi_bytes,
-                "request/response high-water bounded by configured tree exchange batch policy");
+                "TreePM short-range wire buffers plus structured request/response/mask/count/accumulator/metadata workspace and transient codec peak; complete-graph peer degree and classic-MPI round clamp; unordered_set bucket/allocator overhead excluded");
   }
+   addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
+               "gravity.estimate.treepm_residual_worker_scratch", treepm_worker_scratch_bytes,
+               "OpenMP residual worker storage: stacks use the enforced kMaximumTreeDepth bound and one counter bundle per planned worker");
+   if (treepm_block_diagnostic_bytes > 0U) {
+     addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
+                 "gravity.estimate.treepm_residual_block_diagnostics", treepm_block_diagnostic_bytes,
+                 "deterministic block floating diagnostic storage; force accumulation order remains per target");
+   }
+
   if (pm_routing_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
                 "gravity.estimate.pm_routing_exchange", pm_routing_bytes,

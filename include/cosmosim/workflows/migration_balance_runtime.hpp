@@ -10,6 +10,10 @@
 #include "cosmosim/parallel/distributed_memory.hpp"
 #include "cosmosim/workflows/runtime_services.hpp"
 
+namespace cosmosim::core {
+class MemoryReservation;
+}
+
 namespace cosmosim::workflows::internal {
 
 // Sole workflow owner for initial placement, runtime rebalance, migration
@@ -29,10 +33,12 @@ class MigrationBalanceRuntime {
   // Build the compact authoritative top-domain representation from the same
   // decomposition units used for load balancing/migration. This is evaluated
   // only at decomposition lifecycle boundaries by the time coordinator; it is
-  // not an O(N) per-force-step gravity operation.
+  // not an O(N) per-force-step gravity operation. The committed reservation
+  // sink must span installation of the returned leaves into GravityRuntime.
   [[nodiscard]] std::vector<parallel::TopDomainLeaf> authoritativeTopDomainLeaves(
       const core::SimulationState& state,
-      std::uint64_t decomposition_epoch) const;
+      std::uint64_t decomposition_epoch,
+      core::MemoryReservation* retained_reservation) const;
 
   [[nodiscard]] bool rebalance(
       core::SimulationState& state,

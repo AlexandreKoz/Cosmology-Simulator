@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
@@ -16,7 +17,15 @@
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/parallel/distributed_mesh.hpp"
 
+namespace cosmosim::core {
+
+class SimulationState;
+
+}  // namespace cosmosim::core
+
 namespace cosmosim::parallel {
+
+struct DecompositionConfig;
 
 enum class DecompositionEntityKind : std::uint8_t {
   kParticle = 0,
@@ -80,6 +89,177 @@ struct DecompositionItem {
   DecompositionWorkComponents work_components{};
 };
 
+// Compact production planner record. Replaces the former dual N-sized
+// DecompositionItem + LocalKeyedItem populations during cut planning, cut
+// samples, migration-intent emission, and streaming metric recompute.
+// Geometry and full work_components remain in the source DecompositionItem;
+// this record carries only SFC order, ownership, load, and index fields.
+// local_index has two documented contracts: source-view streaming records
+// (makeSourceRecords) carry the canonical kind-specific source row (particle
+// rows and included patch rows, unique within their kind), while the rich
+// compatibility adapter and the startup record stream carry a combined
+// ordinal over their local record population. The shared compact planner
+// core (buildMortonSfcDecompositionFromCompact) accepts only the combined
+// contract and enforces {local_index} as a permutation of [0, record count).
+struct CompactRuntimeDecompositionRecord {
+  std::uint64_t entity_id = 0;
+  std::uint64_t sfc_key = 0;
+  std::uint64_t memory_bytes = 0;
+  double weighted_load = 0.0;
+  std::size_t local_index = 0;
+  std::uint64_t active_target_count_recent = 0;
+  std::uint64_t remote_tree_interactions_recent = 0;
+  int current_owner_rank = -1;
+  DecompositionEntityKind kind = DecompositionEntityKind::kParticle;
+};
+static_assert(sizeof(CompactRuntimeDecompositionRecord) <= 64U,
+              "CompactRuntimeDecompositionRecord must fit in 64 bytes");
+
+struct RuntimeDecompositionSourceView {
+  int world_rank = 0;
+  std::size_t particle_count = 0U;
+  std::size_t patch_count = 0U;
+  std::span<const std::uint64_t> particle_ids{};
+  std::span<const double> particle_x_comoving{};
+  std::span<const double> particle_y_comoving{};
+  std::span<const double> particle_z_comoving{};
+  std::span<const std::uint32_t> particle_species_tag{};
+  std::span<const std::uint32_t> particle_owning_rank{};
+  std::span<const std::uint8_t> active_particle_mask{};
+  std::span<const std::uint64_t> patch_ids{};
+  std::span<const std::int32_t> patch_levels{};
+  std::span<const std::uint32_t> patch_owning_rank{};
+  std::span<const std::uint32_t> patch_first_cells{};
+  std::span<const std::uint32_t> patch_cell_counts{};
+  std::span<const std::uint32_t> compact_patch_indices{};
+  std::span<const std::uint16_t> patch_cell_dim_x{};
+  std::span<const std::uint16_t> patch_cell_dim_y{};
+  std::span<const std::uint16_t> patch_cell_dim_z{};
+  std::span<const double> cell_x_comoving{};
+  std::span<const double> cell_y_comoving{};
+  std::span<const double> cell_z_comoving{};
+  std::span<const std::uint32_t> cell_patch_indices{};
+  std::span<const std::uint32_t> gas_patch_list_offsets{};
+  std::span<const std::uint32_t> gas_patch_indices{};
+  std::array<std::uint64_t, 5U> particle_memory_bytes_by_species{};
+  std::uint32_t gas_species_tag = 1U;
+  std::uint32_t star_species_tag = 2U;
+  std::uint32_t black_hole_species_tag = 3U;
+  std::uint64_t gas_transient_memory_bytes_per_cell = 0U;
+  std::uint64_t source_scratch_bytes = 0U;
+
+  [[nodiscard]] std::size_t localEntityCount() const noexcept {
+    return particle_count + compact_patch_indices.size();
+  }
+};
+
+// One authoritative gas-incidence existence condition shared by
+// RuntimeDecompositionSourceStorage construction and every MemoryGovernor
+// admission that charges gas-incidence structures. Gas-empty/DMO states have
+// no gas identity rows or no cells, so no offsets, indices, or construction
+// scratch can exist for them.
+[[nodiscard]] bool runtimeDecompositionHasGasIncidenceSource(
+    const core::SimulationState& state) noexcept;
+
+// Authoritative pre-construction byte model for the structures
+// RuntimeDecompositionSourceStorage retains or temporarily requires while
+// building a RuntimeDecompositionSourceView. Formulas follow the storage
+// constructor's actual allocation semantics (capacity-based where the storage
+// reports capacity): DMO/gas-empty states charge zero gas-incidence bytes
+// through runtimeDecompositionHasGasIncidenceSource, the compact patch index
+// is reserved once per patch row, and no removed legacy vector (such as a
+// derived patch cell-count array) is charged. The total is a conservative
+// envelope: every component is an upper bound on the corresponding live
+// allocation, so estimate.total_bytes >= bytes the storage actually retains
+// or transiently needs for those components.
+struct RuntimeDecompositionSourceMemoryEstimate {
+  // Zero when active_particle_indices is empty (no mask is allocated).
+  std::uint64_t active_mask_bytes = 0U;
+  std::uint64_t compact_patch_index_bytes = 0U;
+  // Zero unless runtimeDecompositionHasGasIncidenceSource(state).
+  std::uint64_t gas_incidence_offset_bytes = 0U;
+  std::uint64_t gas_incidence_index_bytes = 0U;
+  std::uint64_t gas_incidence_construction_bytes = 0U;
+  // Fixed species memory table owned inline by the storage.
+  std::uint64_t other_source_owned_bytes = 0U;
+  std::uint64_t total_bytes = 0U;
+};
+
+// Shared MemoryGovernor admission estimate for both the runtime rebalance
+// plan reservation and the top-domain seed reservation. Checked arithmetic;
+// throws std::overflow_error on impossible populations.
+[[nodiscard]] RuntimeDecompositionSourceMemoryEstimate
+estimateRuntimeDecompositionSourceStorage(
+    const core::SimulationState& state,
+    std::span<const std::uint32_t> active_particle_indices);
+
+// Authoritative MemoryGovernor admission estimate for the compact startup
+// gravity-aware planner's transient live set. This answers the planner
+// question ("can the planner safely allocate its temporary working set
+// now?") and is additional to, never a replacement for, the resulting-cut
+// feasibility checks (max_rank_memory_bytes / rank_transient_reserve_bytes).
+// The total models the simultaneous live peak: compact records and the
+// startup occupancy/patch-mapping scratch coexist with the planner's
+// MemoryGroup population, owner vector, sorted-index vector, plan metric and
+// range lanes, and the bounded per-entity gas-incidence lookup temporaries.
+// MemoryGroup is modeled as {size_t begin, end; uint64_t memory_bytes;
+// double weighted_load}; a static_assert inside the planner TU enforces that
+// layout against the actual cut-algorithm struct. entity_upper_bound is
+// particles + patches (records.reserve upper bound, which also bounds the
+// one-group-per-record worst case: groups.reserve(entity_upper_bound)).
+// density_grid_cell_count is the startup density grid cell count and
+// pm_x_bins the startup PM-x occupancy lane count, both supplied by the
+// startup caller so the grid policy stays owned by the startup workflow.
+// Checked arithmetic; throws std::overflow_error on impossible populations.
+struct CompactStartupPlannerMemoryEstimate {
+  std::uint64_t compact_record_bytes = 0U;
+  std::uint64_t memory_group_bytes = 0U;
+  std::uint64_t owning_rank_bytes = 0U;
+  std::uint64_t sorted_index_bytes = 0U;
+  std::uint64_t occupancy_bytes = 0U;
+  std::uint64_t patch_mapping_bytes = 0U;
+  std::uint64_t other_known_scratch_bytes = 0U;
+  std::uint64_t total_bytes = 0U;
+};
+
+[[nodiscard]] CompactStartupPlannerMemoryEstimate
+estimateCompactStartupPlannerTransientBytes(
+    std::size_t entity_upper_bound,
+    std::size_t patch_count,
+    std::size_t cell_count,
+    std::size_t world_size,
+    std::size_t pm_x_bins,
+    std::size_t density_grid_cell_count);
+
+struct CompactTopDomainSeedRecord {
+  std::uint64_t sfc_key = 0;
+  std::uint64_t entity_id = 0;
+  std::size_t local_index = 0;
+  DecompositionEntityKind kind = DecompositionEntityKind::kParticle;
+};
+static_assert(sizeof(CompactTopDomainSeedRecord) <= 32U,
+              "CompactTopDomainSeedRecord must fit in 32 bytes");
+
+[[nodiscard]] std::uint64_t sfcKeyForCompactRuntimeRecord(
+    const CompactRuntimeDecompositionRecord& record) noexcept;
+
+// Canonical 10-bit-quantized Morton key for one coordinate triple under the
+// configured decomposition domain. This is the single SFC key rule shared by
+// the rich item planner, compact records, source-view records, and startup
+// initial placement.
+[[nodiscard]] std::uint64_t sfcKeyForPosition(
+    double x_comov,
+    double y_comov,
+    double z_comov,
+    const DecompositionConfig& config);
+
+// Streaming construction: one pass over items, no second geometry/component
+// population. weighted_load preserves the exact weightedLoad() contract.
+[[nodiscard]] std::vector<CompactRuntimeDecompositionRecord>
+makeCompactRuntimeDecompositionRecords(
+    std::span<const DecompositionItem> items,
+    const DecompositionConfig& config);
+
 struct DecompositionConfig {
   int world_size = 1;
   double domain_x_min_comov = 0.0;
@@ -100,6 +280,20 @@ struct DecompositionConfig {
   std::uint64_t rank_transient_reserve_bytes = 0;
   bool prefer_component_work_model = true;
 };
+
+// Single weighted-load authority for entities that publish explicit work
+// components (the startup gravity-aware path and any caller holding resolved
+// components without a full DecompositionItem). Applies the same
+// component-vs-legacy selection, fallback chain, and final default as the
+// rich item contract; components are clamped to nonnegative values first.
+[[nodiscard]] double weightedLoadFromExplicitComponents(
+    const DecompositionWorkComponents& components,
+    DecompositionEntityKind kind,
+    std::uint64_t active_target_count_recent,
+    std::uint64_t remote_tree_interactions_recent,
+    double work_units,
+    std::uint64_t memory_bytes,
+    const DecompositionConfig& config);
 
 struct RankRange {
   std::size_t begin_sorted = 0;
@@ -134,6 +328,16 @@ struct LoadBalanceMetrics {
   std::uint64_t max_peak_memory_bytes = 0;
   double peak_memory_imbalance_ratio = 0.0;
 };
+
+// Accumulates one entity's clamped work components into the rank's component
+// metric lanes with sign +1 (accumulate) or -1 (withdraw). Shared by the
+// compact planner, the rich planner adapter, current-ownership metrics, and
+// the startup component pass.
+void addWorkComponentsToMetrics(
+    LoadBalanceMetrics& metrics,
+    std::size_t rank,
+    const DecompositionWorkComponents& components,
+    double sign);
 
 struct DecompositionPlan {
   std::vector<int> owning_rank_by_item;
@@ -171,12 +375,73 @@ struct TopDomainLeaf {
     std::uint64_t decomposition_epoch,
     std::size_t max_leaves_per_rank = 8U);
 
+// Compact seed builder for the canonical production source view: one
+// minimal-record pass, one in-place total-order sort, bounded leaf grouping,
+// and streaming kind + local_index geometry resolution.
+[[nodiscard]] std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromCompact(
+    std::span<const DecompositionItem> local_items,
+    const DecompositionConfig& config,
+    int owner_rank,
+    std::uint64_t decomposition_epoch,
+    std::size_t max_leaves_per_rank = 8U);
+
+[[nodiscard]] std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromSource(
+    const RuntimeDecompositionSourceView& source,
+    const DecompositionConfig& config,
+    int owner_rank,
+    std::uint64_t decomposition_epoch,
+    std::size_t max_leaves_per_rank = 8U);
+
+// Observability for a compact leaf refit against the current source snapshot.
+struct TopDomainGeometryRefitDiagnostics {
+  std::uint64_t refreshed_leaf_count = 0;
+  std::uint64_t out_of_seed_range_source_count = 0;
+  std::uint64_t empty_seed_leaf_count = 0;
+  std::uint64_t source_count = 0;
+};
+
+// O(N_local) refresh of authoritative top-domain leaf bounds without
+// reconstructing DecompositionItems. Seed leaves supply ownership, epoch, and
+// SFC intervals; a single scan of the provided source coordinates expands
+// each interval's AABB and assigns out-of-interval sources to the nearest
+// seed leaf (still covered; ownership unchanged). Empty leaves are omitted
+// from the published geometry so no non-finite bounds are exported.
+[[nodiscard]] std::vector<TopDomainLeaf> refitAuthoritativeTopDomainLeaves(
+    std::span<const TopDomainLeaf> seed_leaves,
+    std::span<const double> pos_x_comoving,
+    std::span<const double> pos_y_comoving,
+    std::span<const double> pos_z_comoving,
+    const DecompositionConfig& config,
+    int owner_rank,
+    std::uint64_t decomposition_epoch,
+    TopDomainGeometryRefitDiagnostics* diagnostics = nullptr);
+
 [[nodiscard]] std::uint64_t topDomainGeometryFingerprint(
     std::span<const TopDomainLeaf> leaves) noexcept;
 
 [[nodiscard]] DecompositionPlan buildMortonSfcDecomposition(
     std::span<const DecompositionItem> items,
     const DecompositionConfig& config);
+
+// Compact SFC decomposition planner over ≤64-byte records. One in-place
+// deterministic total-order std::sort on (sfc_key, entity_id, local_index),
+// indivisible (key, ID) memory-group cuts, hard rank-memory feasibility, and
+// streaming metric recompute — the single cut algorithm shared by the rich
+// reference adapter and startup initial placement. Precondition: record
+// {local_index} must form a permutation of [0, records.size()): every index
+// in range, every index exactly once. The planner enforces this contract
+// (range, uniqueness, and full coverage) before ownership write-back, so
+// owning_rank_by_item and sorted_indices are expressed in that local_index
+// space with no default-owner-zero masking of missing indices.
+// components_by_local_index, when non-empty, must cover [0, records.size()) and
+// supplies per-rank work-component metrics during the sorted pass; startup
+// callers that fold components into weighted_load at record creation may leave
+// it empty and accumulate component diagnostics afterwards via
+// addWorkComponentsToMetrics.
+[[nodiscard]] DecompositionPlan buildMortonSfcDecompositionFromCompact(
+    std::span<CompactRuntimeDecompositionRecord> records,
+    const DecompositionConfig& config,
+    std::span<const DecompositionWorkComponents> components_by_local_index = {});
 
 struct DecompositionRuntimeMeasurements {
   // Measured feedback from the previous solver window. These are aggregate
@@ -260,6 +525,18 @@ struct RuntimeRebalancePlan {
   double cut_displacement_fraction = 0.0;
   bool used_distributed_sfc_cuts = false;
   bool exact_debug_audit_enabled = false;
+  // Compact-planner provenance (zero on the legacy reference path).
+  bool used_compact_planner = false;
+  std::uint64_t planner_record_bytes = 0;
+  std::uint64_t planner_sample_bytes = 0;
+  std::uint64_t planner_prefix_bytes = 0;
+   std::uint64_t planner_migration_intent_bytes = 0;
+   std::uint64_t planner_other_known_scratch_bytes = 0;
+   std::uint64_t planner_local_entity_count = 0;
+   std::uint64_t planner_peak_temporary_bytes = 0;
+   std::uint64_t planner_local_peak_temporary_bytes = 0;
+   double planner_bytes_per_entity = 0.0;
+
 };
 
 [[nodiscard]] LoadBalanceMetrics computeCurrentOwnershipLoadBalanceMetrics(
@@ -276,6 +553,28 @@ struct RuntimeRebalancePlan {
     std::span<const DecompositionItem> local_items,
     const DecompositionConfig& decomposition_config,
     const RuntimeRebalanceConfig& rebalance_config);
+
+// Production large-N planner: compact SFC records, single in-place total-order
+// sort (sfc_key, entity_id, local_index), bounded cut samples, migration
+// intents only for owner changes, streaming metric recompute. Leaves
+// target_decomposition.owning_rank_by_item / sorted_indices empty (not used
+// by the production migration path). Legacy rich builders remain available
+// only as reference/debug/test compatibility paths; they are not used by
+// runtime rebalance, top-domain seed construction, or startup initial
+// placement, all three of which are compact.
+[[nodiscard]] RuntimeRebalancePlan buildCompactDistributedRuntimeRebalancePlan(
+    const MpiContext& mpi_context,
+    std::span<const DecompositionItem> local_items,
+    const DecompositionConfig& decomposition_config,
+    const RuntimeRebalanceConfig& rebalance_config);
+
+[[nodiscard]] RuntimeRebalancePlan buildCompactDistributedRuntimeRebalancePlan(
+    const MpiContext& mpi_context,
+    const RuntimeDecompositionSourceView& source,
+    const DecompositionConfig& decomposition_config,
+    const RuntimeRebalanceConfig& rebalance_config,
+    const DecompositionRuntimeMeasurements& measurements,
+    const DecompositionFeedbackCoefficients& feedback_coefficients);
 
 [[nodiscard]] std::vector<DecompositionItem> gatherDecompositionItemsAcrossRanks(
     const MpiContext& mpi_context,

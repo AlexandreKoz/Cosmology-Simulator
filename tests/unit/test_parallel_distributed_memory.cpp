@@ -5,12 +5,18 @@
 #include <limits>
 #include <stdexcept>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <vector>
 #include <optional>
 #include <algorithm>
+#include <array>
+#include <span>
 #include "../../src/parallel/internal/memory_constrained_sfc.hpp"
 
+#include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
+#include "../../src/workflows/internal/runtime_decomposition_source_storage.hpp"
 
 namespace {
 
@@ -1914,6 +1920,438 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
   assert(cosmosim::parallel::topDomainGeometryFingerprint(changed) != fingerprint);
 }
 
+bool nearMetric(double measured, double reference) {
+  const double scale = std::max({1.0, std::abs(measured), std::abs(reference)});
+  return std::abs(measured - reference) <= 1e-9 * scale;
+}
+
+void assertPlansEquivalent(
+    const cosmosim::parallel::DecompositionPlan& reference,
+    const cosmosim::parallel::DecompositionPlan& candidate) {
+  assert(reference.owning_rank_by_item == candidate.owning_rank_by_item);
+  assert(reference.sorted_indices == candidate.sorted_indices);
+  assert(reference.ranges_by_rank.size() == candidate.ranges_by_rank.size());
+  for (std::size_t rank = 0; rank < reference.ranges_by_rank.size(); ++rank) {
+    assert(reference.ranges_by_rank[rank].begin_sorted == candidate.ranges_by_rank[rank].begin_sorted);
+    assert(reference.ranges_by_rank[rank].end_sorted == candidate.ranges_by_rank[rank].end_sorted);
+  }
+  const auto& rm = reference.metrics;
+  const auto& cm = candidate.metrics;
+  assert(rm.memory_bytes_by_rank == cm.memory_bytes_by_rank);
+  assert(rm.owned_particles_by_rank == cm.owned_particles_by_rank);
+  assert(rm.active_targets_by_rank == cm.active_targets_by_rank);
+  assert(rm.remote_tree_interactions_by_rank == cm.remote_tree_interactions_by_rank);
+  assert(rm.peak_memory_bytes_by_rank == cm.peak_memory_bytes_by_rank);
+  assert(rm.total_memory_bytes == cm.total_memory_bytes);
+  assert(rm.max_memory_bytes == cm.max_memory_bytes);
+  assert(rm.max_peak_memory_bytes == cm.max_peak_memory_bytes);
+  assert(rm.weighted_load_by_rank.size() == cm.weighted_load_by_rank.size());
+  for (std::size_t rank = 0; rank < rm.weighted_load_by_rank.size(); ++rank) {
+    assert(nearMetric(rm.weighted_load_by_rank[rank], cm.weighted_load_by_rank[rank]));
+  }
+  assert(nearMetric(rm.mean_weighted_load, cm.mean_weighted_load));
+  assert(nearMetric(rm.max_weighted_load, cm.max_weighted_load));
+  assert(nearMetric(rm.weighted_imbalance_ratio, cm.weighted_imbalance_ratio));
+  assert(nearMetric(rm.memory_imbalance_ratio, cm.memory_imbalance_ratio));
+  assert(nearMetric(rm.peak_memory_imbalance_ratio, cm.peak_memory_imbalance_ratio));
+  const auto assert_lane = [](const std::vector<double>& a, const std::vector<double>& b) {
+    assert(a.size() == b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      assert(nearMetric(a[i], b[i]));
+    }
+  };
+  assert_lane(rm.particle_count_cost_by_rank, cm.particle_count_cost_by_rank);
+  assert_lane(rm.gas_cell_cost_by_rank, cm.gas_cell_cost_by_rank);
+  assert_lane(rm.tree_interaction_cost_by_rank, cm.tree_interaction_cost_by_rank);
+  assert_lane(rm.pm_mesh_cost_by_rank, cm.pm_mesh_cost_by_rank);
+  assert_lane(rm.amr_patch_cost_by_rank, cm.amr_patch_cost_by_rank);
+  assert_lane(rm.active_fraction_cost_by_rank, cm.active_fraction_cost_by_rank);
+  assert_lane(rm.memory_pressure_cost_by_rank, cm.memory_pressure_cost_by_rank);
+  assert_lane(rm.transient_memory_cost_by_rank, cm.transient_memory_cost_by_rank);
+  assert_lane(rm.source_event_cost_by_rank, cm.source_event_cost_by_rank);
+  assert_lane(rm.communication_cost_by_rank, cm.communication_cost_by_rank);
+  assert_lane(rm.gpu_occupancy_cost_by_rank, cm.gpu_occupancy_cost_by_rank);
+  assert_lane(rm.generic_work_cost_by_rank, cm.generic_work_cost_by_rank);
+}
+
+// All fixtures publish explicit nonnegative components so the test-side
+// component span equals the rich adapter's effective components without
+// duplicating default-component synthesis.
+std::vector<cosmosim::parallel::DecompositionWorkComponents> extractComponents(
+    const std::vector<cosmosim::parallel::DecompositionItem>& items) {
+  std::vector<cosmosim::parallel::DecompositionWorkComponents> components;
+  components.reserve(items.size());
+  for (const cosmosim::parallel::DecompositionItem& item : items) {
+    components.push_back(item.work_components);
+  }
+  return components;
+}
+
+std::vector<cosmosim::parallel::DecompositionItem> makePlannerFixtureItems(
+    std::string_view shape, std::size_t count, int world_size) {
+  using cosmosim::parallel::DecompositionEntityKind;
+  std::vector<cosmosim::parallel::DecompositionItem> items(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    cosmosim::parallel::DecompositionItem& item = items[i];
+    item.entity_id = 1000U + static_cast<std::uint64_t>(i);
+    item.kind = (i % 3U == 2U) ? DecompositionEntityKind::kAmrPatch : DecompositionEntityKind::kParticle;
+    item.current_owner_rank = static_cast<int>(i % static_cast<std::size_t>(world_size));
+    if (shape == "uniform") {
+      item.x_comov = std::fmod(static_cast<double>(i) * 0.61803398875, 1.0);
+      item.y_comov = std::fmod(static_cast<double>(i) * 0.7548776662, 1.0);
+      item.z_comov = std::fmod(static_cast<double>(i) * 0.5698402906, 1.0);
+    } else if (shape == "clustered") {
+      item.x_comov = 0.25 + static_cast<double>(i % 8U) * 1e-4;
+      item.y_comov = 0.50 + static_cast<double>(i % 5U) * 1e-4;
+      item.z_comov = 0.75 + static_cast<double>(i % 3U) * 1e-4;
+    } else if (shape == "duplicate") {
+      item.x_comov = 0.5;
+      item.y_comov = 0.5;
+      item.z_comov = 0.5;
+    } else {
+      assert(shape == "periodic");
+      item.x_comov = (i % 2U == 0U) ? -0.05 : 1.05;
+      item.y_comov = 0.30;
+      item.z_comov = 0.70;
+    }
+    item.has_spatial_bounds = true;
+    item.min_x_comov = item.max_x_comov = item.x_comov;
+    item.min_y_comov = item.max_y_comov = item.y_comov;
+    item.min_z_comov = item.max_z_comov = item.z_comov;
+    item.active_target_count_recent = static_cast<std::uint64_t>(i % 5U);
+    item.remote_tree_interactions_recent = static_cast<std::uint64_t>((i * 7U) % 11U);
+    item.work_units = 1.0 + static_cast<double>(i % 4U);
+    item.memory_bytes = 64U + static_cast<std::uint64_t>(i) * 16U;
+    item.work_components = cosmosim::parallel::DecompositionWorkComponents{
+        .particle_count_cost = 1.0,
+        .gas_cell_cost = (i % 4U == 0U) ? 2.5 : 0.0,
+        .tree_interaction_cost = static_cast<double>((i * 3U) % 7U),
+        .pm_mesh_cost = static_cast<double>(i % 6U),
+        .amr_patch_cost = (item.kind == DecompositionEntityKind::kAmrPatch)
+            ? static_cast<double>(16U + i)
+            : 0.0,
+        .active_fraction_cost = static_cast<double>(item.active_target_count_recent),
+        .memory_pressure_cost = static_cast<double>(item.memory_bytes),
+        .transient_memory_cost = (i % 4U == 0U) ? 4096.0 : 0.0,
+        .source_event_cost = (i % 9U == 0U) ? 1.0 : 0.0,
+        .communication_cost = static_cast<double>(item.remote_tree_interactions_recent),
+        .gpu_occupancy_cost = 0.0,
+        .generic_work_cost = 1.0 + std::sqrt(static_cast<double>(1U + (i % 16U))),
+        .has_explicit_components = true,
+    };
+  }
+  return items;
+}
+
+cosmosim::parallel::DecompositionConfig makePlannerFixtureConfig(
+    int world_size, bool legacy_weights, bool prefer_components) {
+  cosmosim::parallel::DecompositionConfig config;
+  config.world_size = world_size;
+  config.domain_x_min_comov = 0.0;
+  config.domain_x_max_comov = 1.0;
+  config.domain_y_min_comov = 0.0;
+  config.domain_y_max_comov = 1.0;
+  config.domain_z_min_comov = 0.0;
+  config.domain_z_max_comov = 1.0;
+  config.owned_particle_weight = legacy_weights ? 1.0 : 0.0;
+  config.active_target_weight = legacy_weights ? 0.5 : 0.0;
+  config.remote_tree_interaction_weight = legacy_weights ? 0.25 : 0.0;
+  config.work_weight = legacy_weights ? 0.1 : 0.0;
+  config.memory_weight = legacy_weights ? 1.0 / 256.0 : 0.0;
+  config.prefer_component_work_model = prefer_components;
+  return config;
+}
+
+void testRichAndCompactPlannerEquivalence() {
+  using cosmosim::parallel::buildMortonSfcDecomposition;
+  using cosmosim::parallel::buildMortonSfcDecompositionFromCompact;
+  using cosmosim::parallel::DecompositionConfig;
+  using cosmosim::parallel::DecompositionItem;
+  using cosmosim::parallel::DecompositionPlan;
+  using cosmosim::parallel::DecompositionWorkComponents;
+  using cosmosim::parallel::makeCompactRuntimeDecompositionRecords;
+
+  const std::array<std::string_view, 4> shapes{"uniform", "clustered", "duplicate", "periodic"};
+  for (const bool legacy_weights : {false, true}) {
+    for (const bool prefer_components : {true, false}) {
+      for (const int world_size : {2, 3, 4}) {
+        for (const std::string_view shape : shapes) {
+          for (const std::size_t count : {std::size_t{0}, std::size_t{1}, std::size_t{17}, std::size_t{64}}) {
+            const DecompositionConfig config = makePlannerFixtureConfig(world_size, legacy_weights, prefer_components);
+            const std::vector<DecompositionItem> items = makePlannerFixtureItems(shape, count, world_size);
+
+            const DecompositionPlan rich = buildMortonSfcDecomposition(items, config);
+            auto records = makeCompactRuntimeDecompositionRecords(items, config);
+            const std::vector<DecompositionWorkComponents> components = extractComponents(items);
+            const DecompositionPlan compact =
+                buildMortonSfcDecompositionFromCompact(records, config, components);
+
+            assertPlansEquivalent(rich, compact);
+
+            const DecompositionPlan rich_repeat = buildMortonSfcDecomposition(items, config);
+            assert(rich_repeat.owning_rank_by_item == rich.owning_rank_by_item);
+            assert(rich_repeat.sorted_indices == rich.sorted_indices);
+
+            auto records_repeat = makeCompactRuntimeDecompositionRecords(items, config);
+            const DecompositionPlan compact_repeat =
+                buildMortonSfcDecompositionFromCompact(records_repeat, config, components);
+            assert(compact_repeat.owning_rank_by_item == compact.owning_rank_by_item);
+          }
+        }
+      }
+    }
+  }
+
+  {
+    DecompositionConfig config = makePlannerFixtureConfig(3, false, true);
+    const std::vector<DecompositionItem> items =
+        makePlannerFixtureItems("uniform", 32, 3);
+    std::uint64_t required = 0;
+    for (const DecompositionItem& item : items) {
+      required += item.memory_bytes;
+    }
+    config.max_rank_memory_bytes = required / 3U + 1024U;
+    config.rank_transient_reserve_bytes = 0U;
+    const DecompositionPlan rich = buildMortonSfcDecomposition(items, config);
+    auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    const std::vector<DecompositionWorkComponents> components = extractComponents(items);
+    const DecompositionPlan compact =
+        buildMortonSfcDecompositionFromCompact(records, config, components);
+    assertPlansEquivalent(rich, compact);
+  }
+
+  {
+    DecompositionConfig config = makePlannerFixtureConfig(2, false, true);
+    const std::vector<DecompositionItem> items = makePlannerFixtureItems("uniform", 16, 2);
+    config.max_rank_memory_bytes = 1024U;
+    config.rank_transient_reserve_bytes = 1024U;
+    bool rich_threw = false;
+    bool compact_threw = false;
+    std::string rich_message;
+    std::string compact_message;
+    try {
+      (void)buildMortonSfcDecomposition(items, config);
+    } catch (const std::invalid_argument& e) {
+      rich_threw = true;
+      rich_message = e.what();
+    }
+    try {
+      auto records = makeCompactRuntimeDecompositionRecords(items, config);
+      (void)buildMortonSfcDecompositionFromCompact(records, config, extractComponents(items));
+    } catch (const std::invalid_argument& e) {
+      compact_threw = true;
+      compact_message = e.what();
+    }
+    assert(rich_threw && compact_threw);
+    assert(rich_message == compact_message);
+  }
+
+  {
+    DecompositionConfig config = makePlannerFixtureConfig(1, false, true);
+    std::vector<DecompositionItem> items = makePlannerFixtureItems("uniform", 3, 1);
+    for (DecompositionItem& item : items) {
+      item.memory_bytes = 1000U;
+    }
+    config.max_rank_memory_bytes = 1500U;
+    config.rank_transient_reserve_bytes = 0U;
+    bool rich_threw = false;
+    bool compact_threw = false;
+    std::string rich_message;
+    std::string compact_message;
+    try {
+      (void)buildMortonSfcDecomposition(items, config);
+    } catch (const std::runtime_error& e) {
+      rich_threw = true;
+      rich_message = e.what();
+    }
+    try {
+      auto records = makeCompactRuntimeDecompositionRecords(items, config);
+      (void)buildMortonSfcDecompositionFromCompact(records, config, extractComponents(items));
+    } catch (const std::runtime_error& e) {
+      compact_threw = true;
+      compact_message = e.what();
+    }
+    assert(rich_threw && compact_threw);
+    assert(rich_message == compact_message);
+  }
+}
+
+void testCompactPlannerContractValidation() {
+  using cosmosim::parallel::buildMortonSfcDecompositionFromCompact;
+  using cosmosim::parallel::DecompositionConfig;
+  using cosmosim::parallel::DecompositionItem;
+  using cosmosim::parallel::DecompositionWorkComponents;
+  using cosmosim::parallel::makeCompactRuntimeDecompositionRecords;
+  using cosmosim::parallel::CompactRuntimeDecompositionRecord;
+
+  const DecompositionConfig config = makePlannerFixtureConfig(2, false, true);
+  const std::vector<DecompositionItem> items = makePlannerFixtureItems("uniform", 4, 2);
+  const std::vector<DecompositionWorkComponents> components = extractComponents(items);
+
+  {
+    auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    std::vector<DecompositionWorkComponents> short_span(components.begin(), components.begin() + 2);
+    bool threw = false;
+    try {
+      (void)buildMortonSfcDecompositionFromCompact(records, config, short_span);
+    } catch (const std::invalid_argument& e) {
+      threw = std::string_view(e.what()) ==
+              "decomposition component span does not cover compact records";
+    }
+    assert(threw);
+  }
+
+  {
+    auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    records[0].local_index = records.size();
+    bool threw = false;
+    try {
+      (void)buildMortonSfcDecompositionFromCompact(records, config, components);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+
+  {
+    auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    records[0].weighted_load = std::numeric_limits<double>::quiet_NaN();
+    bool threw = false;
+    try {
+      (void)buildMortonSfcDecompositionFromCompact(records, config, components);
+    } catch (const std::invalid_argument& e) {
+      threw = std::string_view(e.what()) == "decomposition item weighted load must be finite";
+    }
+    assert(threw);
+  }
+}
+
+void testExplicitComponentWeightedLoadAuthority() {
+  using cosmosim::parallel::DecompositionConfig;
+  using cosmosim::parallel::DecompositionItem;
+  using cosmosim::parallel::makeCompactRuntimeDecompositionRecords;
+  using cosmosim::parallel::weightedLoadFromExplicitComponents;
+
+  for (const bool prefer_components : {true, false}) {
+    const DecompositionConfig config = makePlannerFixtureConfig(3, false, prefer_components);
+    const std::vector<DecompositionItem> items = makePlannerFixtureItems("uniform", 12, 3);
+    const auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    assert(records.size() == items.size());
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      const DecompositionItem& item = items[i];
+      const double helper = weightedLoadFromExplicitComponents(
+          item.work_components, item.kind, item.active_target_count_recent,
+          item.remote_tree_interactions_recent, item.work_units, item.memory_bytes, config);
+      assert(nearMetric(helper, records[i].weighted_load));
+    }
+  }
+}
+
+void testRuntimeDecompositionSourceMemoryEstimateMatchesStorage() {
+  using cosmosim::parallel::estimateRuntimeDecompositionSourceStorage;
+  using cosmosim::parallel::RuntimeDecompositionSourceMemoryEstimate;
+  using cosmosim::parallel::runtimeDecompositionHasGasIncidenceSource;
+  using cosmosim::workflows::internal::RuntimeDecompositionSourceStorage;
+
+  cosmosim::core::SimulationState dmo;
+  dmo.resizeParticles(64);
+  dmo.resizePatches(8);
+  for (std::size_t i = 0; i < dmo.particles.size(); ++i) {
+    dmo.particle_sidecar.particle_id[i] = static_cast<std::uint64_t>(i) + 1U;
+  }
+  assert(!runtimeDecompositionHasGasIncidenceSource(dmo));
+
+  const std::vector<std::uint32_t> active{0, 5, 9};
+  const RuntimeDecompositionSourceMemoryEstimate est_active =
+      estimateRuntimeDecompositionSourceStorage(dmo, active);
+  const RuntimeDecompositionSourceMemoryEstimate est_empty =
+      estimateRuntimeDecompositionSourceStorage(dmo, std::span<const std::uint32_t>{});
+  const RuntimeDecompositionSourceMemoryEstimate est_again =
+      estimateRuntimeDecompositionSourceStorage(dmo, active);
+
+  assert(est_active.total_bytes == est_again.total_bytes);
+  assert(est_active.active_mask_bytes == est_again.active_mask_bytes);
+  assert(est_active.compact_patch_index_bytes == est_again.compact_patch_index_bytes);
+  assert(est_active.gas_incidence_offset_bytes == est_again.gas_incidence_offset_bytes);
+  assert(est_active.gas_incidence_index_bytes == est_again.gas_incidence_index_bytes);
+  assert(est_active.gas_incidence_construction_bytes ==
+         est_again.gas_incidence_construction_bytes);
+  assert(est_active.other_source_owned_bytes == est_again.other_source_owned_bytes);
+
+  assert(est_active.gas_incidence_offset_bytes == 0U);
+  assert(est_active.gas_incidence_index_bytes == 0U);
+  assert(est_active.gas_incidence_construction_bytes == 0U);
+  assert(est_active.active_mask_bytes == dmo.particles.size() * 1U);
+  assert(est_empty.active_mask_bytes == 0U);
+  assert(est_active.compact_patch_index_bytes == dmo.patches.size() * 4U);
+  assert(est_active.other_source_owned_bytes == 5U * sizeof(std::uint64_t));
+  assert(est_active.total_bytes ==
+         est_active.active_mask_bytes + est_active.compact_patch_index_bytes +
+         est_active.gas_incidence_offset_bytes + est_active.gas_incidence_index_bytes +
+         est_active.gas_incidence_construction_bytes + est_active.other_source_owned_bytes);
+
+  const RuntimeDecompositionSourceStorage storage(dmo, 0, active);
+  const auto view = storage.view();
+  const std::uint64_t scratch_components =
+      est_active.active_mask_bytes + est_active.compact_patch_index_bytes +
+      est_active.gas_incidence_offset_bytes + est_active.gas_incidence_index_bytes +
+      est_active.gas_incidence_construction_bytes;
+  assert(scratch_components >= view.source_scratch_bytes);
+  assert(est_active.total_bytes >=
+         view.source_scratch_bytes + est_active.other_source_owned_bytes);
+  assert(view.active_particle_mask.size() == dmo.particles.size());
+  assert(view.gas_patch_list_offsets.empty());
+  assert(view.gas_patch_indices.empty());
+  assert(view.compact_patch_indices.empty());
+
+  cosmosim::core::SimulationState cells_only;
+  cells_only.resizeParticles(4);
+  cells_only.resizeCells(8);
+  assert(!runtimeDecompositionHasGasIncidenceSource(cells_only));
+  const auto est_cells_only = estimateRuntimeDecompositionSourceStorage(cells_only, {});
+  assert(est_cells_only.gas_incidence_offset_bytes == 0U);
+  assert(est_cells_only.gas_incidence_index_bytes == 0U);
+  assert(est_cells_only.gas_incidence_construction_bytes == 0U);
+
+  cosmosim::core::SimulationState gas;
+  gas.resizeParticles(8);
+  gas.resizeCells(8);
+  gas.resizePatches(1);
+  for (std::size_t i = 0; i < gas.particles.size(); ++i) {
+    gas.particle_sidecar.particle_id[i] = static_cast<std::uint64_t>(i) + 1U;
+  }
+  gas.patches.patch_id[0] = 100U;
+  gas.patches.cell_count[0] = 8;
+  gas.patches.first_cell[0] = 0;
+  std::vector<cosmosim::core::GasCellIdentityRecord> records(8);
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    records[i].gas_cell_id = static_cast<std::uint64_t>(i) + 1U;
+    records[i].parent_particle_id = static_cast<std::uint64_t>(i) + 1U;
+    records[i].owning_patch_id = 100U;
+    records[i].local_cell_row = i;
+  }
+  gas.replaceGasCellIdentityRecords(std::move(records));
+  assert(runtimeDecompositionHasGasIncidenceSource(gas));
+
+  const auto gest = estimateRuntimeDecompositionSourceStorage(gas, {});
+  assert(gest.gas_incidence_offset_bytes == (gas.particles.size() + 1U) * 4U);
+  assert(gest.gas_incidence_index_bytes == gas.gas_cells.size() * 4U);
+  assert(gest.gas_incidence_construction_bytes == gas.gas_cells.size() * 16U);
+  assert(gest.total_bytes ==
+         gest.active_mask_bytes + gest.compact_patch_index_bytes + gest.gas_incidence_offset_bytes +
+         gest.gas_incidence_index_bytes + gest.gas_incidence_construction_bytes +
+         gest.other_source_owned_bytes);
+
+  const RuntimeDecompositionSourceStorage gstorage(gas, 0, {});
+  const auto gview = gstorage.view();
+  assert(!gview.gas_patch_list_offsets.empty());
+  assert(gview.compact_patch_indices.size() == 1U);
+  const std::uint64_t gscratch =
+      gest.active_mask_bytes + gest.compact_patch_index_bytes + gest.gas_incidence_offset_bytes +
+      gest.gas_incidence_index_bytes + gest.gas_incidence_construction_bytes;
+  assert(gscratch >= gview.source_scratch_bytes);
+  assert(gest.total_bytes >= gview.source_scratch_bytes + gest.other_source_owned_bytes);
+}
 
 }  // namespace
 
@@ -1952,6 +2390,10 @@ int main() {
   testGhostBufferPayloadShapeValidation();
   testMpiContextContractValidation();
   testDistributedExecutionTopologyCpuOnly();
+  testRichAndCompactPlannerEquivalence();
+  testCompactPlannerContractValidation();
+  testExplicitComponentWeightedLoadAuthority();
+  testRuntimeDecompositionSourceMemoryEstimateMatchesStorage();
   testDistributedExecutionTopologyCudaAssignment();
   testDistributedExecutionTopologyRejectsInvalidGpuRequest();
   testPmSlabUnevenPartitionOwnership();

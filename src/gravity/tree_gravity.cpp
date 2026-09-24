@@ -352,6 +352,7 @@ void TreeGravitySolver::build(
   m_build_softening = options.softening;
 
   m_nodes.clear();
+  m_max_depth = 0U;
   m_source_softening_epsilon_comoving.clear();
   m_source_softening_epsilon_comoving.resize(pos_x_comoving.size(), options.softening.epsilon_comoving);
   if (!softening_view.source_particle_epsilon_comoving.empty() &&
@@ -422,8 +423,12 @@ void TreeGravitySolver::build(
       center_y_comoving,
       center_z_comoving,
       0.5 * max_extent * (1.0 + 1.0e-8),
+      0U,
       options);
   (void)root_index;
+  if (m_max_depth > kMaximumTreeDepth) {
+    throw std::overflow_error("Tree gravity maximum depth contract exceeded after build");
+  }
   const auto topology_stop = std::chrono::steady_clock::now();
   m_node_capacity_high_water = std::max(m_node_capacity_high_water, m_nodes.center_x_comoving.capacity());
   m_tree_build_generation = nextGravityIdentity(m_tree_build_generation, "Tree build generation overflow");
@@ -541,18 +546,45 @@ void TreeGravitySolver::evaluateActiveSet(
       softening_view.target_species_tag.size() != active_particle_index.size()) {
     throw std::invalid_argument("Tree gravity target species sidecar size must match active-set size");
   }
+  for (const std::uint32_t species_tag : softening_view.source_species_tag) {
+    if (!core::isValidParticleSpeciesTag(species_tag)) {
+      throw std::invalid_argument("Tree gravity source species sidecar contains an invalid species tag");
+    }
+  }
+  for (const std::uint32_t species_tag : softening_view.target_species_tag) {
+    if (!core::isValidParticleSpeciesTag(species_tag)) {
+      throw std::invalid_argument("Tree gravity target species sidecar contains an invalid species tag");
+    }
+  }
+  if (softening_view.species_policy.enabled) {
+    for (const double epsilon : softening_view.species_policy.epsilon_comoving_by_species) {
+      if (!std::isfinite(epsilon) || epsilon < 0.0) {
+        throw std::invalid_argument("Tree gravity species softening requires finite non-negative values");
+      }
+    }
+  }
 
-  // Validate all failure-capable per-target inputs before entering the OpenMP
-  // traversal. The hot tree walk therefore remains exception-free and each
-  // active target owns a disjoint acceleration output slot.
-  std::vector<double> target_softening_by_active(active_particle_index.size(), 0.0);
+  const ValidatedTargetSofteningView validated_target_softening{
+      .target_epsilon_comoving = softening_view.target_particle_epsilon_comoving,
+      .target_override_mask = softening_view.target_particle_epsilon_override_mask,
+      .target_species_tag = softening_view.target_species_tag,
+      .resolved_source_epsilon_comoving = m_source_softening_epsilon_comoving,
+      .source_species_tag = softening_view.source_species_tag,
+      .fallback = options.softening,
+      .species_policy_enabled = softening_view.species_policy.enabled,
+      .species_epsilon_comoving = softening_view.species_policy.epsilon_comoving_by_species,
+  };
   for (std::size_t active_i = 0; active_i < active_particle_index.size(); ++active_i) {
     const TreeLocalIndex particle_index = active_particle_index[active_i];
     if (particle_index >= pos_x_comoving.size()) {
       throw std::out_of_range("Active particle index exceeds particle count");
     }
-    target_softening_by_active[active_i] =
-        resolveTargetSofteningEpsilon(active_i, particle_index, options.softening, softening_view);
+    const double checked_softening = targetSofteningEpsilonUnchecked(
+        active_i, particle_index, validated_target_softening);
+    if (!std::isfinite(checked_softening) || checked_softening < 0.0) {
+      throw std::invalid_argument(
+          "Tree gravity target softening resolution must be finite and non-negative");
+    }
   }
 
   const auto traversal_start = std::chrono::steady_clock::now();
@@ -579,7 +611,8 @@ void TreeGravitySolver::evaluateActiveSet(
       const double px = pos_x_comoving[particle_index];
       const double py = pos_y_comoving[particle_index];
       const double pz = pos_z_comoving[particle_index];
-      const double target_softening_comoving = target_softening_by_active[active_i];
+      const double target_softening_comoving = targetSofteningEpsilonUnchecked(
+          active_i, particle_index, validated_target_softening);
       const bool previous_acceleration_supplied = !previous_acceleration_magnitude_code.empty();
       const double previous_acceleration_code = previous_acceleration_supplied
           ? previous_acceleration_magnitude_code[active_i]
@@ -701,6 +734,14 @@ TreeBuildGeneration TreeGravitySolver::treeBuildGeneration() const noexcept {
   return m_tree_build_generation;
 }
 
+std::span<const double> TreeGravitySolver::resolvedSourceSofteningEpsilon() const noexcept {
+  return m_source_softening_epsilon_comoving;
+}
+
+std::uint32_t TreeGravitySolver::maxDepth() const noexcept {
+  return m_max_depth;
+}
+
 void TreeGravitySolver::appendMemoryReport(core::MemoryReportBuilder& builder) const {
   m_nodes.appendMemoryReport(builder);
   const auto add = [&builder](core::MemorySubsystem subsystem, std::string label, const auto& container) {
@@ -735,11 +776,16 @@ TreeLocalIndex TreeGravitySolver::buildNodeRecursive(
     double center_y_comoving,
     double center_z_comoving,
     double half_size_comoving,
+    std::uint32_t depth,
     const TreeGravityOptions& options) {
   (void)mass_code;
+  if (depth > kMaximumTreeDepth) {
+    throw std::overflow_error("Tree gravity maximum depth contract exceeded");
+  }
   if (m_nodes.size() >= static_cast<std::size_t>(kInvalidTreeLocalIndex)) {
     throw std::overflow_error("Tree node count exceeds the 32-bit node-index contract");
   }
+  m_max_depth = std::max(m_max_depth, depth);
   const TreeLocalIndex node_index = checkedTreeLocalIndex(m_nodes.size(), "tree node count exceeds local index policy");
   m_nodes.center_x_comoving.push_back(center_x_comoving);
   m_nodes.center_y_comoving.push_back(center_y_comoving);
@@ -835,6 +881,7 @@ TreeLocalIndex TreeGravitySolver::buildNodeRecursive(
         child_center_y,
         child_center_z,
         child_half,
+        depth + 1U,
         options);
     m_nodes.child_index[child_slot_offset + octant] = built_child_index;
     ++non_empty_children;

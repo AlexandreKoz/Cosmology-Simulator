@@ -22,6 +22,12 @@
 #include <vector>
 
 #include "cosmosim/core/checked_arithmetic.hpp"
+#include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/openmp_runtime.hpp"
+
+#if COSMOSIM_HAVE_OPENMP
+#include <omp.h>
+#endif
 
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
 #include <mpi.h>
@@ -698,6 +704,26 @@ struct GatheredParticleField {
   return {ax, ay, az};
 }
 
+// Fixed-capacity residual DFS stack. Workers own one contiguous slot of
+// S = 1 + 7 * max_depth entries so no hot path allocates and no shared
+// std::vector is mutated across OpenMP threads.
+struct BoundedTreeStack {
+  TreeLocalIndex* data = nullptr;
+  std::size_t capacity = 0;
+  std::size_t size = 0;
+
+  void clear() noexcept { size = 0; }
+  [[nodiscard]] bool empty() const noexcept { return size == 0; }
+  [[nodiscard]] TreeLocalIndex back() const noexcept { return data[size - 1U]; }
+  void pop_back() noexcept { --size; }
+  void push_back(TreeLocalIndex value) {
+    if (size >= capacity) {
+      throw std::runtime_error("TreePM residual traversal stack overflow");
+    }
+    data[size++] = value;
+  }
+};
+
 void pushChildrenNearFirstPeriodic(
     const TreeNodeSoa& nodes,
     TreeLocalIndex node_index,
@@ -705,7 +731,7 @@ void pushChildrenNearFirstPeriodic(
     double py,
     double pz,
     const PeriodicBoxLengths& box_lengths,
-    std::vector<TreeLocalIndex>& stack) {
+    BoundedTreeStack& stack) {
   std::array<std::pair<double, TreeLocalIndex>, 8> child_dist2{};
   std::size_t count = 0;
   const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
@@ -1115,8 +1141,17 @@ struct ShortRangeTargetResponsePacket {
 
 constexpr std::uint32_t k_short_range_wire_version = 1U;
 constexpr std::uint32_t k_short_range_flag_previous_acceleration = 1U << 0U;
-constexpr std::size_t k_short_range_request_wire_bytes = 96U;
-constexpr std::size_t k_short_range_response_wire_bytes = 80U;
+constexpr std::size_t k_short_range_request_wire_bytes = kTreePmShortRangeRequestWireBytes;
+constexpr std::size_t k_short_range_response_wire_bytes = kTreePmShortRangeResponseWireBytes;
+
+// The memory estimator and runtime telemetry model structured host packet
+// capacity with the wire record widths. Enforce that identity at compile
+// time: if a supported ABI ever pads these structs differently, the build
+// fails here instead of silently using wire bytes as host object bytes.
+static_assert(sizeof(ShortRangeTargetRequestPacket) == kTreePmShortRangeRequestWireBytes,
+    "ShortRangeTargetRequestPacket host layout must equal the request wire record width");
+static_assert(sizeof(ShortRangeTargetResponsePacket) == kTreePmShortRangeResponseWireBytes,
+    "ShortRangeTargetResponsePacket host layout must equal the response wire record width");
 
 [[nodiscard, maybe_unused]] std::vector<std::uint8_t> encodeShortRangeRequests(
     std::span<const ShortRangeTargetRequestPacket> records) {
@@ -1398,29 +1433,47 @@ makeAuthoritativeTopDomainPackets(
   return packets;
 }
 
-[[nodiscard, maybe_unused]] bool authoritativeDomainCoversLocalSources(
+struct DomainCoverageResult {
+  bool covered = false;
+  bool epoch_mismatch = false;
+  std::uint64_t uncovered_source_count = 0;
+  std::size_t first_uncovered_source_index = 0;
+};
+
+[[nodiscard, maybe_unused]] DomainCoverageResult authoritativeDomainCoversLocalSourcesEx(
     std::span<const parallel::TopDomainLeaf> leaves,
     int world_rank,
     std::uint64_t decomposition_epoch,
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
     std::span<const double> pos_z_comoving) {
+  DomainCoverageResult result;
   if (pos_x_comoving.size() != pos_y_comoving.size() ||
       pos_x_comoving.size() != pos_z_comoving.size()) {
-    return false;
+    result.uncovered_source_count = pos_x_comoving.size();
+    result.first_uncovered_source_index = 0U;
+    return result;
   }
   if (pos_x_comoving.empty()) {
-    return true;
+    result.covered = true;
+    return result;
   }
   if (leaves.empty()) {
-    return false;
+    result.uncovered_source_count = static_cast<std::uint64_t>(pos_x_comoving.size());
+    result.first_uncovered_source_index = 0U;
+    return result;
   }
   constexpr double k_geometry_tolerance = 1.0e-12;
+  bool epoch_mismatch_seen = false;
+  std::uint64_t uncovered = 0U;
+  std::size_t first_uncovered = 0U;
+  bool first_uncovered_recorded = false;
   for (std::size_t source_index = 0; source_index < pos_x_comoving.size(); ++source_index) {
     bool covered = false;
     for (const parallel::TopDomainLeaf& leaf : leaves) {
       if (leaf.owner_rank != world_rank || leaf.decomposition_epoch != decomposition_epoch) {
-        return false;
+        epoch_mismatch_seen = true;
+        continue;
       }
       if (pos_x_comoving[source_index] >= leaf.min_x_comov - k_geometry_tolerance &&
           pos_x_comoving[source_index] <= leaf.max_x_comov + k_geometry_tolerance &&
@@ -1433,10 +1486,30 @@ makeAuthoritativeTopDomainPackets(
       }
     }
     if (!covered) {
-      return false;
+      ++uncovered;
+      if (!first_uncovered_recorded) {
+        first_uncovered = source_index;
+        first_uncovered_recorded = true;
+      }
     }
   }
-  return true;
+  result.epoch_mismatch = epoch_mismatch_seen && uncovered > 0U;
+  result.uncovered_source_count = uncovered;
+  result.first_uncovered_source_index = first_uncovered;
+  result.covered = uncovered == 0U && !epoch_mismatch_seen;
+  return result;
+}
+
+[[nodiscard, maybe_unused]] bool authoritativeDomainCoversLocalSources(
+    std::span<const parallel::TopDomainLeaf> leaves,
+    int world_rank,
+    std::uint64_t decomposition_epoch,
+    std::span<const double> pos_x_comoving,
+    std::span<const double> pos_y_comoving,
+    std::span<const double> pos_z_comoving) {
+  return authoritativeDomainCoversLocalSourcesEx(
+      leaves, world_rank, decomposition_epoch, pos_x_comoving, pos_y_comoving, pos_z_comoving)
+      .covered;
 }
 
 [[nodiscard]] SourceDomainBoundsPacket boundsFromTreePseudoParticlePacket(
@@ -1729,11 +1802,15 @@ core::MemoryReport TreePmCoordinator::memoryReport() const {
                                        .estimated_next_step_bytes = 0U,
                                        .uncertainty_note = "next-step requirement not predicted from retained capacity"});
   };
-  add_tree_scratch("treepm.periodic_tree_source_x_comoving", m_tree_source_x_comoving);
-  add_tree_scratch("treepm.periodic_tree_source_y_comoving", m_tree_source_y_comoving);
-  add_tree_scratch("treepm.periodic_tree_source_z_comoving", m_tree_source_z_comoving);
+   add_tree_scratch("treepm.periodic_tree_source_x_comoving", m_tree_source_x_comoving);
+   add_tree_scratch("treepm.periodic_tree_source_y_comoving", m_tree_source_y_comoving);
+   add_tree_scratch("treepm.periodic_tree_source_z_comoving", m_tree_source_z_comoving);
+   add_tree_scratch("treepm.periodic_wrapped_axis_scratch", m_periodic_wrapped_axis_scratch);
+   add_tree_scratch("treepm.periodic_ordered_axis_scratch", m_periodic_ordered_axis_scratch);
+   add_tree_scratch("treepm.let_domain_cache.top_level_leaves", m_let_domain_cache.top_level_domain_leaves);
 
-  const auto add_mpi = [&builder](std::string label, const auto& container) {
+   const auto add_mpi = [&builder](std::string label, const auto& container) {
+
     const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
     builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kMpiBuffers,
                                        .lifetime = core::MemoryLifetime::kTransient,
@@ -1759,10 +1836,55 @@ core::MemoryReport TreePmCoordinator::memoryReport() const {
   add_mpi("treepm.exchange.remote_batch_ax", m_tree_exchange_workspace.remote_batch_ax);
   add_mpi("treepm.exchange.remote_batch_ay", m_tree_exchange_workspace.remote_batch_ay);
   add_mpi("treepm.exchange.remote_batch_az", m_tree_exchange_workspace.remote_batch_az);
-  add_mpi("treepm.exchange.expected_response_count", m_tree_exchange_workspace.expected_response_count);
-  add_mpi("treepm.exchange.received_response_count", m_tree_exchange_workspace.received_response_count);
+   add_mpi("treepm.exchange.expected_response_count", m_tree_exchange_workspace.expected_response_count);
+   add_mpi("treepm.exchange.received_response_count", m_tree_exchange_workspace.received_response_count);
+   if (m_sparse_peer_graph_cache != nullptr) {
+     add_mpi("treepm.let_domain_cache.requested_peers", m_sparse_peer_graph_cache->requested_outgoing_peers);
+   }
+   add_mpi("treepm.pm_halo_diagnostic.left_halo", m_last_pm_slab_halo_exchange.left_halo);
+   add_mpi("treepm.pm_halo_diagnostic.right_halo", m_last_pm_slab_halo_exchange.right_halo);
 
-  builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kPmMesh,
+   {
+
+     const std::uint64_t bytes = core::ownedCapacityBytesForContainer(m_worker_stack_storage);
+     builder.addEntry(core::MemoryEntry{
+         .subsystem = core::MemorySubsystem::kScratch,
+         .lifetime = core::MemoryLifetime::kTransient,
+         .label = "treepm.residual.worker_stack_storage",
+         .current_size_bytes = core::currentSizeBytesForContainer(m_worker_stack_storage),
+         .owned_capacity_bytes = bytes,
+         .high_water_bytes = m_worker_stack_high_water_bytes,
+         .estimated_next_step_bytes = bytes,
+         .uncertainty_note =
+             "contiguous OpenMP residual DFS slots sized worker_count * (1 + 7 * tree max depth); high-water is retained capacity"});
+   }
+   {
+     const std::uint64_t bytes = core::ownedCapacityBytesForContainer(m_worker_counter_storage);
+     builder.addEntry(core::MemoryEntry{
+         .subsystem = core::MemorySubsystem::kScratch,
+         .lifetime = core::MemoryLifetime::kTransient,
+         .label = "treepm.residual.worker_counter_storage",
+         .current_size_bytes = core::currentSizeBytesForContainer(m_worker_counter_storage),
+         .owned_capacity_bytes = bytes,
+         .high_water_bytes = m_worker_counter_high_water_bytes,
+         .estimated_next_step_bytes = bytes,
+         .uncertainty_note = "one integer counter bundle per planned OpenMP worker"});
+   }
+   {
+     const std::uint64_t bytes = core::ownedCapacityBytesForContainer(m_block_sum_sq_storage);
+     builder.addEntry(core::MemoryEntry{
+         .subsystem = core::MemorySubsystem::kScratch,
+         .lifetime = core::MemoryLifetime::kTransient,
+         .label = "treepm.residual.block_sum_sq_storage",
+         .current_size_bytes = core::currentSizeBytesForContainer(m_block_sum_sq_storage),
+         .owned_capacity_bytes = bytes,
+         .high_water_bytes = m_block_sum_sq_high_water_bytes,
+         .estimated_next_step_bytes = bytes,
+         .uncertainty_note = "deterministic floating diagnostic block sums; force accumulation order is unchanged"});
+   }
+
+   builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kPmMesh,
+
                                      .lifetime = core::MemoryLifetime::kUnknown,
                                      .label = "pm_solver.external_fftw_or_cuda_plan_cache",
                                      .estimate_only = true,
@@ -2015,6 +2137,11 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         "TreePM long-range reuse requested without a compatible PM field");
   }
 
+  // Inclusive PM-phase wall clock: long-range refresh (when requested),
+  // compact-target preparation, force interpolation, and optional zoom
+  // correction through the point control transfers to the tree residual.
+  // Subphase PmProfileEvent fields overlap and must not replace this value.
+  const auto pm_phase_start = std::chrono::steady_clock::now();
   if (perform_long_range_refresh) {
     m_pm_solver.assignDensity(
         m_grid,
@@ -2404,6 +2531,11 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     }
   }
 
+  if (profile != nullptr) {
+    profile->pm_profile.total_ms += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - pm_phase_start).count();
+  }
+
   // Tree owns short-range residual with the complementary real-space kernel.
   const auto tree_start = std::chrono::steady_clock::now();
   std::span<const double> tree_source_x = pos_x_comoving;
@@ -2470,9 +2602,10 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       mass_code,
       accumulator,
       short_range_options,
-      softening_view,
-      tree_pm_rank_local_serial_mode,
-      profile != nullptr ? &profile->tree_profile : nullptr);
+       softening_view,
+       tree_pm_rank_local_serial_mode,
+       profile != nullptr ? &profile->tree_profile : nullptr);
+
   const auto tree_stop = std::chrono::steady_clock::now();
 
   std::uint64_t empty_source_rank_count = pos_x_comoving.empty() ? 1U : 0U;
@@ -2485,6 +2618,18 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   if (diagnostics != nullptr) {
     const PeriodicBoxLengths diagnostic_box_lengths = effectivePeriodicBoxLengths(options.pm_options);
     *diagnostics = computeTreePmDiagnostics(options.split_policy);
+    diagnostics->domain_geometry_source_generation =
+        m_last_residual_stats.domain_geometry_source_generation;
+    diagnostics->current_gravity_source_generation =
+        m_last_residual_stats.current_gravity_source_generation;
+    diagnostics->domain_geometry_fresh =
+        m_last_residual_stats.domain_geometry_fresh;
+    diagnostics->domain_geometry_fallback_used =
+        m_last_residual_stats.domain_geometry_fallback_used;
+    diagnostics->domain_geometry_fallback_reason =
+        m_last_residual_stats.domain_geometry_fallback_reason;
+    diagnostics->domain_geometry_uncovered_source_count =
+        m_last_residual_stats.domain_geometry_uncovered_source_count;
     diagnostics->local_source_count = static_cast<std::uint64_t>(pos_x_comoving.size());
     diagnostics->local_active_target_count = static_cast<std::uint64_t>(active_count);
     diagnostics->local_tree_node_count = static_cast<std::uint64_t>(m_tree_solver.nodes().size());
@@ -2502,6 +2647,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->residual_pruned_nodes = m_last_residual_stats.pruned_nodes;
     diagnostics->residual_pair_skips_cutoff = m_last_residual_stats.pair_skips_cutoff;
     diagnostics->residual_pair_evaluations = m_last_residual_stats.pair_evaluations;
+    diagnostics->local_pair_evaluations = m_last_residual_stats.local_pair_evaluations;
+    diagnostics->incoming_remote_pair_evaluations =
+        m_last_residual_stats.incoming_remote_pair_evaluations;
     diagnostics->residual_remote_request_packets = m_last_residual_stats.remote_request_packets;
     diagnostics->residual_remote_response_packets = m_last_residual_stats.remote_response_packets;
     diagnostics->residual_remote_request_bytes = m_last_residual_stats.remote_request_bytes;
@@ -2511,6 +2659,26 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->residual_remote_targets_with_requests = m_last_residual_stats.remote_targets_with_requests;
     diagnostics->residual_remote_targets_without_requests = m_last_residual_stats.remote_targets_without_requests;
     diagnostics->residual_remote_pairs_pruned_by_bounds = m_last_residual_stats.remote_pairs_pruned_by_bounds;
+    diagnostics->openmp_compiled = core::openMpRuntimeInfo().compiled ? 1U : 0U;
+    const core::OpenMpRuntimeInfo residual_openmp_info = core::openMpRuntimeInfo();
+    const std::uint64_t planned_openmp_workers =
+        residual_openmp_info.compiled
+            ? static_cast<std::uint64_t>(std::max(
+                  1,
+                  std::max(residual_openmp_info.configured_threads,
+                           residual_openmp_info.maximum_threads)))
+            : 1U;
+    diagnostics->openmp_configured_workers = planned_openmp_workers;
+     diagnostics->openmp_observed_workers =
+         m_last_residual_stats.openmp_observed_workers > 0U
+             ? m_last_residual_stats.openmp_observed_workers
+             : 1U;
+
+    diagnostics->residual_local_target_count =
+        static_cast<std::uint64_t>(accumulator.active_particle_index.size());
+    diagnostics->residual_incoming_target_count =
+        m_last_residual_stats.incoming_remote_target_evaluations;
+    diagnostics->residual_worker_scratch_high_water_bytes = m_worker_stack_high_water_bytes;
     diagnostics->residual_remote_request_packets_max_peer = m_last_residual_stats.remote_request_packets_max_peer;
     diagnostics->residual_remote_response_packets_max_peer = m_last_residual_stats.remote_response_packets_max_peer;
     diagnostics->residual_remote_request_packet_imbalance_ratio =
@@ -2530,6 +2698,10 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->let_wire_bytes_sent = m_last_residual_stats.let_wire_bytes_sent;
     diagnostics->let_wire_bytes_received = m_last_residual_stats.let_wire_bytes_received;
     diagnostics->let_high_water_bytes = m_last_residual_stats.let_high_water_bytes;
+    diagnostics->let_wire_buffer_high_water_bytes =
+        m_last_residual_stats.let_wire_buffer_high_water_bytes;
+    diagnostics->let_known_workspace_high_water_bytes =
+        m_last_residual_stats.let_known_workspace_high_water_bytes;
     diagnostics->let_discovery_ms = m_last_residual_stats.let_discovery_ms;
     diagnostics->let_graph_setup_ms = m_last_residual_stats.let_graph_setup_ms;
     diagnostics->let_communication_ms = m_last_residual_stats.let_communication_ms;
@@ -2537,6 +2709,15 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->let_communication_wait_ms = m_last_residual_stats.let_communication_wait_ms;
     diagnostics->let_overlap_efficiency = m_last_residual_stats.let_overlap_efficiency;
     diagnostics->let_remote_traversal_ms = m_last_residual_stats.let_remote_traversal_ms;
+    diagnostics->incoming_request_decode_validation_ms =
+        m_last_residual_stats.incoming_request_decode_validation_ms;
+    diagnostics->incoming_remote_target_compute_ms =
+        m_last_residual_stats.incoming_remote_target_compute_ms;
+    diagnostics->incoming_response_encode_pack_ms =
+        m_last_residual_stats.incoming_response_encode_pack_ms;
+    diagnostics->protocol_validation_ms = m_last_residual_stats.protocol_validation_ms;
+    diagnostics->protocol_consensus_ms = m_last_residual_stats.protocol_consensus_ms;
+    diagnostics->response_exchange_ms = m_last_residual_stats.response_exchange_ms;
     diagnostics->force_l2_pm_global = pm_force_l2_global;
     diagnostics->force_l2_pm_zoom_correction = l2NormFromComponents(
         m_active_zoom_corr_ax_comoving,
@@ -2593,6 +2774,15 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     profile->let_communication_wait_ms += m_last_residual_stats.let_communication_wait_ms;
     profile->let_overlap_efficiency = m_last_residual_stats.let_overlap_efficiency;
     profile->remote_traversal_ms += m_last_residual_stats.let_remote_traversal_ms;
+    profile->incoming_request_decode_validation_ms +=
+        m_last_residual_stats.incoming_request_decode_validation_ms;
+    profile->incoming_remote_target_compute_ms +=
+        m_last_residual_stats.incoming_remote_target_compute_ms;
+    profile->incoming_response_encode_pack_ms +=
+        m_last_residual_stats.incoming_response_encode_pack_ms;
+    profile->protocol_validation_ms += m_last_residual_stats.protocol_validation_ms;
+    profile->protocol_consensus_ms += m_last_residual_stats.protocol_consensus_ms;
+    profile->response_exchange_ms += m_last_residual_stats.response_exchange_ms;
     profile->coupling_overhead_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   }
 }
@@ -2604,15 +2794,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     std::span<const double> mass_code,
     const TreePmForceAccumulatorView& accumulator,
     const TreePmOptions& options,
-    const TreeSofteningView& softening_view,
-    bool rank_local_serial_mode,
-    TreeGravityProfile* tree_profile) {
-  std::uint64_t visited_nodes = 0;
-  std::uint64_t accepted_nodes = 0;
-  std::uint64_t opened_nodes = 0;
-  std::uint64_t pp_interactions = 0;
-  std::uint64_t cutoff_pruned_nodes = 0;
-  std::uint64_t cutoff_pair_skips = 0;
+     const TreeSofteningView& softening_view,
+     bool rank_local_serial_mode,
+     TreeGravityProfile* tree_profile) {
+
+  ResidualTraversalCounters local_owned_targets;
+  ResidualTraversalCounters incoming_remote_targets;
   m_last_residual_stats = {};
 
   const bool has_explicit_target_positions = !accumulator.target_pos_x_comoving.empty();
@@ -2633,6 +2820,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   };
 
   const auto traversal_start = std::chrono::steady_clock::now();
+  constexpr std::size_t k_residual_block_size = kTreePmResidualBlockSize;
   const TreeNodeSoa& nodes = m_tree_solver.nodes();
   const TreeMortonOrdering& ordering = m_tree_solver.ordering();
   const PeriodicBoxLengths box_lengths = options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic
@@ -2663,21 +2851,6 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       softening_view.target_species_tag.size() != accumulator.active_particle_index.size()) {
     throw std::invalid_argument("TreePM target species sidecar size must match active-set size");
   }
-  const auto resolve_target_softening = [&](std::size_t active_slot, TreeLocalIndex source_index) {
-    const bool has_local_source_identity = source_index < pos_x_comoving.size();
-    if (!has_local_source_identity &&
-        ((softening_view.target_particle_epsilon_comoving.empty() &&
-          !softening_view.source_particle_epsilon_comoving.empty()) ||
-         (softening_view.target_species_tag.empty() && !softening_view.source_species_tag.empty()))) {
-      throw std::invalid_argument(
-          "TreePM independent targets require target-owned softening/species sidecars when source sidecars are present");
-    }
-    return resolveTargetSofteningEpsilon(
-        active_slot,
-        has_local_source_identity ? source_index : 0U,
-        options.tree_options.softening,
-        softening_view);
-  };
   int tree_mpi_world_size = 1;
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   int tree_mpi_world_rank = 0;
@@ -2686,12 +2859,64 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   static_cast<void>(rank_local_serial_mode);
   static_cast<void>(tree_mpi_world_size);
 #endif
-  std::vector<TreeLocalIndex> stack;
+
+  // Pre-resolve source softening once from the immutable build-time lane so
+  // the residual hot path never re-enters throwing resolvers. Target softening
+  // is prevalidated below for every local active slot before any OpenMP region.
+  const std::span<const double> source_softening_comoving =
+      m_tree_solver.resolvedSourceSofteningEpsilon();
+  if (source_softening_comoving.size() != pos_x_comoving.size()) {
+    throw std::invalid_argument(
+        "TreePM residual source softening lane length must match the tree source count");
+  }
+  const auto resolve_source_softening =
+      [&](TreeLocalIndex source_index) -> double {
+    return source_softening_comoving[source_index];
+  };
+
+  const std::uint32_t tree_max_depth = m_tree_solver.maxDepth();
+  if (tree_max_depth > kMaximumTreeDepth) {
+    throw std::logic_error("TreePM residual tree depth exceeds the builder contract");
+  }
+  const std::size_t stack_slots_per_worker =
+      1U + 7U * static_cast<std::size_t>(tree_max_depth);
+  const core::OpenMpRuntimeInfo openmp_info = core::openMpRuntimeInfo();
+  const int configured_workers =
+      std::max(1, openmp_info.configured_threads);
+  std::size_t worker_count = static_cast<std::size_t>(configured_workers);
+  if (!openmp_info.compiled) {
+    worker_count = 1U;
+  } else {
+    worker_count = std::max(
+        worker_count,
+        static_cast<std::size_t>(std::max(1, openmp_info.maximum_threads)));
+  }
+  const std::size_t required_stack_slots = core::checkedSizeMultiply(
+      worker_count, stack_slots_per_worker,
+      "TreePM residual worker stack slot count");
+  const std::size_t target_count = accumulator.active_particle_index.size();
+  const std::size_t required_block_count =
+      (target_count + k_residual_block_size - 1U) / k_residual_block_size;
   std::exception_ptr traversal_workspace_failure;
   try {
-    // DFS storage scales with traversal frontier/depth, not total node count.
-    // Start small and let vector growth reflect actual traversal complexity.
-    stack.reserve(std::min<std::size_t>(nodes.size(), 256U));
+    if (m_worker_stack_storage.size() < required_stack_slots) {
+      m_worker_stack_storage.resize(required_stack_slots, 0U);
+    }
+    m_worker_stack_high_water_bytes = std::max<std::uint64_t>(
+        m_worker_stack_high_water_bytes,
+        core::ownedCapacityBytesForContainer(m_worker_stack_storage));
+    if (m_worker_counter_storage.size() < worker_count) {
+      m_worker_counter_storage.resize(worker_count);
+    }
+    m_worker_counter_high_water_bytes = std::max<std::uint64_t>(
+        m_worker_counter_high_water_bytes,
+        core::ownedCapacityBytesForContainer(m_worker_counter_storage));
+    if (m_block_sum_sq_storage.size() < required_block_count) {
+      m_block_sum_sq_storage.resize(required_block_count, 0.0);
+    }
+    m_block_sum_sq_high_water_bytes = std::max<std::uint64_t>(
+        m_block_sum_sq_high_water_bytes,
+        core::ownedCapacityBytesForContainer(m_block_sum_sq_storage));
   } catch (...) {
     traversal_workspace_failure = std::current_exception();
   }
@@ -2719,7 +2944,98 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         "TreePM peer rank rejected residual traversal workspace preparation");
   }
 
+  const auto worker_stack = [&](std::size_t worker_slot) -> BoundedTreeStack {
+    return BoundedTreeStack{
+        .data = m_worker_stack_storage.data() + worker_slot * stack_slots_per_worker,
+        .capacity = stack_slots_per_worker,
+        .size = 0,
+    };
+  };
+  const auto current_worker_slot = [worker_count]() noexcept -> std::size_t {
+#if COSMOSIM_HAVE_OPENMP
+    const int thread_id = omp_get_thread_num();
+    if (thread_id >= 0 && static_cast<std::size_t>(thread_id) < worker_count) {
+      return static_cast<std::size_t>(thread_id);
+    }
+    return 0U;
+#else
+    static_cast<void>(worker_count);
+    return 0U;
+#endif
+  };
+
+  const ValidatedTargetSofteningView validated_target_softening{
+      .target_epsilon_comoving = softening_view.target_particle_epsilon_comoving,
+      .target_override_mask = softening_view.target_particle_epsilon_override_mask,
+      .target_species_tag = softening_view.target_species_tag,
+      .resolved_source_epsilon_comoving = source_softening_comoving,
+      .source_species_tag = softening_view.source_species_tag,
+      .fallback = options.tree_options.softening,
+      .species_policy_enabled = softening_view.species_policy.enabled,
+      .species_epsilon_comoving = softening_view.species_policy.epsilon_comoving_by_species,
+  };
+  {
+    std::exception_ptr softening_prevalidation_failure;
+    try {
+      for (std::size_t active_i = 0; active_i < target_count; ++active_i) {
+        const TreeLocalIndex particle_index =
+            accumulator.active_particle_index[active_i];
+        const bool has_local_source_identity =
+            particle_index < pos_x_comoving.size();
+        if (!has_local_source_identity &&
+            ((softening_view.target_particle_epsilon_comoving.empty() &&
+              !softening_view.source_particle_epsilon_comoving.empty()) ||
+             (softening_view.target_species_tag.empty() &&
+              !softening_view.source_species_tag.empty()))) {
+          throw std::invalid_argument(
+              "TreePM independent targets require target-owned softening/species sidecars when source sidecars are present");
+        }
+        const double checked_softening = targetSofteningEpsilonUnchecked(
+            active_i,
+            has_local_source_identity ? particle_index : 0U,
+            validated_target_softening);
+        if (!std::isfinite(checked_softening) || checked_softening < 0.0) {
+          throw std::invalid_argument(
+              "TreePM target softening resolution must be finite and non-negative");
+        }
+      }
+    } catch (...) {
+      softening_prevalidation_failure = std::current_exception();
+    }
+    std::uint64_t softening_failure_count =
+        softening_prevalidation_failure ? 1U : 0U;
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+    if (tree_mpi_world_size > 1) {
+      std::uint64_t global_softening_failure_count = 0U;
+      MPI_Allreduce(
+          &softening_failure_count,
+          &global_softening_failure_count,
+          1,
+          MPI_UINT64_T,
+          MPI_SUM,
+          MPI_COMM_WORLD);
+      softening_failure_count = global_softening_failure_count;
+    }
+#endif
+    if (softening_failure_count != 0U) {
+      if (softening_prevalidation_failure) {
+        std::rethrow_exception(softening_prevalidation_failure);
+      }
+      throw std::runtime_error(
+          "TreePM peer rank rejected residual softening prevalidation");
+    }
+  }
+
+  // Worker-safe residual evaluator. Shared mutable state is limited to the
+  // immutable tree/source/softening lanes, the caller-owned counters bundle,
+  // and the caller-owned bounded stack. Opening MAC, 0.08 screened-quadrupole
+  // envelope, cutoff, softening combine rule, and per-target child order are
+  // unchanged from the serial contract.
+  std::uint64_t incoming_evaluated_target_count = 0;
+  int observed_openmp_workers = 1;
   auto evaluateTargetAgainstLocalTree = [&](
+                                         ResidualTraversalCounters& counters,
+                                         BoundedTreeStack& stack,
                                          double px,
                                          double py,
                                          double pz,
@@ -2740,7 +3056,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     while (!stack.empty()) {
       const TreeLocalIndex node_index = stack.back();
       stack.pop_back();
-      ++visited_nodes;
+      ++counters.visited_nodes;
 
       const double half_size = nodes.half_size_comoving[node_index];
       const double min_node_distance = minimumDistanceToNodeAabb(
@@ -2753,9 +3069,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           half_size,
           box_lengths);
       if (min_node_distance > cutoff_radius_comoving) {
-        ++cutoff_pruned_nodes;
+        ++counters.cutoff_pruned_nodes;
         if (!skip_self) {
-          ++m_last_residual_stats.remote_pairs_pruned_by_bounds;
+          ++counters.remote_pairs_pruned_by_bounds;
         }
         continue;
       }
@@ -2815,7 +3131,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           common_tree_accept && node_within_cutoff && decomposition_stable_accept;
 
       if (accept) {
-        ++accepted_nodes;
+        ++counters.accepted_nodes;
         if (is_leaf) {
           const TreeLocalIndex begin = nodes.particle_begin[node_index];
           const TreeLocalIndex end = begin + nodes.particle_count[node_index];
@@ -2829,12 +3145,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             const double sz = minimumImageDelta(pos_z_comoving[source_index] - pz, box_lengths.lz);
             const double sr2 = sx * sx + sy * sy + sz * sz;
             if (sr2 > cutoff_radius2_comoving) {
-              ++cutoff_pair_skips;
+              ++counters.cutoff_skipped_pairs;
               continue;
             }
             const double sr = std::sqrt(std::max(sr2, 1.0e-30));
-            const double source_softening =
-                resolveSourceSofteningEpsilon(source_index, options.tree_options.softening, softening_view);
+            const double source_softening = resolve_source_softening(source_index);
             const double pair_epsilon = combineSofteningPairEpsilonUnchecked(source_softening, target_softening_comoving);
             // PM carries the unsoftened Gaussian long-range field.  The tree therefore
             // evaluates the exact residual needed to recover the requested softened
@@ -2845,7 +3160,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             ax += residual_factor * mass_code[source_index] * sx;
             ay += residual_factor * mass_code[source_index] * sy;
             az += residual_factor * mass_code[source_index] * sz;
-            ++pp_interactions;
+            ++counters.direct_pair_evaluations;
           }
         } else {
           // Same softened-residual contract as the leaf pair path, applied to accepted nodes.
@@ -2864,7 +3179,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           az += contrib[2];
         }
       } else {
-        ++opened_nodes;
+        ++counters.opened_nodes;
         pushChildrenNearFirstPeriodic(nodes, node_index, px, py, pz, box_lengths, stack);
       }
     }
@@ -2876,33 +3191,111 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   distributed_short_range =
       tree_mpi_world_size > 1 && !rank_local_serial_mode;
 #endif
+  // Integer counters and local short-range sum-of-squares are reduced after
+  // join in deterministic block order. No atomics appear in the hot node/pair
+  // loops; each active slot has a unique writer.
+  const auto merge_counters = [](ResidualTraversalCounters& dst,
+                                 const ResidualTraversalCounters& src) {
+    dst.visited_nodes += src.visited_nodes;
+    dst.accepted_nodes += src.accepted_nodes;
+    dst.opened_nodes += src.opened_nodes;
+    dst.direct_pair_evaluations += src.direct_pair_evaluations;
+    dst.cutoff_pruned_nodes += src.cutoff_pruned_nodes;
+    dst.cutoff_skipped_pairs += src.cutoff_skipped_pairs;
+    dst.remote_pairs_pruned_by_bounds += src.remote_pairs_pruned_by_bounds;
+  };
   if (!distributed_short_range) {
-    for (std::size_t active_i = 0; active_i < accumulator.active_particle_index.size(); ++active_i) {
-      const TreeLocalIndex particle_index = accumulator.active_particle_index[active_i];
-      const bool has_local_source_identity = particle_index < pos_x_comoving.size();
-      const double px = target_x(active_i);
-      const double py = target_y(active_i);
-      const double pz = target_z(active_i);
-      const double target_softening =
-          resolve_target_softening(active_i, particle_index);
-      const bool previous_acceleration_available =
-          !accumulator.previous_acceleration_magnitude_code.empty() &&
-          std::isfinite(accumulator.previous_acceleration_magnitude_code[active_i]);
-      const double previous_acceleration_magnitude_code = previous_acceleration_available
-          ? accumulator.previous_acceleration_magnitude_code[active_i]
-          : 0.0;
-      const auto local_accel = evaluateTargetAgainstLocalTree(
-          px,
-          py,
-          pz,
-          has_local_source_identity ? particle_index : 0U,
-          has_local_source_identity,
-          target_softening,
-          previous_acceleration_available,
-          previous_acceleration_magnitude_code);
-      accumulator.addToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
+    const std::size_t target_count = accumulator.active_particle_index.size();
+    const std::size_t block_count =
+        (target_count + k_residual_block_size - 1U) / k_residual_block_size;
+    std::fill(
+        m_worker_counter_storage.begin(), m_worker_counter_storage.end(),
+        ResidualTraversalCounters{});
+    std::fill(
+        m_block_sum_sq_storage.begin(), m_block_sum_sq_storage.end(), 0.0);
+    std::exception_ptr local_traversal_failure;
+    int region_observed_workers = 1;
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel
+    {
+#pragma omp single
+      {
+        region_observed_workers = omp_get_num_threads();
+      }
+#pragma omp for schedule(dynamic, 1)
+#endif
+    for (std::ptrdiff_t block = 0;
+         block < static_cast<std::ptrdiff_t>(block_count);
+         ++block) {
+      try {
+        const std::size_t block_begin =
+            static_cast<std::size_t>(block) * k_residual_block_size;
+        const std::size_t block_end =
+            std::min(block_begin + k_residual_block_size, target_count);
+        const std::size_t worker_slot = current_worker_slot();
+        BoundedTreeStack stack = worker_stack(worker_slot);
+        ResidualTraversalCounters& counters =
+            m_worker_counter_storage[worker_slot];
+        double local_sum_sq = 0.0;
+        for (std::size_t active_i = block_begin; active_i < block_end; ++active_i) {
+          const TreeLocalIndex particle_index =
+              accumulator.active_particle_index[active_i];
+          const bool has_local_source_identity =
+              particle_index < pos_x_comoving.size();
+          const double px = target_x(active_i);
+          const double py = target_y(active_i);
+          const double pz = target_z(active_i);
+          const double target_softening = targetSofteningEpsilonUnchecked(
+              active_i,
+              has_local_source_identity ? particle_index : 0U,
+              validated_target_softening);
+          const bool previous_acceleration_available =
+              !accumulator.previous_acceleration_magnitude_code.empty() &&
+              std::isfinite(accumulator.previous_acceleration_magnitude_code[active_i]);
+          const double previous_acceleration_magnitude_code = previous_acceleration_available
+              ? accumulator.previous_acceleration_magnitude_code[active_i]
+              : 0.0;
+          const auto local_accel = evaluateTargetAgainstLocalTree(
+              counters,
+              stack,
+              px,
+              py,
+              pz,
+              has_local_source_identity ? particle_index : 0U,
+              has_local_source_identity,
+              target_softening,
+              previous_acceleration_available,
+              previous_acceleration_magnitude_code);
+          accumulator.addToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
+          local_sum_sq +=
+              local_accel[0] * local_accel[0] + local_accel[1] * local_accel[1] +
+              local_accel[2] * local_accel[2];
+        }
+        m_block_sum_sq_storage[static_cast<std::size_t>(block)] = local_sum_sq;
+      } catch (...) {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp critical(tree_pm_residual_failure)
+#endif
+        {
+          if (!local_traversal_failure) {
+            local_traversal_failure = std::current_exception();
+          }
+        }
+      }
+    }
+#if COSMOSIM_HAVE_OPENMP
+    }
+#endif
+    observed_openmp_workers = std::max(observed_openmp_workers, region_observed_workers);
+    if (local_traversal_failure) {
+      std::rethrow_exception(local_traversal_failure);
+    }
+    for (const ResidualTraversalCounters& counters : m_worker_counter_storage) {
+      merge_counters(local_owned_targets, counters);
+    }
+    for (std::size_t block = 0; block < block_count; ++block) {
       m_last_residual_stats.local_short_range_sum_sq +=
-          local_accel[0] * local_accel[0] + local_accel[1] * local_accel[1] + local_accel[2] * local_accel[2];
+          m_block_sum_sq_storage[block];
     }
   }
 
@@ -3006,21 +3399,41 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     auto& received_response_count = m_tree_exchange_workspace.received_response_count;
 
     // Prefer the authoritative decomposition-domain leaves installed by the
-    // workflow. Moving sources are checked against that geometry before use; if
-    // they have escaped the current decomposition footprint, fall back to the
-    // conservative gravity-tree root until the next ownership update. This is a
-    // correctness fallback, not an equivalent capability tier.
+    // workflow when they are fresh for this source generation and cover every
+    // local source. A generation stamp mismatch, missing geometry, epoch
+    // mismatch, or coverage failure falls back to the conservative gravity-
+    // tree root packet and records a specific reason. This is a correctness
+    // fallback, not an equivalent capability tier.
     std::vector<parallel::TreePseudoParticlePacket> local_top_level_domain;
     bool local_authoritative_geometry = false;
+    TreePmDomainGeometryFallbackReason geometry_fallback_reason =
+        TreePmDomainGeometryFallbackReason::kNone;
+    std::uint64_t geometry_uncovered_source_count = 0U;
     std::exception_ptr local_domain_failure;
     try {
-      local_authoritative_geometry = authoritativeDomainCoversLocalSources(
-          options.authoritative_domain_leaves,
-          mpi_world_rank,
-          options.decomposition_epoch.value,
-          pos_x_comoving,
-          pos_y_comoving,
-          pos_z_comoving);
+      const bool geometry_generation_fresh =
+          options.authoritative_geometry_source_generation == options.source_generation;
+      if (geometry_generation_fresh && options.authoritative_domain_leaves.empty() &&
+          !pos_x_comoving.empty()) {
+        geometry_fallback_reason = TreePmDomainGeometryFallbackReason::kNoGeometryInstalled;
+      } else if (geometry_generation_fresh) {
+        const DomainCoverageResult coverage = authoritativeDomainCoversLocalSourcesEx(
+            options.authoritative_domain_leaves,
+            mpi_world_rank,
+            options.decomposition_epoch.value,
+            pos_x_comoving,
+            pos_y_comoving,
+            pos_z_comoving);
+        geometry_uncovered_source_count = coverage.uncovered_source_count;
+        local_authoritative_geometry = coverage.covered;
+        if (!coverage.covered) {
+          geometry_fallback_reason = coverage.epoch_mismatch
+              ? TreePmDomainGeometryFallbackReason::kDecompositionEpochMismatch
+              : TreePmDomainGeometryFallbackReason::kSourceCoverageFailure;
+        }
+      } else {
+        geometry_fallback_reason = TreePmDomainGeometryFallbackReason::kStaleSourceGeneration;
+      }
       if (local_authoritative_geometry) {
         local_top_level_domain = makeAuthoritativeTopDomainPackets(
             options.authoritative_domain_leaves,
@@ -3039,8 +3452,22 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       }
     } catch (...) {
       local_domain_failure = std::current_exception();
+      geometry_fallback_reason = TreePmDomainGeometryFallbackReason::kGeometryPreparationFailure;
     }
     coordinate_protocol_failure(local_domain_failure, "top-level domain preparation");
+
+    m_last_residual_stats.domain_geometry_source_generation =
+        options.authoritative_geometry_source_generation.value;
+    m_last_residual_stats.current_gravity_source_generation =
+        options.source_generation.value;
+    m_last_residual_stats.domain_geometry_fresh =
+        (options.authoritative_geometry_source_generation == options.source_generation) ? 1U : 0U;
+    m_last_residual_stats.domain_geometry_fallback_used =
+        local_authoritative_geometry ? 0U : 1U;
+    m_last_residual_stats.domain_geometry_fallback_reason =
+        static_cast<std::uint64_t>(geometry_fallback_reason);
+    m_last_residual_stats.domain_geometry_uncovered_source_count =
+        geometry_uncovered_source_count;
 
     const std::uint64_t local_domain_geometry_fingerprint =
         domainGeometryFingerprint(local_top_level_domain);
@@ -3290,11 +3717,25 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const std::size_t batch_size = std::min(
           max_requests_per_peer,
           local_remaining);
-      std::uint32_t batch_token = 0U;
-      int total_send_bytes = 0;
-      std::exception_ptr request_preparation_failure;
-      try {
-        if (batch_begin > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+       std::uint32_t batch_token = 0U;
+       int total_send_bytes = 0;
+       const std::size_t local_block_count =
+           (batch_size + k_residual_block_size - 1U) / k_residual_block_size;
+       std::exception_ptr request_preparation_failure;
+       try {
+         if (m_block_sum_sq_storage.size() < local_block_count) {
+           m_block_sum_sq_storage.resize(local_block_count, 0.0);
+         }
+         m_block_sum_sq_high_water_bytes = std::max<std::uint64_t>(
+             m_block_sum_sq_high_water_bytes,
+             core::ownedCapacityBytesForContainer(m_block_sum_sq_storage));
+         std::fill(
+             m_block_sum_sq_storage.begin(), m_block_sum_sq_storage.end(), 0.0);
+         std::fill(
+             m_worker_counter_storage.begin(), m_worker_counter_storage.end(),
+             ResidualTraversalCounters{});
+         if (batch_begin > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max()) ||
+
             batch_size > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
           throw std::overflow_error("TreePM short-range batch token or request ID exceeds packet capacity");
         }
@@ -3314,12 +3755,18 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         expected_response_count.assign(batch_size, 0U);
         received_response_count.assign(batch_size, 0U);
         for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
-        const TreeLocalIndex particle_index = accumulator.active_particle_index[batch_begin + batch_slot];
+        const TreeLocalIndex particle_index =
+            accumulator.active_particle_index[batch_begin + batch_slot];
+        const bool has_local_source_identity =
+            particle_index < pos_x_comoving.size();
         const double px = target_x(batch_begin + batch_slot);
         const double py = target_y(batch_begin + batch_slot);
         const double pz = target_z(batch_begin + batch_slot);
         const double target_softening =
-            resolve_target_softening(batch_begin + batch_slot, particle_index);
+            targetSofteningEpsilonUnchecked(
+                 batch_begin + batch_slot,
+                 has_local_source_identity ? particle_index : 0U,
+                 validated_target_softening);
         const bool previous_acceleration_available =
             !accumulator.previous_acceleration_magnitude_code.empty() &&
             std::isfinite(accumulator.previous_acceleration_magnitude_code[batch_begin + batch_slot]);
@@ -3443,11 +3890,13 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           communicated_with_peer[static_cast<std::size_t>(peer)] = 1U;
         }
       }
-      int total_recv_bytes = 0;
-      std::exception_ptr request_transport_preparation_failure;
-      MPI_Request request_payload_exchange = MPI_REQUEST_NULL;
-      try {
-        total_recv_bytes = populateMpiByteDisplacements(
+        int total_recv_bytes = 0;
+        std::exception_ptr request_transport_preparation_failure;
+        MPI_Request request_payload_exchange = MPI_REQUEST_NULL;
+        try {
+          total_recv_bytes = populateMpiByteDisplacements(
+
+
             recv_counts, recv_displs, "TreePM short-range request receive layout");
         recv_payload.resize(static_cast<std::size_t>(total_recv_bytes), 0U);
 
@@ -3491,43 +3940,115 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                 &request_payload_exchange),
             "TreePM sparse request MPI_Ineighbor_alltoallv");
 
-        // Useful local traversal overlaps the sparse remote request transfer.
-        const auto overlap_local_work_start = std::chrono::steady_clock::now();
-        for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
-        const TreeLocalIndex particle_index = accumulator.active_particle_index[batch_begin + batch_slot];
-        const bool has_local_source_identity = particle_index < pos_x_comoving.size();
-        const double target_softening =
-            resolve_target_softening(batch_begin + batch_slot, particle_index);
-        const bool previous_acceleration_available =
-            !accumulator.previous_acceleration_magnitude_code.empty() &&
-            std::isfinite(accumulator.previous_acceleration_magnitude_code[batch_begin + batch_slot]);
-        const double previous_acceleration_magnitude_code = previous_acceleration_available
-            ? accumulator.previous_acceleration_magnitude_code[batch_begin + batch_slot]
-            : 0.0;
-        const auto local_accel = evaluateTargetAgainstLocalTree(
-            target_x(batch_begin + batch_slot),
-            target_y(batch_begin + batch_slot),
-            target_z(batch_begin + batch_slot),
-            has_local_source_identity ? particle_index : 0U,
-            has_local_source_identity,
-            target_softening,
-            previous_acceleration_available,
-            previous_acceleration_magnitude_code);
-        accumulator.addToActiveSlot(batch_begin + batch_slot, local_accel[0], local_accel[1], local_accel[2]);
-        m_last_residual_stats.local_short_range_sum_sq +=
-            local_accel[0] * local_accel[0] + local_accel[1] * local_accel[1] + local_accel[2] * local_accel[2];
-        }
-        const double overlap_local_work_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - overlap_local_work_start).count();
-        m_last_residual_stats.let_overlap_local_work_ms += overlap_local_work_ms;
-        const auto request_wait_start = std::chrono::steady_clock::now();
-        requireTreePmMpiSuccess(
-            MPI_Wait(&request_payload_exchange, MPI_STATUS_IGNORE),
-            "TreePM sparse request MPI_Wait");
-        const double request_wait_ms = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - request_wait_start).count();
-        m_last_residual_stats.let_communication_wait_ms += request_wait_ms;
-        m_last_residual_stats.let_communication_ms += request_wait_ms;
+         const auto overlap_local_work_start = std::chrono::steady_clock::now();
+         {
+           std::exception_ptr overlap_local_failure;
+           int region_observed_workers = 1;
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel
+           {
+#pragma omp single
+             {
+               region_observed_workers = omp_get_num_threads();
+             }
+#pragma omp for schedule(dynamic, 1)
+#endif
+           for (std::ptrdiff_t block = 0;
+                block < static_cast<std::ptrdiff_t>(local_block_count);
+                ++block) {
+             try {
+               const std::size_t block_begin =
+                   static_cast<std::size_t>(block) * k_residual_block_size;
+               const std::size_t block_end =
+                   std::min(block_begin + k_residual_block_size, batch_size);
+               const std::size_t worker_slot = current_worker_slot();
+               BoundedTreeStack stack = worker_stack(worker_slot);
+               ResidualTraversalCounters& counters =
+                   m_worker_counter_storage[worker_slot];
+               double local_sum_sq = 0.0;
+               for (std::size_t batch_slot = block_begin;
+                    batch_slot < block_end;
+                    ++batch_slot) {
+                 const TreeLocalIndex particle_index =
+                     accumulator.active_particle_index[batch_begin + batch_slot];
+                 const bool has_local_source_identity =
+                     particle_index < pos_x_comoving.size();
+                 const double target_softening = targetSofteningEpsilonUnchecked(
+                     batch_begin + batch_slot,
+                     has_local_source_identity ? particle_index : 0U,
+                     validated_target_softening);
+                 const bool previous_acceleration_available =
+                     !accumulator.previous_acceleration_magnitude_code.empty() &&
+                     std::isfinite(
+                         accumulator.previous_acceleration_magnitude_code[
+                             batch_begin + batch_slot]);
+                 const double previous_acceleration_magnitude_code =
+                     previous_acceleration_available
+                         ? accumulator.previous_acceleration_magnitude_code[
+                               batch_begin + batch_slot]
+                         : 0.0;
+                 const auto local_accel = evaluateTargetAgainstLocalTree(
+                     counters,
+                     stack,
+                     target_x(batch_begin + batch_slot),
+                     target_y(batch_begin + batch_slot),
+                     target_z(batch_begin + batch_slot),
+                     has_local_source_identity ? particle_index : 0U,
+                     has_local_source_identity,
+                     target_softening,
+                     previous_acceleration_available,
+                     previous_acceleration_magnitude_code);
+                 accumulator.addToActiveSlot(
+                     batch_begin + batch_slot,
+                     local_accel[0],
+                     local_accel[1],
+                     local_accel[2]);
+                 local_sum_sq +=
+                     local_accel[0] * local_accel[0] +
+                     local_accel[1] * local_accel[1] +
+                     local_accel[2] * local_accel[2];
+               }
+               m_block_sum_sq_storage[static_cast<std::size_t>(block)] =
+                   local_sum_sq;
+             } catch (...) {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp critical(tree_pm_overlap_failure)
+#endif
+               {
+                 if (!overlap_local_failure) {
+                   overlap_local_failure = std::current_exception();
+                 }
+               }
+             }
+           }
+#if COSMOSIM_HAVE_OPENMP
+           }
+#endif
+           observed_openmp_workers = std::max(
+               observed_openmp_workers, region_observed_workers);
+           if (overlap_local_failure) {
+             std::rethrow_exception(overlap_local_failure);
+           }
+           for (const ResidualTraversalCounters& counters : m_worker_counter_storage) {
+             merge_counters(local_owned_targets, counters);
+           }
+           for (std::size_t block = 0; block < local_block_count; ++block) {
+             m_last_residual_stats.local_short_range_sum_sq +=
+                 m_block_sum_sq_storage[block];
+           }
+         }
+         const double overlap_local_work_ms = std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - overlap_local_work_start).count();
+         m_last_residual_stats.let_overlap_local_work_ms += overlap_local_work_ms;
+         const auto request_wait_start = std::chrono::steady_clock::now();
+         requireTreePmMpiSuccess(
+             MPI_Wait(&request_payload_exchange, MPI_STATUS_IGNORE),
+             "TreePM sparse request MPI_Wait");
+         const double request_wait_ms = std::chrono::duration<double, std::milli>(
+             std::chrono::steady_clock::now() - request_wait_start).count();
+         m_last_residual_stats.let_communication_wait_ms += request_wait_ms;
+         m_last_residual_stats.let_communication_ms += request_wait_ms;
+
       } catch (...) {
         if (request_payload_exchange != MPI_REQUEST_NULL) {
           MPI_Wait(&request_payload_exchange, MPI_STATUS_IGNORE);
@@ -3581,7 +4102,17 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       int total_response_send_bytes = 0;
       int total_response_recv_bytes = 0;
       std::exception_ptr request_validation_failure;
-      const auto remote_traversal_start = std::chrono::steady_clock::now();
+      // Four non-overlapping remote-phase scopes: response layout/payload
+      // sizing (protocol_validation_ms), incoming request decode/validation,
+      // pure incoming tree compute, and response encode/pack. Consensus and
+      // the response exchange stay separate after this block, so no scope
+      // double-counts and the compute timer surrounds only target force
+      // evaluation.
+      const auto remote_phase_start = std::chrono::steady_clock::now();
+      double protocol_validation_ms_batch = 0.0;
+      double incoming_decode_validation_ms_batch = 0.0;
+      double incoming_compute_ms_batch = 0.0;
+      double incoming_encode_pack_ms_batch = 0.0;
       try {
       std::fill(response_send_counts.begin(), response_send_counts.end(), 0);
       std::fill(response_send_displs.begin(), response_send_displs.end(), 0);
@@ -3613,6 +4144,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           response_recv_counts, response_recv_displs, "TreePM short-range response receive layout");
 
       response_send_payload.assign(static_cast<std::size_t>(total_response_send_bytes), 0U);
+      response_recv_payload.resize(static_cast<std::size_t>(total_response_recv_bytes), 0U);
+      protocol_validation_ms_batch = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - remote_phase_start).count();
       for (int peer = 0; peer < mpi_world_size; ++peer) {
         const int peer_recv_bytes = recv_counts[static_cast<std::size_t>(peer)];
         if (peer_recv_bytes == 0) {
@@ -3621,57 +4155,142 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         const std::span<const std::uint8_t> peer_request_bytes(
             recv_payload.data() + recv_displs[static_cast<std::size_t>(peer)],
             static_cast<std::size_t>(peer_recv_bytes));
+
+        // A. Request decode, identity/duplicate/finite validation, and
+        // response structure preparation (metadata only; no accelerations).
+        // Throwing validation stays on the main thread before OpenMP compute.
+        const auto decode_validation_start = std::chrono::steady_clock::now();
         const std::vector<ShortRangeTargetRequestPacket> peer_requests =
             decodeShortRangeRequests(peer_request_bytes);
-
         std::vector<ShortRangeTargetResponsePacket> peer_responses;
         peer_responses.reserve(peer_requests.size());
-        std::unordered_set<std::uint64_t> peer_target_identities;
-        peer_target_identities.reserve(peer_requests.size());
-        for (const ShortRangeTargetRequestPacket& request : peer_requests) {
-          if (request.wire_version != k_short_range_wire_version || request.origin_rank != peer ||
-              request.destination_rank != mpi_world_rank || request.exchange_sequence != exchange_sequence ||
-              request.decomposition_epoch != options.decomposition_epoch.value || request.force_epoch != options.force_epoch.sequence ||
-              request.batch_token != batch_token || request.request_id >= max_requests_per_peer ||
-              request.target_identity != static_cast<std::uint64_t>(request.batch_token) + request.request_id ||
-              (request.flags & ~k_short_range_flag_previous_acceleration) != 0U) {
-            throw std::runtime_error("TreePM short-range request protocol identity mismatch");
+        {
+          std::unordered_set<std::uint64_t> peer_target_identities;
+          peer_target_identities.reserve(peer_requests.size());
+          for (const ShortRangeTargetRequestPacket& request : peer_requests) {
+            if (request.wire_version != k_short_range_wire_version || request.origin_rank != peer ||
+                request.destination_rank != mpi_world_rank || request.exchange_sequence != exchange_sequence ||
+                request.decomposition_epoch != options.decomposition_epoch.value || request.force_epoch != options.force_epoch.sequence ||
+                request.batch_token != batch_token || request.request_id >= max_requests_per_peer ||
+                request.target_identity != static_cast<std::uint64_t>(request.batch_token) + request.request_id ||
+                (request.flags & ~k_short_range_flag_previous_acceleration) != 0U) {
+              throw std::runtime_error("TreePM short-range request protocol identity mismatch");
+            }
+            if (!peer_target_identities.insert(request.target_identity).second) {
+              throw std::runtime_error("TreePM short-range request contains a duplicate target identity");
+            }
+            if (!std::isfinite(request.target_x_comoving) || !std::isfinite(request.target_y_comoving) ||
+                !std::isfinite(request.target_z_comoving) ||
+                !std::isfinite(request.target_softening_epsilon_comoving) ||
+                request.target_softening_epsilon_comoving < 0.0 ||
+                !std::isfinite(request.previous_acceleration_magnitude)) {
+              throw std::runtime_error("TreePM short-range request contains invalid numeric data");
+            }
+            peer_responses.push_back(ShortRangeTargetResponsePacket{
+                .wire_version = k_short_range_wire_version,
+                .target_owner_rank = request.origin_rank,
+                .source_rank = mpi_world_rank,
+                .flags = request.flags,
+                .batch_token = request.batch_token,
+                .request_id = request.request_id,
+                .exchange_sequence = request.exchange_sequence,
+                .decomposition_epoch = request.decomposition_epoch,
+                .force_epoch = request.force_epoch,
+                .target_identity = request.target_identity,
+            });
           }
-          if (!peer_target_identities.insert(request.target_identity).second) {
-            throw std::runtime_error("TreePM short-range request contains a duplicate target identity");
-          }
-          if (!std::isfinite(request.target_x_comoving) || !std::isfinite(request.target_y_comoving) ||
-              !std::isfinite(request.target_z_comoving) ||
-              !std::isfinite(request.target_softening_epsilon_comoving) ||
-              request.target_softening_epsilon_comoving < 0.0 ||
-              !std::isfinite(request.previous_acceleration_magnitude)) {
-            throw std::runtime_error("TreePM short-range request contains invalid numeric data");
-          }
-          const auto remote_accel = evaluateTargetAgainstLocalTree(
-              request.target_x_comoving,
-              request.target_y_comoving,
-              request.target_z_comoving,
-              0U,
-              false,
-              request.target_softening_epsilon_comoving,
-              (request.flags & k_short_range_flag_previous_acceleration) != 0U,
-              request.previous_acceleration_magnitude);
-          peer_responses.push_back(ShortRangeTargetResponsePacket{
-              .wire_version = k_short_range_wire_version,
-              .target_owner_rank = request.origin_rank,
-              .source_rank = mpi_world_rank,
-              .flags = request.flags,
-              .batch_token = request.batch_token,
-              .request_id = request.request_id,
-              .exchange_sequence = request.exchange_sequence,
-              .decomposition_epoch = request.decomposition_epoch,
-              .force_epoch = request.force_epoch,
-              .target_identity = request.target_identity,
-              .accel_x_comoving = remote_accel[0],
-              .accel_y_comoving = remote_accel[1],
-              .accel_z_comoving = remote_accel[2],
-          });
         }
+        incoming_decode_validation_ms_batch += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - decode_validation_start).count();
+
+        // B. Pure incoming tree compute: evaluated targets only. The direct
+        // acceleration write into the already-prepared response slot is
+        // inseparable from recording the evaluation result. No decode, hash,
+        // validation, serialization, or communication lives in this scope.
+        // MPI remains main-thread only (MPI_THREAD_FUNNELED): OpenMP workers
+        // write only peer_responses[*].accel_{x,y,z}_comoving.
+        const auto incoming_compute_start = std::chrono::steady_clock::now();
+        {
+          const std::size_t incoming_count = peer_requests.size();
+          const std::size_t incoming_block_count =
+              (incoming_count + k_residual_block_size - 1U) / k_residual_block_size;
+          std::fill(
+              m_worker_counter_storage.begin(), m_worker_counter_storage.end(),
+              ResidualTraversalCounters{});
+          std::exception_ptr incoming_compute_failure;
+          int region_observed_workers = 1;
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel
+          {
+#pragma omp single
+            {
+              region_observed_workers = omp_get_num_threads();
+            }
+#pragma omp for schedule(dynamic, 1)
+#endif
+          for (std::ptrdiff_t block = 0;
+               block < static_cast<std::ptrdiff_t>(incoming_block_count);
+               ++block) {
+            try {
+              const std::size_t block_begin =
+                  static_cast<std::size_t>(block) * k_residual_block_size;
+              const std::size_t block_end =
+                  std::min(block_begin + k_residual_block_size, incoming_count);
+              const std::size_t worker_slot = current_worker_slot();
+              BoundedTreeStack stack = worker_stack(worker_slot);
+              ResidualTraversalCounters& counters =
+                  m_worker_counter_storage[worker_slot];
+              for (std::size_t peer_slot = block_begin;
+                   peer_slot < block_end;
+                   ++peer_slot) {
+                const ShortRangeTargetRequestPacket& request =
+                    peer_requests[peer_slot];
+                const auto remote_accel = evaluateTargetAgainstLocalTree(
+                    counters,
+                    stack,
+                    request.target_x_comoving,
+                    request.target_y_comoving,
+                    request.target_z_comoving,
+                    0U,
+                    false,
+                    request.target_softening_epsilon_comoving,
+                    (request.flags & k_short_range_flag_previous_acceleration) != 0U,
+                    request.previous_acceleration_magnitude);
+                peer_responses[peer_slot].accel_x_comoving = remote_accel[0];
+                peer_responses[peer_slot].accel_y_comoving = remote_accel[1];
+                peer_responses[peer_slot].accel_z_comoving = remote_accel[2];
+              }
+            } catch (...) {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp critical(tree_pm_incoming_failure)
+#endif
+              {
+                if (!incoming_compute_failure) {
+                  incoming_compute_failure = std::current_exception();
+                }
+              }
+            }
+          }
+#if COSMOSIM_HAVE_OPENMP
+          }
+#endif
+          observed_openmp_workers = std::max(
+              observed_openmp_workers, region_observed_workers);
+          if (incoming_compute_failure) {
+            std::rethrow_exception(incoming_compute_failure);
+          }
+          for (const ResidualTraversalCounters& counters : m_worker_counter_storage) {
+            merge_counters(incoming_remote_targets, counters);
+          }
+          incoming_evaluated_target_count +=
+              static_cast<std::uint64_t>(incoming_count);
+        }
+        incoming_compute_ms_batch += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - incoming_compute_start).count();
+
+        // C. Response byte encoding, size check, and direct pack into the
+        // response send payload.
+        const auto encode_pack_start = std::chrono::steady_clock::now();
         const auto encoded_responses =
             encodeShortRangeResponses(
                 std::span<const ShortRangeTargetResponsePacket>(peer_responses.data(), peer_responses.size()));
@@ -3682,15 +4301,26 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             encoded_responses.begin(),
             encoded_responses.end(),
             response_send_payload.begin() + response_send_displs[static_cast<std::size_t>(peer)]);
+        incoming_encode_pack_ms_batch += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - encode_pack_start).count();
       }
-      response_recv_payload.resize(static_cast<std::size_t>(total_response_recv_bytes), 0U);
       } catch (...) {
         request_validation_failure = std::current_exception();
       }
+      const auto consensus_start = std::chrono::steady_clock::now();
       coordinate_protocol_failure(
           request_validation_failure, "received request");
-      m_last_residual_stats.let_remote_traversal_ms += std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - remote_traversal_start).count();
+      const double protocol_consensus_ms_batch = std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - consensus_start).count();
+      m_last_residual_stats.protocol_validation_ms += protocol_validation_ms_batch;
+      m_last_residual_stats.incoming_request_decode_validation_ms +=
+          incoming_decode_validation_ms_batch;
+      m_last_residual_stats.incoming_remote_target_compute_ms += incoming_compute_ms_batch;
+      m_last_residual_stats.incoming_response_encode_pack_ms += incoming_encode_pack_ms_batch;
+      m_last_residual_stats.protocol_consensus_ms += protocol_consensus_ms_batch;
+      // Compatibility alias: previously the inclusive validation+compute+
+      // consensus span; now incoming-target compute only.
+      m_last_residual_stats.let_remote_traversal_ms += incoming_compute_ms_batch;
 
       std::vector<int> neighbor_response_send_counts(sparse_peer_graph->outgoing_peers.size(), 0);
       std::vector<int> neighbor_response_send_displs(sparse_peer_graph->outgoing_peers.size(), 0);
@@ -3739,6 +4369,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       } catch (...) {
         response_communication_failure = std::current_exception();
       }
+      m_last_residual_stats.response_exchange_ms += std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - response_communication_start).count();
       coordinate_protocol_failure(
           response_communication_failure, "sparse response exchange");
       m_last_residual_stats.let_communication_ms += std::chrono::duration<double, std::milli>(
@@ -3752,13 +4384,70 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       m_last_residual_stats.remote_response_bytes += static_cast<std::uint64_t>(response_recv_payload.size());
       m_last_residual_stats.let_wire_bytes_sent += static_cast<std::uint64_t>(total_response_send_bytes);
       m_last_residual_stats.let_wire_bytes_received += static_cast<std::uint64_t>(total_response_recv_bytes);
-      const std::uint64_t let_workspace_bytes =
+      const std::uint64_t let_wire_buffer_bytes =
           static_cast<std::uint64_t>(send_payload.capacity()) +
           static_cast<std::uint64_t>(recv_payload.capacity()) +
           static_cast<std::uint64_t>(response_send_payload.capacity()) +
           static_cast<std::uint64_t>(response_recv_payload.capacity());
+      // Known live set beyond the four wire buffers. Retained CHUÍ-owned
+      // storage is read from actual vector capacity (host sizeof for packets;
+      // wire/host identity is static_assert-enforced), so a previously larger
+      // batch's retained capacity is not under-reported by the current
+      // batch_size. Transient codec bytes are modeled from batch_size as a
+      // conservative upper envelope of per-target encode/decode workspace
+      // that coexists with the wire buffers during prepare/validate, not as
+      // an exact observed simultaneous peak. Allocator overhead for the
+      // duplicate-identity unordered_set is excluded and remains uncertain.
+      std::uint64_t let_structured_request_bytes = 0U;
+      for (const std::vector<ShortRangeTargetRequestPacket>& peer_requests : requests_by_peer) {
+        let_structured_request_bytes +=
+            static_cast<std::uint64_t>(peer_requests.capacity()) *
+            static_cast<std::uint64_t>(sizeof(ShortRangeTargetRequestPacket));
+      }
+      std::uint64_t let_response_mask_bytes =
+          static_cast<std::uint64_t>(
+              response_expected_by_peer.capacity() + response_seen_by_peer.capacity()) *
+          static_cast<std::uint64_t>(sizeof(std::vector<std::uint8_t>));
+      for (const std::vector<std::uint8_t>& mask : response_expected_by_peer) {
+        let_response_mask_bytes += static_cast<std::uint64_t>(mask.capacity());
+      }
+      for (const std::vector<std::uint8_t>& mask : response_seen_by_peer) {
+        let_response_mask_bytes += static_cast<std::uint64_t>(mask.capacity());
+      }
+      const std::uint64_t let_response_count_bytes =
+          static_cast<std::uint64_t>(
+              expected_response_count.capacity() + received_response_count.capacity()) *
+          static_cast<std::uint64_t>(sizeof(std::uint32_t));
+      const std::uint64_t let_remote_accumulator_bytes =
+          static_cast<std::uint64_t>(
+              remote_batch_ax.capacity() + remote_batch_ay.capacity() +
+              remote_batch_az.capacity()) *
+          static_cast<std::uint64_t>(sizeof(double));
+      const std::uint64_t let_rank_metadata_bytes =
+          static_cast<std::uint64_t>(
+              send_counts.capacity() + recv_counts.capacity() +
+              send_displs.capacity() + recv_displs.capacity() +
+              response_send_counts.capacity() + response_recv_counts.capacity() +
+              response_send_displs.capacity() + response_recv_displs.capacity()) *
+          static_cast<std::uint64_t>(sizeof(int));
+      const std::uint64_t let_transient_codec_bytes =
+          static_cast<std::uint64_t>(batch_size) *
+          (2U * (k_short_range_request_wire_bytes + k_short_range_response_wire_bytes) + 24U);
+      std::uint64_t let_known_workspace_bytes = let_wire_buffer_bytes;
+      let_known_workspace_bytes += let_structured_request_bytes;
+      let_known_workspace_bytes += let_response_mask_bytes;
+      let_known_workspace_bytes += let_response_count_bytes;
+      let_known_workspace_bytes += let_remote_accumulator_bytes;
+      let_known_workspace_bytes += let_rank_metadata_bytes;
+      let_known_workspace_bytes += let_transient_codec_bytes;
+      m_last_residual_stats.let_wire_buffer_high_water_bytes =
+          std::max(m_last_residual_stats.let_wire_buffer_high_water_bytes, let_wire_buffer_bytes);
+      // Compatibility alias: wire-buffer high-water only.
       m_last_residual_stats.let_high_water_bytes =
-          std::max(m_last_residual_stats.let_high_water_bytes, let_workspace_bytes);
+          m_last_residual_stats.let_wire_buffer_high_water_bytes;
+      m_last_residual_stats.let_known_workspace_high_water_bytes =
+          std::max(m_last_residual_stats.let_known_workspace_high_water_bytes,
+                   let_known_workspace_bytes);
       {
         std::uint64_t response_max = 0;
         for (int peer = 0; peer < mpi_world_size; ++peer) {
@@ -3875,10 +4564,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 #endif
 
   if (tree_profile != nullptr) {
-    tree_profile->visited_nodes += visited_nodes;
-    tree_profile->accepted_nodes += accepted_nodes;
-    tree_profile->opened_nodes += opened_nodes;
-    tree_profile->particle_particle_interactions += pp_interactions;
+    tree_profile->visited_nodes +=
+        local_owned_targets.visited_nodes + incoming_remote_targets.visited_nodes;
+    tree_profile->accepted_nodes +=
+        local_owned_targets.accepted_nodes + incoming_remote_targets.accepted_nodes;
+    tree_profile->opened_nodes +=
+        local_owned_targets.opened_nodes + incoming_remote_targets.opened_nodes;
+    tree_profile->particle_particle_interactions +=
+        local_owned_targets.direct_pair_evaluations +
+        incoming_remote_targets.direct_pair_evaluations;
     tree_profile->traversal_ms +=
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - traversal_start).count();
     tree_profile->traversed_target_count +=
@@ -3889,9 +4583,26 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           static_cast<double>(tree_profile->traversed_target_count);
     }
   }
-  m_last_residual_stats.pruned_nodes = cutoff_pruned_nodes;
-  m_last_residual_stats.pair_skips_cutoff = cutoff_pair_skips;
-  m_last_residual_stats.pair_evaluations = pp_interactions;
+  m_last_residual_stats.pruned_nodes =
+      local_owned_targets.cutoff_pruned_nodes + incoming_remote_targets.cutoff_pruned_nodes;
+  m_last_residual_stats.pair_skips_cutoff =
+      local_owned_targets.cutoff_skipped_pairs + incoming_remote_targets.cutoff_skipped_pairs;
+  m_last_residual_stats.local_pair_evaluations = local_owned_targets.direct_pair_evaluations;
+  m_last_residual_stats.incoming_remote_pair_evaluations =
+      incoming_remote_targets.direct_pair_evaluations;
+  m_last_residual_stats.pair_evaluations =
+      m_last_residual_stats.local_pair_evaluations +
+      m_last_residual_stats.incoming_remote_pair_evaluations;
+  // Evaluator-side remote cutoff prunes were previously mutated on shared
+  // coordinator stats inside the traversal; they now arrive via the counters
+  // bundles and are merged here after join. Request-path peer-bound prunes
+  // already wrote m_last_residual_stats on the main thread.
+  m_last_residual_stats.remote_pairs_pruned_by_bounds +=
+      local_owned_targets.remote_pairs_pruned_by_bounds +
+      incoming_remote_targets.remote_pairs_pruned_by_bounds;
+  m_last_residual_stats.incoming_remote_target_evaluations = incoming_evaluated_target_count;
+  m_last_residual_stats.openmp_observed_workers =
+      static_cast<std::uint64_t>(std::max(1, observed_openmp_workers));
 }
 
 TreePmDiagnostics computeTreePmDiagnostics(const TreePmSplitPolicy& split_policy) {
