@@ -85,9 +85,22 @@ class GravityRuntime : public GravityAccelerationProvider,
   virtual void shutdownMpiResources() = 0;
 
   virtual void restoreDecompositionEpoch(std::uint64_t decomposition_epoch) = 0;
+  // Advances the decomposition epoch and explicitly invalidates authoritative
+  // top-domain geometry freshness: after this call and before a reinstall,
+  // authoritativeDomainGeometryMatches(...) is false. Ownership data,
+  // migration state, and the epoch itself are not cleared.
   virtual void commitParticleDecompositionChange() = 0;
+  // Install authoritative top-domain leaves at segment/restart/ownership-
+  // change boundaries together with the physical source generation they
+  // cover. Replaces both the stable seed leaf set (decomposition-local
+  // identities/SFC intervals used as the refit seed) and the current
+  // published leaf set. Geometry freshness is source_generation equality,
+  // independent of ownership decomposition_epoch.
   virtual void installAuthoritativeTopDomainLeaves(
-      std::span<const parallel::TopDomainLeaf> leaves) = 0;
+      std::span<const parallel::TopDomainLeaf> leaves,
+      std::uint64_t source_generation) = 0;
+  [[nodiscard]] virtual bool authoritativeDomainGeometryMatches(
+      std::uint64_t source_generation) const noexcept = 0;
   virtual void importRestartForceCache(
       const io::GravityForceCachePersistentState& cache,
       const core::SimulationState& state) = 0;

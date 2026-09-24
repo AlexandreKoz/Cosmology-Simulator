@@ -12,6 +12,8 @@
 
 namespace cosmosim::gravity {
 
+inline constexpr std::uint32_t kMaximumTreeDepth = 64U;
+
 enum class TreeOpeningCriterion {
   kBarnesHutGeometric,
   kBarnesHutComDistance,
@@ -163,6 +165,13 @@ class TreeGravitySolver {
   [[nodiscard]] const TreeNodeSoa& nodes() const;
   [[nodiscard]] const TreeMortonOrdering& ordering() const;
   [[nodiscard]] TreeBuildGeneration treeBuildGeneration() const noexcept;
+  // Build-time resolved source softening. Worker-safe residual evaluation must
+  // read these prevalidated values instead of re-entering throwing resolvers
+  // on the hot path.
+  [[nodiscard]] std::span<const double> resolvedSourceSofteningEpsilon() const noexcept;
+  // Maximum octree depth recorded at build. Used to size bounded residual
+  // traversal stacks as S = 1 + 7 * depth without per-target growth.
+  [[nodiscard]] std::uint32_t maxDepth() const noexcept;
   void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 
  private:
@@ -178,6 +187,7 @@ class TreeGravitySolver {
       double center_y_comoving,
       double center_z_comoving,
       double half_size_comoving,
+      std::uint32_t depth,
       const TreeGravityOptions& options);
   void accumulateMultipoles(
       std::span<const double> pos_x_comoving,
@@ -195,6 +205,7 @@ class TreeGravitySolver {
   GravitySourceGeneration m_build_source_generation{};
   TreeBuildGeneration m_tree_build_generation{};
   std::size_t m_node_capacity_high_water = 0U;
+  std::uint32_t m_max_depth = 0U;
   std::uint64_t m_build_source_fingerprint = 0;
   TreeMultipoleOrder m_build_multipole_order = TreeMultipoleOrder::kMonopole;
   std::size_t m_build_max_leaf_size = 0;

@@ -19,6 +19,7 @@
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/constants.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/units.hpp"
@@ -983,14 +984,43 @@ void TimeCoordinator::runRungZeroSegment(
   ensureSchedulersCoverState(state, particle_scheduler, gas_cell_scheduler);
 
   const auto install_authoritative_domain_geometry = [&]() {
-    const auto leaves = m_migration_balance.authoritativeTopDomainLeaves(
-        state, m_gravity.decompositionEpoch());
-    m_gravity.installAuthoritativeTopDomainLeaves(leaves);
+    std::exception_ptr install_failure;
+    try {
+      core::MemoryReservation geometry_reservation;
+      {
+        const auto leaves = m_migration_balance.authoritativeTopDomainLeaves(
+            state, m_gravity.decompositionEpoch(), &geometry_reservation);
+        m_gravity.installAuthoritativeTopDomainLeaves(
+            leaves, state.gravitySourceGeneration());
+      }
+      if (geometry_reservation.valid()) {
+        const std::array geometry_reports{
+            core::collectSimulationMemoryReport(state),
+            core::collectSchedulerMemoryReport(
+                particle_scheduler, gas_cell_scheduler),
+            m_gravity.memoryReport(),
+            m_hydro_amr.memoryReport(),
+            m_source.memoryReport()};
+        geometry_reservation.reconcileBaselineOwnedAndRelease(
+            core::memoryReportBaselineOwnedBytes(
+                core::mergeMemoryReports(geometry_reports)));
+      }
+    } catch (...) {
+      install_failure = std::current_exception();
+    }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(
+        install_failure, "authoritative top-domain installation");
   };
-  // Domain geometry is a decomposition-owned contract. Install it once at the
-  // segment boundary (including restart) and again only after ownership
-  // decomposition changes. TreePM validates that moving local sources remain
-  // inside the advertised leaves and falls back conservatively if not.
+  // Domain geometry is a decomposition-owned contract. Install at the segment
+  // boundary (including restart) and again only after ownership decomposition
+  // changes; each install replaces both the stable seed leaf set and the
+  // current published set. commitParticleDecompositionChange() explicitly
+  // invalidates geometry freshness first, so stale routing geometry is never
+  // consumable between commit and reinstall. Between those events
+  // GravityRuntime refits published leaf bounds from the unchanged seed set
+  // against the current source generation before each force solve; TreePM
+  // validates freshness (generation equality) and the existing conservative
+  // coverage check before routing.
   install_authoritative_domain_geometry();
 
   const std::uint64_t run_start_step_index = integrator_state.step_index;

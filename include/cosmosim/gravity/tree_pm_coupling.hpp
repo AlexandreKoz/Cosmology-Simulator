@@ -15,6 +15,49 @@
 
 namespace cosmosim::gravity {
 
+// Short-range exchange wire record widths. The coordinator's host packet
+// structs are layout-compatible with these widths on supported ABIs; that
+// identity is compile-time enforced by static_assert next to the packet
+// definitions in tree_pm_coupling.cpp, so a padding change on a supported ABI
+// fails the build instead of silently letting wire bytes stand in for host
+// object bytes. Gravity memory estimation reuses the same constants so
+// protocol and budget arithmetic cannot drift apart.
+inline constexpr std::size_t kTreePmShortRangeRequestWireBytes = 96U;
+inline constexpr std::size_t kTreePmShortRangeResponseWireBytes = 80U;
+inline constexpr std::size_t kTreePmResidualBlockSize = 64U;
+inline constexpr std::size_t kTreePmResidualCounterBytes =
+    sizeof(std::uint64_t) * 7U;
+
+// Why TreePM declined the installed authoritative top-domain geometry and
+// used the conservative local-tree root packet instead.
+enum class TreePmDomainGeometryFallbackReason : std::uint32_t {
+  kNone = 0,
+  kNoGeometryInstalled = 1,
+  kStaleSourceGeneration = 2,
+  kDecompositionEpochMismatch = 3,
+  kSourceCoverageFailure = 4,
+  kGeometryPreparationFailure = 5,
+};
+
+[[nodiscard]] inline const char* treePmDomainGeometryFallbackReasonName(
+    TreePmDomainGeometryFallbackReason reason) noexcept {
+  switch (reason) {
+    case TreePmDomainGeometryFallbackReason::kNone:
+      return "none";
+    case TreePmDomainGeometryFallbackReason::kNoGeometryInstalled:
+      return "no_geometry_installed";
+    case TreePmDomainGeometryFallbackReason::kStaleSourceGeneration:
+      return "stale_source_generation";
+    case TreePmDomainGeometryFallbackReason::kDecompositionEpochMismatch:
+      return "decomposition_epoch_mismatch";
+    case TreePmDomainGeometryFallbackReason::kSourceCoverageFailure:
+      return "source_coverage_failure";
+    case TreePmDomainGeometryFallbackReason::kGeometryPreparationFailure:
+      return "geometry_preparation_failure";
+  }
+  return "unknown";
+}
+
 // Shared compact active-set view for force accumulation ownership.
 struct TreePmForceAccumulatorView {
   // By default each active index identifies a local source particle and its
@@ -63,6 +106,11 @@ struct TreePmOptions {
   // workflow owns this token; it must advance when source positions/masses or
   // source membership change.
   GravitySourceGeneration source_generation{};
+  // Source generation the installed authoritative top-domain leaves were
+  // refit against. TreePM uses authoritative geometry only when this equals
+  // source_generation; otherwise it falls back conservatively and reports
+  // TreePmDomainGeometryFallbackReason::kStaleSourceGeneration.
+  GravitySourceGeneration authoritative_geometry_source_generation{};
   PmFieldVersion pm_field_version{};
   ForceEvaluationEpoch force_epoch{};
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
@@ -79,6 +127,13 @@ struct TreePmDiagnostics {
   std::uint64_t communicating_peer_count = 0;
   std::uint64_t top_level_domain_leaf_count = 0;
   std::uint64_t authoritative_domain_leaf_count = 0;
+  // Authoritative top-domain geometry lifecycle for this force solve.
+  std::uint64_t domain_geometry_source_generation = 0;
+  std::uint64_t current_gravity_source_generation = 0;
+  std::uint64_t domain_geometry_fresh = 0;
+  std::uint64_t domain_geometry_fallback_used = 0;
+  std::uint64_t domain_geometry_fallback_reason = 0;
+  std::uint64_t domain_geometry_uncovered_source_count = 0;
   std::uint64_t domain_hierarchy_node_count = 0;
   std::uint64_t domain_cache_hit_count = 0;
   std::uint64_t domain_cache_miss_count = 0;
@@ -89,14 +144,30 @@ struct TreePmDiagnostics {
   std::uint64_t let_imported_target_count = 0;
   std::uint64_t let_wire_bytes_sent = 0;
   std::uint64_t let_wire_bytes_received = 0;
+  // Compatibility alias: four-wire-buffer high-water only.
   std::uint64_t let_high_water_bytes = 0;
+  std::uint64_t let_wire_buffer_high_water_bytes = 0;
+  std::uint64_t let_known_workspace_high_water_bytes = 0;
   double let_discovery_ms = 0.0;
   double let_graph_setup_ms = 0.0;
   double let_communication_ms = 0.0;
   double let_overlap_local_work_ms = 0.0;
   double let_communication_wait_ms = 0.0;
   double let_overlap_efficiency = 0.0;
+  // Incoming short-range remote-phase timer split. The compute timer
+  // surrounds only validated incoming target force evaluation against this
+  // rank's local tree; request decode/validation and response encode/pack are
+  // separate timers, as are consensus and response exchange. The compatibility
+  // alias let_remote_traversal_ms carries incoming compute only and never
+  // decode+validation+hash+tree+encode as "traversal."
   double let_remote_traversal_ms = 0.0;
+  double incoming_request_decode_validation_ms = 0.0;
+  double incoming_remote_target_compute_ms = 0.0;
+  double incoming_response_encode_pack_ms = 0.0;
+  // Response count/displacement layout and response payload buffer sizing.
+  double protocol_validation_ms = 0.0;
+  double protocol_consensus_ms = 0.0;
+  double response_exchange_ms = 0.0;
   std::uint64_t pm_solve_count = 0;
   std::uint64_t pm_reuse_count = 0;
   std::uint64_t pm_halo_value_count = 0;
@@ -116,7 +187,14 @@ struct TreePmDiagnostics {
   double max_relative_composition_error = 0.0;
   std::uint64_t residual_pruned_nodes = 0;
   std::uint64_t residual_pair_skips_cutoff = 0;
+  // Exact pair-evaluation truth: residual_pair_evaluations =
+  // local_pair_evaluations + incoming_remote_pair_evaluations. Local counts
+  // targets owned by this rank; incoming counts remote targets evaluated
+  // against this rank's tree. tree_profile.particle_particle_interactions
+  // remains the combined residual total for downstream profile consumers.
   std::uint64_t residual_pair_evaluations = 0;
+  std::uint64_t local_pair_evaluations = 0;
+  std::uint64_t incoming_remote_pair_evaluations = 0;
   std::uint64_t residual_remote_request_packets = 0;
   std::uint64_t residual_remote_response_packets = 0;
   std::uint64_t residual_remote_request_bytes = 0;
@@ -126,6 +204,14 @@ struct TreePmDiagnostics {
   std::uint64_t residual_remote_targets_with_requests = 0;
   std::uint64_t residual_remote_targets_without_requests = 0;
   std::uint64_t residual_remote_pairs_pruned_by_bounds = 0;
+  // OpenMP residual execution provenance for this solve. Scratch high-water is
+  // the retained contiguous worker-stack capacity, not a per-target estimate.
+  std::uint64_t openmp_compiled = 0;
+  std::uint64_t openmp_configured_workers = 0;
+  std::uint64_t openmp_observed_workers = 0;
+  std::uint64_t residual_local_target_count = 0;
+  std::uint64_t residual_incoming_target_count = 0;
+  std::uint64_t residual_worker_scratch_high_water_bytes = 0;
   std::uint64_t residual_remote_request_packets_max_peer = 0;
   std::uint64_t residual_remote_response_packets_max_peer = 0;
   double residual_remote_request_packet_imbalance_ratio = 0.0;
@@ -163,6 +249,12 @@ struct TreePmProfileEvent {
   double let_communication_wait_ms = 0.0;
   double let_overlap_efficiency = 0.0;
   double remote_traversal_ms = 0.0;
+  double incoming_request_decode_validation_ms = 0.0;
+  double incoming_remote_target_compute_ms = 0.0;
+  double incoming_response_encode_pack_ms = 0.0;
+  double protocol_validation_ms = 0.0;
+  double protocol_consensus_ms = 0.0;
+  double response_exchange_ms = 0.0;
 };
 
 // Thin coordinator that makes TreePM ownership explicit and auditable.
@@ -206,6 +298,25 @@ class TreePmCoordinator {
       const TreeSofteningView& softening_view = {});
 
  private:
+  // Per-target-family residual traversal bundle. The coordinator maintains
+  // one instance for locally owned targets and one for incoming remote
+  // targets so pair evaluations can be reported without double counting.
+  struct ResidualTraversalCounters {
+    std::uint64_t visited_nodes = 0;
+    std::uint64_t accepted_nodes = 0;
+    std::uint64_t opened_nodes = 0;
+    std::uint64_t direct_pair_evaluations = 0;
+    std::uint64_t cutoff_pruned_nodes = 0;
+    std::uint64_t cutoff_skipped_pairs = 0;
+    // Remote-target cutoff-prune tally produced inside the residual evaluator.
+    // Kept on the counters bundle so OpenMP workers never mutate shared
+    // coordinator stats; the coordinator merges exact integer sums after join.
+     std::uint64_t remote_pairs_pruned_by_bounds = 0;
+   };
+   static_assert(sizeof(ResidualTraversalCounters) == kTreePmResidualCounterBytes,
+                 "TreePM residual counter storage contract changed");
+
+
   void evaluateShortRangeResidual(
       std::span<const double> pos_x_comoving,
       std::span<const double> pos_y_comoving,
@@ -213,21 +324,33 @@ class TreePmCoordinator {
       std::span<const double> mass_code,
       const TreePmForceAccumulatorView& accumulator,
       const TreePmOptions& options,
-      const TreeSofteningView& softening_view,
-      bool rank_local_serial_mode,
-      TreeGravityProfile* tree_profile);
+       const TreeSofteningView& softening_view,
+       bool rank_local_serial_mode,
+       TreeGravityProfile* tree_profile);
+
 
   struct ResidualTraversalStats {
     std::uint64_t pruned_nodes = 0;
     std::uint64_t pair_skips_cutoff = 0;
+    // Exact identity: pair_evaluations =
+    // local_pair_evaluations + incoming_remote_pair_evaluations.
     std::uint64_t pair_evaluations = 0;
+    std::uint64_t local_pair_evaluations = 0;
+    std::uint64_t incoming_remote_pair_evaluations = 0;
     std::uint64_t remote_request_packets = 0;
     std::uint64_t remote_response_packets = 0;
     std::uint64_t remote_hierarchy_packets = 0;
     std::uint64_t communicating_peer_count = 0;
     std::uint64_t top_level_domain_leaf_count = 0;
-    std::uint64_t authoritative_domain_leaf_count = 0;
-    std::uint64_t domain_hierarchy_node_count = 0;
+     std::uint64_t authoritative_domain_leaf_count = 0;
+     std::uint64_t domain_geometry_source_generation = 0;
+     std::uint64_t current_gravity_source_generation = 0;
+     std::uint64_t domain_geometry_fresh = 0;
+     std::uint64_t domain_geometry_fallback_used = 0;
+     std::uint64_t domain_geometry_fallback_reason = 0;
+     std::uint64_t domain_geometry_uncovered_source_count = 0;
+     std::uint64_t domain_hierarchy_node_count = 0;
+
     std::uint64_t domain_cache_hit_count = 0;
     std::uint64_t domain_cache_miss_count = 0;
     std::uint64_t graph_cache_hit_count = 0;
@@ -237,7 +360,10 @@ class TreePmCoordinator {
     std::uint64_t let_imported_target_count = 0;
     std::uint64_t let_wire_bytes_sent = 0;
     std::uint64_t let_wire_bytes_received = 0;
+    // Compatibility alias: four-wire-buffer high-water only.
     std::uint64_t let_high_water_bytes = 0;
+    std::uint64_t let_wire_buffer_high_water_bytes = 0;
+    std::uint64_t let_known_workspace_high_water_bytes = 0;
     double let_discovery_ms = 0.0;
     double let_graph_setup_ms = 0.0;
     double let_communication_ms = 0.0;
@@ -245,6 +371,12 @@ class TreePmCoordinator {
     double let_communication_wait_ms = 0.0;
     double let_overlap_efficiency = 0.0;
     double let_remote_traversal_ms = 0.0;
+    double incoming_request_decode_validation_ms = 0.0;
+    double incoming_remote_target_compute_ms = 0.0;
+    double incoming_response_encode_pack_ms = 0.0;
+    double protocol_validation_ms = 0.0;
+    double protocol_consensus_ms = 0.0;
+    double response_exchange_ms = 0.0;
     std::uint64_t remote_request_bytes = 0;
     std::uint64_t remote_response_bytes = 0;
     std::uint64_t remote_request_batches = 0;
@@ -252,6 +384,8 @@ class TreePmCoordinator {
     std::uint64_t remote_targets_with_requests = 0;
     std::uint64_t remote_targets_without_requests = 0;
     std::uint64_t remote_pairs_pruned_by_bounds = 0;
+    std::uint64_t incoming_remote_target_evaluations = 0;
+    std::uint64_t openmp_observed_workers = 0;
     std::uint64_t remote_request_packets_max_peer = 0;
     std::uint64_t remote_response_packets_max_peer = 0;
     double remote_request_packet_imbalance_ratio = 0.0;
@@ -303,6 +437,15 @@ class TreePmCoordinator {
     std::vector<std::uint32_t> expected_response_count;
     std::vector<std::uint32_t> received_response_count;
   } m_tree_exchange_workspace;
+  // Contiguous OpenMP residual DFS slots: worker_count * (1 + 7 * max_depth)
+  // TreeLocalIndex entries. Retained between residual evaluations so the
+  // MemoryGovernor sees one stable high-water instead of per-call growth.
+  std::vector<TreeLocalIndex> m_worker_stack_storage;
+  std::uint64_t m_worker_stack_high_water_bytes = 0;
+  std::vector<ResidualTraversalCounters> m_worker_counter_storage;
+  std::uint64_t m_worker_counter_high_water_bytes = 0;
+  std::vector<double> m_block_sum_sq_storage;
+  std::uint64_t m_block_sum_sq_high_water_bytes = 0;
   ResidualTraversalStats m_last_residual_stats;
   parallel::PmSlabHaloExchangeResult m_last_pm_slab_halo_exchange{};
   std::uint64_t m_pm_halo_exchange_sequence = 0;

@@ -2456,3 +2456,121 @@ The launcher now obtains `parallel.mpi_ranks_expected` from a narrow authoritati
 Q-01 is repaired by removing premature MPIO-probe initialization and invalidating the cached check result immediately before the real `H5Pset_fapl_mpio`/`H5Pset_dxpl_mpio` compile-link probe. Q-02 now makes external-ID normalization typed source-set semantic state: source fragments report bounded zero/max observations, rank zero chooses one `IcExternalIdMapping`, the mapping is broadcast beside (not encoded in) the public manifest, chunk conversion and `ParentParticleIDs` consume the same mapping, and `IcImportReport` exposes the applied policy. Q-03 gives the single-file publication layer explicit ownership of creating/validating the shared snapshot directory before any rank enters Parallel-HDF5 creation; committed output protection and stale-partial policy remain unchanged. The public `IcManifest` schema and restart schema are unchanged.
 
 Source-level and serial-HDF5 compilation can be exercised without MPI, but the real 3-rank original-MONOFONIC qualification remains a dependency/artifact gate whenever the host lacks MPI/Parallel-HDF5 or the unmodified zero-based IC is not supplied.
+
+## 2026-09-23 — TreePM observability, exchange-memory model, and domain-geometry freshness
+
+Code-first campaign (no build/test run in this session; validation intentionally deferred by user request). Scope is observability truth, a realistic LET exchange memory estimate under the existing MemoryGovernor, and routing-geometry freshness decoupled from ownership epoch.
+
+### Changes applied
+
+**P1 — residual counter truth**
+
+- Split residual traversal counters into non-overlapping `local_owned_targets` and `incoming_remote_targets` bundles in `tree_pm_coupling.cpp`.
+- Exact identity: `residual_pair_evaluations == local_pair_evaluations + incoming_remote_pair_evaluations`. Combined `tree_profile` visited/accepted/opened/PPI and cutoff counters remain the sum (compat).
+- Workflow feedback uses residual only (fixes double-count of local+incoming as if both were remote).
+- Event fields: `local_pair_evaluations`, `incoming_remote_pair_evaluations`, `remote_pair_evaluations` (compat alias of incoming), `total_pair_evaluations`.
+
+**P1 — timer truth**
+
+- `PmProfileEvent.total_ms` accumulated in the coordinator from PM-phase entry through tree short-range start; `pm_solver` totals add it once.
+- Workflow `tree_wall_ms_recent` = `tree_short_range_ms` alone; `pm_wall_ms_recent` = `pm_profile.total_ms` alone.
+- Remote-phase split: `incoming_remote_target_compute_ms`, `protocol_validation_ms`, `protocol_consensus_ms`, `response_exchange_ms`. `let_remote_traversal_ms` is a compat alias of incoming compute; `let_communication_ms` unchanged (still includes consensus).
+
+**P1 — TreePM exchange memory model**
+
+- Shared wire constants `kTreePmShortRangeRequestWireBytes=96`, `kTreePmShortRangeResponseWireBytes=80`.
+- `estimateTreePmExchangeMemory` in `gravity_memory.cpp` replaces the prior `2*B` term with wire + structured/mask/count/accumulator/metadata + transient codec terms under checked arithmetic and `planSparseTreePmRound` clamp. Unordered-set allocator overhead is excluded and documented as uncertainty.
+- Runtime high-water split: `let_wire_buffer_high_water_bytes` (four payloads) and `let_known_workspace_high_water_bytes` (full known peak); `let_high_water_bytes` remains a wire-only compat alias.
+
+**P2 — domain-geometry freshness lifecycle**
+
+- `TreePmOptions.authoritative_geometry_source_generation` + diagnostics freshness/fallback fields + `TreePmDomainGeometryFallbackReason` enum/name helper.
+- `GravityRuntime::installAuthoritativeTopDomainLeaves(leaves, source_generation)` and `authoritativeDomainGeometryMatches`.
+- Pre-solve O(N) `refitAuthoritativeTopDomainLeaves` (in `distributed_memory.cpp`, shared SFC helpers) after compact source rebuild; seed owner/epoch/SFC retained; empty leaves omitted; no non-finite published bounds.
+- TreePM selects authoritative leaves only when generation matches **and** coverage passes; otherwise conservative tree-root fallback with a specific reason (`kNoGeometryInstalled`, `kStaleSourceGeneration`, `kDecompositionEpochMismatch`, `kSourceCoverageFailure`, `kGeometryPreparationFailure`).
+- Seed path remains `MigrationBalanceRuntime::authoritativeTopDomainLeaves` at segment/restart/ownership-change only. Geometry is derived state: no restart/snapshot schema change. `decomposition_epoch` does not advance on drift.
+- Event fields for geometry lifecycle plus OpenMP provenance from `core::openMpRuntimeInfo()`.
+
+### Validation status
+
+- Validation/testing intentionally deferred by user request.
+- Build/test commands were not executed; `cmake`/`ctest` permission was denied in this environment.
+- No production qualification claim is made by this campaign.
+- Reproducibility: no config keys, no snapshot/restart schema, no solver numerics (theta, 0.08 gate, multipole order, cutoff, split, PM mesh, assignment, softening, cadence) were changed. Diagnostic/event payloads and a memory estimate model changed; residual pair identity and timer non-overlap are the intended observability fixes.
+
+## 2026-09-23 — TreePM P1+P2 closure repair (seed geometry, timer purity, ABI asserts, ownership invalidation)
+
+Small closure patch over the existing P1+P2 work in response to an adversarial static review. Implementation only; validation intentionally deferred by the user. No P1/P2 concept was reverted and no solver numerics changed.
+
+### Changes applied
+
+**1. Stable seed / current geometry separation**
+
+- `GravityRuntime` now holds two sets: `m_authoritative_top_domain_seed_leaves` (stable decomposition-local leaf identities/SFC intervals, may include currently-empty groups, replaced only at segment/restart/ownership-change install) and `m_authoritative_top_domain_leaves` (current published bounds for the stamped source generation, may omit empty groups).
+- `refreshAuthoritativeTopDomainGeometryForSolve` refits from the seed set, never from the previously published result, so repeated empty-group disappearance can no longer erode SFC partition identity across source generations. Legacy states without a recorded seed fall back to the current set.
+- `installAuthoritativeTopDomainLeaves` replaces both sets and stamps the published generation. Out-of-seed-range sources remain covered by the nearest seed leaf with existing telemetry; fallback, coverage validation, and empty-leaf omission semantics are unchanged. No snapshot/restart schema change.
+
+**2. Pure incoming remote compute timing**
+
+- Split the incoming remote phase into non-overlapping scopes: new `incoming_request_decode_validation_ms` (decode, record-count/peer/epoch/identity validation, duplicate hashing, finite checks, response structure preparation), narrowed `incoming_remote_target_compute_ms` (validated target force evaluation against this rank's tree plus only the inseparable direct acceleration write), and new `incoming_response_encode_pack_ms` (response encoding, size check, pack into response send payload). `protocol_validation_ms` remains response count/displacement layout and payload buffer sizing; `protocol_consensus_ms` and `response_exchange_ms` unchanged. `let_remote_traversal_ms` remains a compatibility alias of incoming compute only. Balancing continues to consume residual pair counts and `tree_short_range_ms`, unchanged.
+
+**3. ABI-safe packet/memory accounting**
+
+- `static_assert(sizeof(ShortRangeTargetRequestPacket) == kTreePmShortRangeRequestWireBytes)` and the response equivalent enforce host/wire identity at compile time; a padding change fails the build instead of silently using wire bytes as host object bytes. Preflight remains rank-degree aware with the four-wire-buffer model `M_wire = 2*d*b*(96+80)`, `b = floor(B/96)`, `d = R-1`, plus structured/mask/count/accumulator/metadata/codec terms under `MemoryGovernor`. The transient codec term is documented as a conservative upper envelope, not an exact simultaneous peak.
+
+**4. Ownership-change geometry invalidation**
+
+- `commitParticleDecompositionChange()` now sets `m_authoritative_top_domain_source_generation_valid = false` when the decomposition epoch advances, and `publishAuthoritativeTopDomainLeavesSpan` publishes an empty routing view while invalid, so between commit and reinstall `authoritativeDomainGeometryMatches(...)` is false and stale leaves are not consumable. Ownership data, migration state, and the epoch are not cleared.
+
+**5. Type attribute cleanup**
+
+- `[[nodiscard, maybe_unused]] struct DomainCoverageResult` → plain `struct DomainCoverageResult` (the accessor keeps `[[nodiscard]]`; no warning suppression introduced).
+
+**Optional retained-capacity telemetry**
+
+- `let_known_workspace_high_water_bytes` now reads `vector.capacity()` for CHUÍ-owned structured request, mask, count, accumulator, and rank-metadata storage (including nested outer capacities) instead of reconstructing from `world_size`/`batch_size`; the transient codec term stays a modeled conservative upper envelope. Preflight remains a separate conservative estimate.
+
+### Validation status
+
+- Validation/testing intentionally deferred by user request.
+- No production qualification claim is made by this closure campaign.
+- Reproducibility: no config keys, no snapshot/restart schema, no solver numerics (theta, 0.08 gate, multipole order, cutoff, split scale, PM mesh, assignment/deconvolution, softening, cadence, timestep policy) were changed.
+
+## 2026-09-23 — TreePM P3: OpenMP residual execution
+
+Implementation-only campaign over the existing P1/P2 worktree. Validation intentionally deferred by the user. No P1/P2 concept was reverted and no solver numerics changed (same tree, same MAC/0.08 gate, cutoff, softening, per-target traversal order, MPI protocol).
+
+### Changes applied
+
+- Shared immutable residual tree across OpenMP workers; one contiguous `m_worker_stack_storage` of `T * S` slots with `S = 1 + 7*D`, with `D` bounded by the builder-enforced `kMaximumTreeDepth`; MemoryGovernor terms also cover O(worker) integer counters and O(ceil(A/64)) deterministic block diagnostics.
+- Residual evaluation parallelized **between targets only** (`#pragma omp for schedule(dynamic, 1)` over 64-target logical blocks); no atomics in hot node/pair loops; integer counters are worker-scale and merged exactly after join; `local_short_range_sum_sq` remains block-deterministic.
+- The full-active target-softening lane was removed. Main-thread validation checks spans, species ranges, finite/non-negative values, and independent-target sidecars; workers use the prevalidated allocation-free unchecked resolver and reuse the immutable resolved source lane. `MPI_THREAD_FUNNELED` remains the only MPI threading contract.
+- Worker exceptions are captured inside the work loops under named critical sections and rethrown after join. Stack, counter, and block scratch is prepared before distributed request posting; failures are collectively coordinated.
+- `openmp_observed_workers` records the maximum actual team size across local, distributed overlap, and incoming-target regions; serial execution reports one. The workflow emits configured/planned worker provenance and residual scratch high-water.
+- Serial fallback under `COSMOSIM_HAVE_OPENMP=0` preserved; one shared kernel; no `omp_set_num_threads` in TreePM.
+- Docs: `docs/tree_pm_coupling.md` ("## OpenMP residual execution (P3)") and `docs/profiling.md` OpenMP provenance/counters.
+
+### Validation status
+
+- Validation/testing intentionally deferred by user request.
+- No production qualification or measured speedup claim is made by this campaign.
+- Reproducibility: no config keys, no snapshot/restart schema, no solver numerics changed.
+
+## 2026-09-23 — Parallel P4: compact large-N decomposition planner
+
+Implementation-only campaign over the existing worktree (P1/P2/P3 retained). Validation intentionally deferred by the user.
+
+### Changes applied
+
+- Runtime rebalance now streams canonical particle/AMR-patch spans into the source-view overload of `buildCompactDistributedRuntimeRebalancePlan`; it does not call `buildRuntimeDecompositionItems` or materialize `vector<DecompositionItem>[N]`. The separate initial ownership placement adapter retains its specialized rich-item policy and is outside this runtime-rebalance closure.
+- Feedback normalization is a direct canonical-state pass, followed by transient per-entity component recomputation while appending ≤64-byte `CompactRuntimeDecompositionRecord` values. The same weighted-load policy and coefficients remain in force.
+- The compact planner retains one in-place `(sfc_key, entity_id, local_index)` sort, ≤256 cut samples/rank, bounded prefix memory queries, streaming metrics, and exact owner-change migration intents. Intent storage is reserved/admitted with a conservative particle-plus-patch bound.
+- Top-domain seeds use a direct minimal sortable record path over canonical coordinates and streaming AMR bounds; the committed phase reservation spans construction and installation into the gravity owner’s seed/published vectors; `refitAuthoritativeTopDomainLeaves` and the P2 seed/published lifecycle are unchanged.
+- Runtime telemetry reports local planner peak bytes, local entity count, compact/sample/prefix/intent/other-scratch terms, and local bytes-per-entity. The rich planner remains reference/debug/test-only.
+- Docs: `docs/parallel_distributed_memory_contracts.md`.
+
+### Validation status
+
+- Validation/testing intentionally deferred by user request.
+- No production qualification or measured speedup claim is made by this campaign.
+- Reproducibility: no config keys, no snapshot/restart schema, no solver numerics (opening_theta, MAC, cutoff, split scale, softening, PM mesh/TSC/cadence) changed; production rebalance call path switched to the compact planner with identical cut/MPI protocol semantics.

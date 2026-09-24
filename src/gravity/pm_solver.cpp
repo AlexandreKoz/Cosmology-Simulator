@@ -2718,6 +2718,7 @@ void PmProfiler::append(const PmProfileEvent& event) {
   m_totals.fft_inverse_ms += event.fft_inverse_ms;
   m_totals.fft_transpose_ms += event.fft_transpose_ms;
   m_totals.interpolate_ms += event.interpolate_ms;
+  m_totals.total_ms += event.total_ms;
   m_totals.routed_mpi_wait_ms += event.routed_mpi_wait_ms;
   m_totals.transfer_h2d_ms += event.transfer_h2d_ms;
   m_totals.transfer_d2h_ms += event.transfer_d2h_ms;

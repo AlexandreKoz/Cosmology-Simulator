@@ -12,14 +12,70 @@ Rank-range cuts are contiguous in SFC order and now use nearest-target boundary 
 prefix crosses each rank load target. This keeps ownership deterministic while reducing clustered
 load overshoot compared with a first-crossing-only split.
 
-Runtime MPI rebalancing uses `buildDistributedRuntimeRebalancePlan(...)` rather than the exact
-global `DecompositionItem` planner. Each rank sorts only its authoritative local decomposition
-entities by `(Morton key, entity_id)`, applies the existing component work model and measured
-feedback, exchanges bounded compact cut samples (`key`, `entity_id`, represented load), and
-all-reduces exact per-rank balance/movement counters from local ownership decisions. The accepted
-owner of each entity is the rank selected by the agreed SFC cut. Compact cut samples and reduced
-metrics are control metadata only; they are never authoritative copies of particle, gas-cell, or AMR
-state.
+Runtime MPI rebalancing uses the source-view overload of
+`buildCompactDistributedRuntimeRebalancePlan(...)` rather than the exact
+`DecompositionItem` planner. The production workflow constructs a concrete
+canonical source view over particle and AMR-patch spans. The compact planner
+performs the existing feedback normalization in a streaming pass, recomputes
+one entity's work components transiently while appending ≤64-byte
+`CompactRuntimeDecompositionRecord` entries, performs one in-place total-order
+`std::sort` on `(sfc_key, entity_id, local_index)`, exchanges bounded compact
+cut samples (`key`, `entity_id`, represented load; ≤256 samples/rank), and
+all-reduces exact per-rank balance/movement counters. The accepted owner of
+each entity is the rank selected by the agreed SFC cut. Migration intents are
+reserved exactly after cut construction and emitted only when
+`old_owner != new_owner`; their worst-case storage is admitted with the plan.
+Compact cut samples, planner records, and reduced metrics are control metadata
+only; they are never authoritative copies of particle, gas-cell, or AMR state.
+The production compact path leaves `target_decomposition.owning_rank_by_item`
+and `sorted_indices` empty. Telemetry distinguishes the local peak from the
+local entity denominator and includes known source, prefix, intent, and other
+scratch terms. The legacy rich-item APIs remain reference/debug wrappers over
+the same compact core; neither runtime rebalance nor startup initial placement
+materializes `vector<DecompositionItem>[N]`.
+
+Startup initial placement (`applyInitialGravityAwareDecomposition`) streams
+`CompactRuntimeDecompositionRecord` entries (≤64 bytes: precomputed SFC key,
+entity ID, dense `local_index`, kind, load, memory; no stored coordinates or
+`DecompositionWorkComponents`) and plans with the shared
+`buildMortonSfcDecompositionFromCompact` core. Work components are recomputed
+transiently in a second pass and accumulated into profiler component metrics;
+ownership write-back maps plan owners onto particle and patch rows via the
+records' `local_index`. The compact planner core enforces `{local_index}` as a
+permutation of `[0, N)` (range check, duplicate rejection against an `-1`
+sentinel owner that cannot be a valid MPI rank, and full-coverage
+verification), so a missing index can never appear as rank-0 ownership.
+`buildMortonSfcDecomposition` remains the rich reference/test adapter: it
+validates config, builds records inline, and calls the same core, so both
+paths share config validation, the total-order `std::sort` on
+`(sfc_key, entity_id, local_index)`, the dense-index contract, and the hard
+rank memory ceiling check whenever a ceiling is configured. Cut sample
+behavior differs by path and must not be described as shared: distributed
+runtime rebalance sorts the local compact population and exchanges bounded
+distributed cut samples (≤256 per rank), while the local initial startup
+planner sorts its complete local compact population and performs local
+deterministic cut construction with no distributed sampling. Before any
+startup planner population is allocated, the workflow reserves the shared
+`parallel::estimateCompactStartupPlannerTransientBytes` transient live set
+(compact records, worst-case memory groups, owner and sorted-index vectors,
+occupancy grids, patch mapping, rank-scaled plan lanes, per-entity lookup
+scratch) through the single `MemoryGovernor`; the reservation spans every
+planner temporary through ownership write-back and is released when those
+temporaries are destroyed. This planner-safety admission is additional to,
+not a replacement for, cut feasibility checks; startup applies no
+`max_rank_memory_bytes` ceiling. `startupParticleMemoryBytes` remains the
+distinct startup per-entity weighting capacity authority
+(`estimateParticleMemoryBytesForDecomposition` is the source-view species
+table used by storage admissions, not the startup weight authority).
+
+Authoritative top-domain seed leaves use the direct
+`buildAuthoritativeTopDomainLeavesFromSource(...)` path: a minimal sortable
+record (`sfc_key`, entity ID, local index, kind), one in-place total-order sort,
+grouping into `≤ max_leaves_per_rank` leaves, and streaming AABB/work recovery
+from canonical particle positions and complete AMR patch cell bounds. Seed
+owner/epoch/SFC interval identity matches the prior builder; the committed
+phase reservation spans construction and installation into the gravity owner's
+seed/published vectors; `refitAuthoritativeTopDomainLeaves` is unchanged.
 
 The final decision performs the actionable-migration rank vote unconditionally
 on every rank. It is not guarded by a local `has_migrations` short circuit: a
@@ -65,8 +121,41 @@ Runtime rebalance diagnostics additionally report:
 - whether distributed SFC cuts or the serial/exact path were used,
 - pre-cut and post-cut weighted/memory imbalance,
 - local/global entities and bytes moved,
-- compact control bytes and peak temporary bytes,
+- `planner_record_bytes`, bounded local/global sample bytes, 256-record
+  prefix bytes, exact migration-intent capacity bytes, and known other scratch,
+- `planner_peak_temporary_bytes` as a local rank live-set estimate and
+  `planner_bytes_per_entity` as local peak bytes divided by
+  `planner_local_entity_count` (the compatibility name
+  `planner_bytes_per_entity` has the same local scope),
 - cut count and moved-entity fraction as a locality/cut-displacement proxy.
+
+The direct production plan accounts for the compact record vector, active mask,
+gas-particle/patch incidence and offset scratch (offsets are allocated only when
+gas incidence exists; gas-empty/DMO states use empty offset/index spans and
+represent zero associated gas patches), patch cell counts taken from canonical
+`state.patches.cell_count` (no derived count vector is owned or charged),
+bounded sample all-gather storage, 256-record prefix storage, cut/control
+metadata, and the conservative full particle-plus-patch migration-intent bound.
+The rich `DecompositionItem` footprint is not charged on this path.
+
+Runtime rebalance admission and top-domain seed admission share one
+authoritative source-view memory estimate:
+`parallel::estimateRuntimeDecompositionSourceStorage(state,
+active_particle_indices)`. The estimator uses checked arithmetic and a single
+gas-incidence condition (`runtimeDecompositionHasGasIncidenceSource`:
+non-empty gas-cell identity records together with non-empty cell rows), so DMO
+states admit zero gas allocation/estimate bytes. Component terms are: an
+active particle mask only when the active index span is non-empty; the compact
+patch index at `patches.size() * sizeof(uint32_t)`; gas list offsets
+`(particles + 1) * sizeof(uint32_t)`, gas indices `cells * sizeof(uint32_t)`,
+and gas construction scratch `cells * 2 * sizeof(uint64_t)` only under the
+gas-incidence condition; and the fixed `5 * sizeof(uint64_t)` species table.
+The rebalance admission adds the compact-record term; the top-domain seed
+admission adds caller-specific seed-record and leaf-memory terms instead of
+duplicated cell/patch terms. The unit suite asserts estimate-versus-storage
+consistency (scratch components cover `source_scratch_bytes`, total covers
+scratch plus other source-owned bytes, DMO gas fields are zero, and repeated
+estimates are identical).
 
 Particle migrations are emitted only for locally owned particles whose accepted cut owner differs
 from the current owner. AMR patches use `AmrPatchOwnershipUpdate` and the H2/H3 patch/gas-cell

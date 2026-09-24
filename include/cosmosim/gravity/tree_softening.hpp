@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -42,6 +43,39 @@ struct TreeSofteningView {
   std::span<const std::uint8_t> target_particle_epsilon_override_mask{};
   TreeSofteningSpeciesPolicy species_policy{};
 };
+
+struct ValidatedTargetSofteningView {
+  std::span<const double> target_epsilon_comoving{};
+  std::span<const std::uint8_t> target_override_mask{};
+  std::span<const std::uint32_t> target_species_tag{};
+  std::span<const double> resolved_source_epsilon_comoving{};
+  std::span<const std::uint32_t> source_species_tag{};
+  TreeSofteningPolicy fallback{};
+  bool species_policy_enabled = false;
+  std::array<double, TreeSofteningSpeciesPolicy::kSpeciesCapacity> species_epsilon_comoving{};
+};
+
+[[nodiscard]] inline double targetSofteningEpsilonUnchecked(
+    std::size_t target_active_slot,
+    std::size_t target_source_index,
+    const ValidatedTargetSofteningView& view) noexcept {
+  if (!view.target_epsilon_comoving.empty() &&
+      !view.target_override_mask.empty() &&
+      view.target_override_mask[target_active_slot] != 0U) {
+    return view.target_epsilon_comoving[target_active_slot];
+  }
+  if (view.species_policy_enabled && !view.target_species_tag.empty()) {
+    return view.species_epsilon_comoving[view.target_species_tag[target_active_slot]];
+  }
+  if (view.target_epsilon_comoving.empty() &&
+      target_source_index < view.resolved_source_epsilon_comoving.size()) {
+    return view.resolved_source_epsilon_comoving[target_source_index];
+  }
+  if (view.species_policy_enabled && target_source_index < view.source_species_tag.size()) {
+    return view.species_epsilon_comoving[view.source_species_tag[target_source_index]];
+  }
+  return view.fallback.epsilon_comoving;
+}
 
 inline void validateTreeSofteningPolicy(const TreeSofteningPolicy& policy) {
   if (policy.kernel != TreeSofteningKernel::kPlummer) {

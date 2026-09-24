@@ -244,6 +244,12 @@ struct PmProfileEvent {
   double fft_inverse_ms = 0.0;
   double fft_transpose_ms = 0.0;
   double interpolate_ms = 0.0;
+  // Inclusive wall time of the PM operation measured once around the long-
+  // range refresh + force interpolation + optional zoom-correction path.
+  // Subphase fields above overlap (FFT transpose sits inside forward/inverse
+  // passes, etc.) and must not be summed for load-balance feedback; total_ms
+  // is the single non-overlapping value for that purpose.
+  double total_ms = 0.0;
   double routed_mpi_wait_ms = 0.0;
   double transfer_h2d_ms = 0.0;
   double transfer_d2h_ms = 0.0;

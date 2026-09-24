@@ -373,17 +373,223 @@ high-dynamic-range cosmological accuracy certification. The older
 minimum-image direct test remains useful for short-range and split regression
 but is not described as an Ewald reference.
 
+## Top-level domain geometry freshness and fallback
+
+The compact one-leaf-per-rank top-domain map is **derived routing geometry**,
+not restart truth. It has two independent identities:
+
+- `DecompositionEpoch` advances only on a committed ownership change (migration
+  / rebalance / restart restore). Drift does **not** advance it.
+- `GravitySourceGeneration` (owned by authoritative `SimulationState`) advances
+  whenever the physical source set mutates, including drift that moves sources.
+
+Workflow lifecycle:
+
+1. Seed leaves are installed once at segment/restart boundaries and again only
+   after an ownership decomposition change, stamped with the current
+   `GravitySourceGeneration`. An install replaces two distinct sets inside
+   `GravityRuntime`: the stable **seed leaves**
+   (`m_authoritative_top_domain_seed_leaves` — decomposition-local leaf
+   identities and SFC intervals, allowed to include currently-empty groups)
+   and the **current published leaves** (`m_authoritative_top_domain_leaves`).
+2. Before each force solve (after the compact source view is rebuilt, and only
+   on paths that will actually solve), `GravityRuntime` performs an O(N_local)
+   bound refit that consumes the **seed set**, never the previously published
+   result: seed ownership/epoch/SFC intervals are retained; only per-leaf AABB
+   bounds, entity counts, and the published generation stamp advance. The
+   published set may omit currently-empty seed groups (finite bounds, no
+   zero-entity routing packets), while the seed set keeps their SFC intervals
+   so repeated empty-group disappearance cannot progressively coarsen the
+   routing partition. A current source whose SFC key falls outside every seed
+   interval is still assigned to the nearest seed leaf (ownership authority
+   exceeds old SFC range membership; `out_of_seed_range_source_count` records
+   it) and never dropped. Drift changes the source generation but not the
+   decomposition epoch and never rewrites the seed set.
+3. `commitParticleDecompositionChange()` explicitly invalidates geometry
+   freshness when an ownership epoch advances: between commit and the
+   subsequent install, `authoritativeDomainGeometryMatches(...)` is false and
+   the published routing view is empty, so stale geometry is unusable. This
+   does not clear ownership data, migration state, or the epoch.
+4. `TreePmCoordinator` selects authoritative leaves only when the generation
+   stamp equals `options.source_generation` **and** the existing conservative
+   coverage check still covers every local source. Any failure falls back to
+   the local gravity-tree root packet and records a specific
+   `TreePmDomainGeometryFallbackReason`:
+   `kNoGeometryInstalled`, `kStaleSourceGeneration`,
+   `kDecompositionEpochMismatch`, `kSourceCoverageFailure`, or
+   `kGeometryPreparationFailure`.
+
+A graph-cache hit is never geometry validation. Geometry is not serialized in
+restart/snapshot schema; after restart the seed path reinstalls it. Single-rank
+and MPI-disabled builds remain valid; there is no hard-coded world size in the
+refit.
+
+Freshness-token design note (hierarchical KDK, documentation only): current
+P2 uses `GravitySourceGeneration` as the routing-geometry physical-state
+freshness token. That is valid for the current production all-active/rung-zero
+workflow, where every source moves with the single global timestep. A future
+mixed-rung KDK implementation may predict inactive sources to a
+force-evaluation epoch without advancing canonical source generation the same
+way; hierarchical KDK must then revisit routing-geometry freshness to include
+the prediction/evaluation epoch. No scheduler state for that exists today.
+
+## Residual traversal counters and timing truth
+
+Residual traversal work is recorded in two non-overlapping counter bundles:
+
+- `local_owned_targets` — serial local solve and local work overlapped with
+  request transport;
+- `incoming_remote_targets` — peer-evaluated incoming remote targets.
+
+Identity (exact, same solve):
+
+```text
+residual_pair_evaluations
+  == local_pair_evaluations + incoming_remote_pair_evaluations
+```
+
+`tree_profile.particle_particle_interactions` and the combined
+`tree_profile` visited/accepted/opened/cutoff counters remain the **sum** of
+both bundles (compatibility with prior aggregate semantics).
+`remote_pairs_pruned_by_bounds` is unchanged and still counts only the
+`!skip_self` path. Standalone `TreeGravitySolver` PPI contributions are not on
+the TreePM residual path.
+
+Timing split (all additive into existing profile totals):
+
+- `PmProfileEvent.total_ms` / `profile.pm_profile.total_ms` spans the PM phase
+  entry (including long-range refresh when taken) through the tree short-range
+  start — PM total alone, not including short-range traversal.
+- `tree_wall_ms_recent` in the workflow event is
+  `tree_short_range_ms` alone; `pm_wall_ms_recent` is `pm_profile.total_ms`
+  alone.
+- Remote-phase split:
+  `incoming_request_decode_validation_ms` (wire decode, record-count,
+  peer/epoch/identity validation, duplicate-identity hashing, finite-value
+  checks, and response structure preparation), then
+  `incoming_remote_target_compute_ms` (validated incoming target force
+  evaluation against this rank's local tree only, plus the inseparable direct
+  acceleration write into the prepared response slot — no decode, hash,
+  validation, serialization, or communication), then
+  `incoming_response_encode_pack_ms` (response byte encoding, size check, and
+  direct pack into the response send payload);
+  `protocol_validation_ms` (response count/displacement layout and response
+  payload buffer sizing), `protocol_consensus_ms`
+  (`coordinate_protocol_failure` duration), `response_exchange_ms` (response
+  `MPI_Neighbor_alltoallv` call only).
+  `let_remote_traversal_ms` remains a compatibility alias equal to
+  `incoming_remote_target_compute_ms`. `let_communication_ms` is the transport
+  subset (count exchange, request wait, and response exchange); protocol
+  consensus is reported separately in `protocol_consensus_ms`.
+
+## OpenMP residual execution (P3)
+
+Short-range residual evaluation parallelizes **between targets only**, in
+compile-time blocks of 64 (`k_residual_block_size`; not a config key). Three
+regions use the same worker-safe evaluator:
+
+1. non-distributed local residual;
+2. local work overlapped with sparse request transport;
+3. pure incoming remote-target compute (after main-thread decode/validation).
+
+Contract:
+
+- one immutable local tree shared by all workers; no MPI calls from workers
+  (`MPI_THREAD_FUNNELED` only);
+- shared mutation is limited to unique active-slot writes and one integer
+  counter bundle per planned worker; counters merge exactly after join. The
+  deterministic floating diagnostic remains one `sum_sq` value per logical
+  64-target block and is reduced in fixed block order; no atomics appear in
+  hot node/pair loops;
+- each worker owns one bounded DFS stack slot of `S = 1 + 7 * D` entries
+  (`D = TreeGravitySolver::maxDepth()`), backed by one contiguous
+  `m_worker_stack_storage` of `T * S` `TreeLocalIndex` slots. The tree builder
+  enforces `kMaximumTreeDepth`; preflight uses that same bound and runtime
+  rejects a recorded depth above it;
+- source softening is reused from the immutable resolved build lane. Target
+  softening spans, species tags, finite/non-negative values, and independent-
+  target sidecar requirements are validated on the main thread before OpenMP;
+  workers use the allocation-free, non-throwing unchecked resolver against that
+  validated view. There is no full-active `double` softening lane;
+- `local_short_range_sum_sq` is reduced deterministically (block partials in
+  block order); integer counters are `O(worker_count)` and are prepared before
+  the distributed request is posted;
+- `openmp_observed_workers` is the maximum actual team size observed in the
+  local, distributed local-overlap, and incoming-target OpenMP regions;
+  serial execution reports one;
+- worker exceptions are captured under named OpenMP critical sections and
+  rethrown on the main thread after join (they never escape the region);
+- builds without OpenMP (`COSMOSIM_HAVE_OPENMP=0`) keep a serial path with the
+  same kernel and the same numerical order.
+
+Diagnostics provenance: `openmp_compiled`, `openmp_configured_workers`,
+`openmp_observed_workers`, `residual_local_target_count`,
+`residual_incoming_target_count`, and
+`residual_worker_scratch_high_water_bytes`. The current preflight terms are:
+
+```text
+M_worker_stack = T * (1 + 7 * kMaximumTreeDepth) * sizeof(TreeLocalIndex)
+M_worker_counters = T * 7 * sizeof(uint64_t)
+M_block_diagnostics = ceil(A / 64) * sizeof(double)
+```
+
+The retained runtime report exposes the actual worker-stack, worker-counter,
+and block-diagnostic capacities. Distributed target metadata is bounded by the
+current communication batch; no `double[A]` target-softening allocation is
+retained or admitted.
+
+## LET exchange memory estimate
+
+`gravity::estimateTreePmExchangeMemory` (single auditable arithmetic source in
+`gravity_memory.cpp`) derives the short-range exchange peak from
+`tree_exchange_batch_bytes` with checked arithmetic and the existing
+`planSparseTreePmRound` clamp:
+
+```text
+b = floor(B / 96)                    # targets per peer per batch
+d = max(R - 1, 0)                    # peer rounds
+M_wire = 2 * d * b * (96 + 80)       # request + response payloads
+known  = wire
+       + structured request storage
+       + count/mask/accumulator/metadata terms
+       + transient codec workspace b * (2*(96+80)+24)
+```
+
+Wire record widths are the shared public constants
+`kTreePmShortRangeRequestWireBytes = 96` and
+`kTreePmShortRangeResponseWireBytes = 80`. Host `sizeof` of the request/response
+packet structs equals these widths, and that identity is compile-time enforced
+by `static_assert` next to the packet definitions in `tree_pm_coupling.cpp`;
+if a supported ABI ever pads the structs, the build fails rather than letting
+wire record bytes silently stand in for host object bytes. Unordered-set
+bucket/allocator overhead in the codec is intentionally excluded and documented
+as an uncertainty rather than double-counted. Runtime events split high-water
+into `let_wire_buffer_high_water_bytes` (four reusable payload buffers) and
+`let_known_workspace_high_water_bytes` (wire + structured + metadata +
+transient codec, read from retained `vector.capacity()` for CHUÍ-owned
+storage where accessible; the transient codec term remains a modeled
+conservative upper envelope). `let_high_water_bytes` remains a wire-only
+compatibility alias. Preflight (a conservative "might require" estimate) and
+runtime retained-capacity high-water are conceptually distinct and need not be
+numerically identical. `MemoryGovernor` remains the sole admission authority;
+the estimate feeds the existing preflight, never a second governor.
+
 ## Diagnostics and validation entry points
 
 `TreePmDiagnostics` reports local source/active-target/tree-node counts, global
 empty-source and empty-target rank counts, remote hierarchy packets, unique
 communicating peers, PM solve/reuse counts, cached halo-value count, and local
 FFT slab dimensions. It also reports split/cutoff scales, split composition
-error, cutoff pruning, local/remote pair work, request/response packets and
-bytes, batch/peer participation, zero-request targets, peer pressure
-imbalance, zoom gather bytes, and local/remote residual norms. Tree profiling
-separately counts builds, multipole refreshes, visited/accepted/opened nodes,
-and particle-particle interactions. The coordinator memory report includes
+error, cutoff pruning, residual pair work with the local/incoming-remote split
+above, request/response packets and bytes, batch/peer participation,
+zero-request targets, peer pressure imbalance, zoom gather bytes, local/remote
+residual norms, remote-phase timer splits, LET wire/workspace high-water
+split, and domain-geometry freshness/fallback fields
+(`domain_geometry_source_generation`, `current_gravity_source_generation`,
+`domain_geometry_fresh`, `domain_geometry_fallback_used/reason`,
+`domain_geometry_uncovered_source_count`). Tree profiling separately counts
+builds, multipole refreshes, visited/accepted/opened nodes, and
+particle-particle interactions. The coordinator memory report includes
 reusable PM, tree, active-set, unwrapped-coordinate, and exchange workspaces.
 
 Relevant gates are:
@@ -405,9 +611,33 @@ See `docs/gravity_production_readiness.md` for current pass/limitation status.
 - `TreePmOptions` adds `decomposition_epoch` and `force_epoch`; distributed
   workflow callers must supply coherent runtime values.
 - `TreePmDiagnostics` adds explicit local/global occupancy, hierarchy/peer,
-  PM solve/reuse/halo, and local slab-dimension counters. Callers using
-  aggregate initialization or mirroring this public type must account for the
-  appended fields.
+  PM solve/reuse/halo, local slab-dimension, split residual-pair
+  (local/incoming-remote), remote-phase timer, LET wire/workspace high-water,
+  and domain-geometry freshness/fallback counters. Callers using aggregate
+  initialization or mirroring this public type must account for the appended
+  fields.
+- `TreePmOptions` adds `authoritative_geometry_source_generation` (geometry
+  freshness stamp) alongside the existing `source_generation`; both must be
+  supplied coherently or authoritative routing falls back with
+  `kStaleSourceGeneration`.
+- `TreePmDomainGeometryFallbackReason` and its name helper are additive public
+  enum/string APIs for the fallback contract above.
+- `parallel::refitAuthoritativeTopDomainLeaves` and
+  `TopDomainGeometryRefitDiagnostics` are additive public refit APIs; seed
+  leaves retain owner/epoch; empty/non-finite inputs fail closed or omit empty
+  leaves rather than publishing non-finite bounds. The refit's seed input is
+  the stable decomposition-local seed set, not the previously published
+  result, so empty-group omission cannot erode SFC partition identity across
+  refreshes.
+- `workflows::GravityRuntime::installAuthoritativeTopDomainLeaves` takes the
+  source generation the leaves cover and replaces both the stable seed set and
+  the current published set;
+  `commitParticleDecompositionChange()` invalidates geometry freshness so
+  `authoritativeDomainGeometryMatches` is false until reinstall;
+  `authoritativeDomainGeometryMatches` queries freshness. No restart/snapshot
+  schema change accompanies this interface; geometry remains derived state.
+- Short-range wire width constants `kTreePmShortRangeRequestWireBytes` and
+  `kTreePmShortRangeResponseWireBytes` are public additive constants.
 - Hierarchy packet wire version, exchange sequence, force epoch, and geometry
   frame are now part of the distributed contract. External test tools that
   constructed packet structs without them must use the version-1 defaults and

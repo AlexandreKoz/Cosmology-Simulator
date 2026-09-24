@@ -28,6 +28,7 @@
 #include "cosmosim/core/cuda_runtime.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/core/openmp_runtime.hpp"
 #include "cosmosim/workflows/runtime_module_registry.hpp"
 #include "cosmosim/core/time_scheduler.hpp"
 #include "cosmosim/core/units.hpp"
@@ -516,15 +517,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
     active("gravity_runtime.source_cell_row", m_local_source_cell_row);
     active("gravity_runtime.target_particle_row", m_active_target_particle_row);
     active("gravity_runtime.target_cell_row", m_active_target_cell_row);
-    active("gravity_runtime.target_species", m_active_target_species_tag);
-    active("gravity_runtime.target_softening", m_active_target_softening_comoving);
-    active("gravity_runtime.target_softening_mask", m_active_target_softening_override_mask);
     active("gravity_runtime.source_high_res_mask", m_source_is_high_res);
     active("gravity_runtime.target_high_res_mask", m_active_is_high_res);
     active("gravity_runtime.local_active_source_index", m_local_active_indices);
     active("gravity_runtime.local_active_particle_row", m_local_active_global_indices);
     active("gravity_runtime.force_refresh_particle_rows", m_force_refresh_particle_indices);
     active("gravity_runtime.authoritative_top_domain_leaves", m_authoritative_top_domain_leaves);
+    persistent("gravity_runtime.authoritative_top_domain_seed_leaves", m_authoritative_top_domain_seed_leaves);
     persistent("gravity_runtime.particle_force_cache_valid", m_particle_force_cache_valid);
     persistent("gravity_runtime.cell_force_cache_valid", m_cell_force_cache_valid);
 
@@ -578,9 +577,111 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_decomposition_epoch = gravity::DecompositionEpoch{decomposition_epoch};
   }
 
+  void publishAuthoritativeTopDomainLeavesSpan() {
+    if (!m_authoritative_top_domain_source_generation_valid) {
+      // Freshness was invalidated (ownership change before reinstall) or no
+      // geometry was ever installed. Retained stale leaves must not be
+      // consumed by TreePM; publish an empty routing view so selection falls
+      // back conservatively.
+      m_tree_pm_options.authoritative_domain_leaves = {};
+      m_tree_pm_options.authoritative_geometry_source_generation =
+          gravity::GravitySourceGeneration{m_authoritative_top_domain_source_generation};
+      return;
+    }
+    m_tree_pm_options.authoritative_domain_leaves =
+        std::span<const parallel::TopDomainLeaf>(
+            m_authoritative_top_domain_leaves.data(),
+            m_authoritative_top_domain_leaves.size());
+    m_tree_pm_options.authoritative_geometry_source_generation =
+        gravity::GravitySourceGeneration{m_authoritative_top_domain_source_generation};
+  }
+
+  // O(N_local) leaf refit for the force-solve path. Cached-kick paths return
+  // before this call, so the scan runs only when a solve will execute. The
+  // refit always consumes the stable seed leaves (decomposition-local leaf
+  // identities and SFC intervals), never the previously published refit
+  // result, so currently-empty seed groups keep their routing partition
+  // identity across ordinary drift/source-generation refreshes. Seed leaves
+  // retain ownership/epoch; only derived bounds and the source-generation
+  // stamp of the published set advance.
+  void refreshAuthoritativeTopDomainGeometryForSolve(
+      const core::StepContext& context,
+      const parallel::MpiContext& mpi_context) {
+    m_domain_geometry_refreshed_this_solve = false;
+    m_domain_geometry_refreshed_leaf_count = 0U;
+    m_domain_geometry_out_of_seed_range_source_count = 0U;
+    const std::uint64_t current_source_generation = context.state.gravitySourceGeneration();
+    if ((m_authoritative_top_domain_leaves.empty() &&
+         m_authoritative_top_domain_seed_leaves.empty()) &&
+        !m_authoritative_top_domain_source_generation_valid) {
+      publishAuthoritativeTopDomainLeavesSpan();
+      return;
+    }
+    if (!m_authoritative_top_domain_source_generation_valid) {
+      publishAuthoritativeTopDomainLeavesSpan();
+      return;
+    }
+    if (m_authoritative_top_domain_source_generation_valid &&
+        m_authoritative_top_domain_source_generation == current_source_generation) {
+      publishAuthoritativeTopDomainLeavesSpan();
+      return;
+    }
+    parallel::DecompositionConfig refit_config;
+    refit_config.world_size = std::max(mpi_context.worldSize(), 1);
+    refit_config.domain_x_min_comov = 0.0;
+    refit_config.domain_x_max_comov = m_config.cosmology.box_size_x_mpc_comoving;
+    refit_config.domain_y_min_comov = 0.0;
+    refit_config.domain_y_max_comov = m_config.cosmology.box_size_y_mpc_comoving;
+    refit_config.domain_z_min_comov = 0.0;
+    refit_config.domain_z_max_comov = m_config.cosmology.box_size_z_mpc_comoving;
+    parallel::TopDomainGeometryRefitDiagnostics refit_diagnostics;
+    std::exception_ptr refit_failure;
+    std::vector<parallel::TopDomainLeaf> refreshed;
+    // Ordinary refit seeds from the stable decomposition-local leaf set. The
+    // previously published (possibly empty-omitted) result is never the seed;
+    // fall back to it only if a legacy state populated current leaves without
+    // a recorded seed.
+    const std::span<const parallel::TopDomainLeaf> refit_seed =
+        !m_authoritative_top_domain_seed_leaves.empty()
+            ? std::span<const parallel::TopDomainLeaf>(
+                  m_authoritative_top_domain_seed_leaves)
+            : std::span<const parallel::TopDomainLeaf>(
+                  m_authoritative_top_domain_leaves);
+    try {
+      refreshed = parallel::refitAuthoritativeTopDomainLeaves(
+          refit_seed,
+          m_local_source_x,
+          m_local_source_y,
+          m_local_source_z,
+          refit_config,
+          std::max(mpi_context.worldRank(), 0),
+          m_decomposition_epoch.value,
+          &refit_diagnostics);
+    } catch (...) {
+      refit_failure = std::current_exception();
+    }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(
+        refit_failure, "gravity authoritative top-domain geometry refit");
+    m_authoritative_top_domain_leaves = std::move(refreshed);
+    m_authoritative_top_domain_source_generation = current_source_generation;
+    m_authoritative_top_domain_source_generation_valid = true;
+    m_domain_geometry_refreshed_this_solve = true;
+    m_domain_geometry_refreshed_leaf_count = refit_diagnostics.refreshed_leaf_count;
+    m_domain_geometry_out_of_seed_range_source_count =
+        refit_diagnostics.out_of_seed_range_source_count;
+    publishAuthoritativeTopDomainLeavesSpan();
+  }
+
   void commitParticleDecompositionChange() {
     m_decomposition_epoch = gravity::nextGravityIdentity(
         m_decomposition_epoch, "TreePM particle-decomposition epoch overflow");
+    // A committed ownership change immediately invalidates routing geometry
+    // produced under the previous epoch. Stale seed/current leaves are
+    // retained only for diagnostics and are marked unusable (freshness false;
+    // publish exposes an empty routing view) until the workflow installs
+    // fresh decomposition leaves. Ownership data, migration state, and the
+    // decomposition epoch itself are not cleared here.
+    m_authoritative_top_domain_source_generation_valid = false;
     // Acceleration lanes are dense-row mirrors and are not part of the
     // migration payload. Invalidate immediately so an output boundary after
     // migration serializes an honest cache.valid=false state instead of
@@ -595,7 +696,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
   }
 
   void installAuthoritativeTopDomainLeaves(
-      std::span<const parallel::TopDomainLeaf> leaves) override {
+      std::span<const parallel::TopDomainLeaf> leaves,
+      std::uint64_t source_generation) override {
     for (const parallel::TopDomainLeaf& leaf : leaves) {
       if (leaf.owner_rank != m_services.mpi_context.worldRank()) {
         throw std::invalid_argument(
@@ -606,11 +708,22 @@ class GravityRuntimeImpl final : public GravityRuntime {
             "gravity authoritative top-domain install received a stale decomposition epoch");
       }
     }
+    // True ownership/decomposition events (segment start, restart, migration
+    // commit) replace both the stable seed set and the current published set
+    // with the same fresh decomposition leaves, stamped with the source
+    // generation they cover. Ordinary drift/source refreshes never write the
+    // seed set.
+    m_authoritative_top_domain_seed_leaves.assign(leaves.begin(), leaves.end());
     m_authoritative_top_domain_leaves.assign(leaves.begin(), leaves.end());
-    m_tree_pm_options.authoritative_domain_leaves =
-        std::span<const parallel::TopDomainLeaf>(
-            m_authoritative_top_domain_leaves.data(),
-            m_authoritative_top_domain_leaves.size());
+    m_authoritative_top_domain_source_generation = source_generation;
+    m_authoritative_top_domain_source_generation_valid = true;
+    publishAuthoritativeTopDomainLeavesSpan();
+  }
+
+  [[nodiscard]] bool authoritativeDomainGeometryMatches(
+      std::uint64_t source_generation) const noexcept override {
+    return m_authoritative_top_domain_source_generation_valid &&
+        m_authoritative_top_domain_source_generation == source_generation;
   }
 
   [[nodiscard]] std::span<const double> cellAccelX() const noexcept { return m_cell_accel_x; }
@@ -1211,6 +1324,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
         context,
         force_target_particles,
         source_prediction_epoch);
+    // Refresh derived top-domain leaf bounds against the source snapshot this
+    // solve will evaluate (post-prediction compact sources). Cached-kick
+    // paths returned earlier, so this O(N) scan never runs on a pure cache hit.
+    refreshAuthoritativeTopDomainGeometryForSolve(context, mpi_context);
     m_local_kick_particle_count = 0U;
     for (const std::uint32_t particle_index :
          context.active_set.particle_indices) {
@@ -1423,6 +1540,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // state?"; force epoch answers "which evaluation opportunity?".
     m_tree_pm_options.source_generation = gravity::GravitySourceGeneration{
         context.state.gravitySourceGeneration()};
+    // Geometry freshness metadata was published by the pre-solve refit; keep
+    // the stamp aligned with the authoritative source generation this solve.
+    publishAuthoritativeTopDomainLeavesSpan();
     m_tree_pm_options.pm_field_version = gravity::PmFieldVersion{decision.field_version};
     m_tree_pm_options.force_epoch = gravity::ForceEvaluationEpoch{
         .sequence = decision.gravity_kick_opportunity,
@@ -1469,13 +1589,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .source_particle_epsilon_override_mask = std::span<const std::uint8_t>(
             m_local_source_softening_override_mask.empty() ? nullptr : m_local_source_softening_override_mask.data(),
             m_local_source_softening_override_mask.size()),
-        .target_species_tag = std::span<const std::uint32_t>(m_active_target_species_tag.data(), m_active_target_species_tag.size()),
-        .target_particle_epsilon_comoving = std::span<const double>(
-            m_active_target_softening_comoving.empty() ? nullptr : m_active_target_softening_comoving.data(),
-            m_active_target_softening_comoving.size()),
-        .target_particle_epsilon_override_mask = std::span<const std::uint8_t>(
-            m_active_target_softening_override_mask.empty() ? nullptr : m_active_target_softening_override_mask.data(),
-            m_active_target_softening_override_mask.size()),
+         .target_species_tag = {},
+         .target_particle_epsilon_comoving = {},
+         .target_particle_epsilon_override_mask = {},
+
         .species_policy = m_tree_pm_species_softening,
     };
     gravity::TreePmProfileEvent tree_pm_profile;
@@ -1499,8 +1616,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
 
     m_last_decomposition_measurements = parallel::DecompositionRuntimeMeasurements{
-        .tree_pair_evaluations_recent = m_last_tree_pm_diagnostics.residual_pair_evaluations +
-            tree_pm_profile.tree_profile.particle_particle_interactions,
+        .tree_pair_evaluations_recent = m_last_tree_pm_diagnostics.residual_pair_evaluations,
         .tree_remote_request_bytes_recent = m_last_tree_pm_diagnostics.residual_remote_request_bytes +
             m_last_tree_pm_diagnostics.residual_remote_response_bytes,
         .pm_mesh_cells_touched_recent = static_cast<std::uint64_t>(m_tree_pm_coordinator.slabLayout().localCellCount()),
@@ -1508,12 +1624,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .amr_patch_cells_updated_recent = static_cast<std::uint64_t>(context.state.cells.size()),
         .hydro_face_fluxes_recent = 0,
         .ghost_exchange_bytes_recent = gravity_ghost_refresh.sent_bytes + gravity_ghost_refresh.received_bytes,
-        .tree_wall_ms_recent = tree_pm_profile.tree_profile.build_ms + tree_pm_profile.tree_profile.multipole_ms +
-            tree_pm_profile.tree_profile.traversal_ms + tree_pm_profile.tree_short_range_ms,
-        .pm_wall_ms_recent = tree_pm_profile.pm_profile.assign_ms + tree_pm_profile.pm_profile.fft_forward_ms +
-            tree_pm_profile.pm_profile.poisson_ms + tree_pm_profile.pm_profile.gradient_ms +
-            tree_pm_profile.pm_profile.fft_inverse_ms + tree_pm_profile.pm_profile.fft_transpose_ms +
-            tree_pm_profile.pm_profile.interpolate_ms,
+        // tree_short_range_ms is the inclusive residual-phase wall time
+        // (source preprocess + build + multipoles + traversal + LET). The
+        // build/multipole/traversal subphase fields are its children and must
+        // not be added again.
+        .tree_wall_ms_recent = tree_pm_profile.tree_short_range_ms,
+        // total_ms is the single inclusive PM-phase measurement; assign/fft/
+        // poisson/gradient/interpolate subphases overlap and must not be summed.
+        .pm_wall_ms_recent = tree_pm_profile.pm_profile.total_ms,
         .gpu_kernel_ms_recent = tree_pm_profile.pm_profile.device_kernel_ms,
         .accelerator_occupancy_fraction_recent = (tree_pm_profile.pm_profile.device_kernel_ms > 0.0) ? 1.0 : 0.0,
         .has_measurements = true,
@@ -1628,6 +1746,32 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   gravity::pmDecompositionTopologyName(decomposition_descriptor.topology))},
               {"top_level_domain_leaf_count", std::to_string(m_last_tree_pm_diagnostics.top_level_domain_leaf_count)},
               {"authoritative_domain_leaf_count", std::to_string(m_last_tree_pm_diagnostics.authoritative_domain_leaf_count)},
+              {"domain_geometry_source_generation", std::to_string(
+                  m_last_tree_pm_diagnostics.domain_geometry_source_generation)},
+              {"current_gravity_source_generation", std::to_string(
+                  m_last_tree_pm_diagnostics.current_gravity_source_generation)},
+              {"domain_geometry_fresh", m_last_tree_pm_diagnostics.domain_geometry_fresh != 0U ? "true" : "false"},
+              {"domain_geometry_refreshed", m_domain_geometry_refreshed_this_solve ? "true" : "false"},
+              {"domain_geometry_fallback_used",
+               m_last_tree_pm_diagnostics.domain_geometry_fallback_used != 0U ? "true" : "false"},
+              {"domain_geometry_fallback_reason", gravity::treePmDomainGeometryFallbackReasonName(
+                  static_cast<gravity::TreePmDomainGeometryFallbackReason>(
+                      m_last_tree_pm_diagnostics.domain_geometry_fallback_reason))},
+              {"domain_geometry_refreshed_leaf_count",
+               std::to_string(m_domain_geometry_refreshed_leaf_count)},
+              {"domain_geometry_out_of_seed_range_source_count",
+               std::to_string(m_domain_geometry_out_of_seed_range_source_count)},
+              {"domain_geometry_uncovered_source_count", std::to_string(
+                  m_last_tree_pm_diagnostics.domain_geometry_uncovered_source_count)},
+              {"openmp_compiled", m_last_tree_pm_diagnostics.openmp_compiled != 0U ? "true" : "false"},
+               {"openmp_configured_workers", std::to_string(m_last_tree_pm_diagnostics.openmp_configured_workers)},
+
+              {"openmp_observed_workers", std::to_string(m_last_tree_pm_diagnostics.openmp_observed_workers)},
+              {"residual_local_target_count", std::to_string(m_last_tree_pm_diagnostics.residual_local_target_count)},
+              {"residual_incoming_target_count",
+               std::to_string(m_last_tree_pm_diagnostics.residual_incoming_target_count)},
+              {"residual_worker_scratch_high_water_bytes",
+               std::to_string(m_last_tree_pm_diagnostics.residual_worker_scratch_high_water_bytes)},
               {"domain_hierarchy_node_count", std::to_string(m_last_tree_pm_diagnostics.domain_hierarchy_node_count)},
               {"domain_cache_hits", std::to_string(m_last_tree_pm_diagnostics.domain_cache_hit_count)},
               {"domain_cache_misses", std::to_string(m_last_tree_pm_diagnostics.domain_cache_miss_count)},
@@ -1640,6 +1784,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"let_wire_bytes_sent", std::to_string(m_last_tree_pm_diagnostics.let_wire_bytes_sent)},
               {"let_wire_bytes_received", std::to_string(m_last_tree_pm_diagnostics.let_wire_bytes_received)},
               {"let_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.let_high_water_bytes)},
+              {"let_wire_buffer_high_water_bytes", std::to_string(
+                  m_last_tree_pm_diagnostics.let_wire_buffer_high_water_bytes)},
+              {"let_known_workspace_high_water_bytes", std::to_string(
+                  m_last_tree_pm_diagnostics.let_known_workspace_high_water_bytes)},
               {"let_discovery_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_discovery_ms)},
               {"let_graph_setup_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_graph_setup_ms)},
               {"let_communication_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_communication_ms)},
@@ -1647,8 +1795,22 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"let_communication_wait_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_communication_wait_ms)},
               {"let_overlap_efficiency", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_overlap_efficiency)},
               {"let_remote_traversal_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_remote_traversal_ms)},
-              {"local_pair_evaluations", std::to_string(tree_pm_profile.tree_profile.particle_particle_interactions)},
-              {"remote_pair_evaluations", std::to_string(m_last_tree_pm_diagnostics.residual_pair_evaluations)},
+              {"incoming_request_decode_validation_ms", formatRuntimeDouble(
+                  m_last_tree_pm_diagnostics.incoming_request_decode_validation_ms)},
+              {"incoming_remote_target_compute_ms", formatRuntimeDouble(
+                  m_last_tree_pm_diagnostics.incoming_remote_target_compute_ms)},
+              {"incoming_response_encode_pack_ms", formatRuntimeDouble(
+                  m_last_tree_pm_diagnostics.incoming_response_encode_pack_ms)},
+              {"protocol_validation_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.protocol_validation_ms)},
+              {"protocol_consensus_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.protocol_consensus_ms)},
+              {"response_exchange_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.response_exchange_ms)},
+              {"local_pair_evaluations", std::to_string(m_last_tree_pm_diagnostics.local_pair_evaluations)},
+              {"incoming_remote_pair_evaluations",
+               std::to_string(m_last_tree_pm_diagnostics.incoming_remote_pair_evaluations)},
+              {"remote_pair_evaluations",
+               std::to_string(m_last_tree_pm_diagnostics.incoming_remote_pair_evaluations)},
+              {"total_pair_evaluations",
+               std::to_string(m_last_tree_pm_diagnostics.residual_pair_evaluations)},
               {"remote_request_packet_imbalance_ratio", formatRuntimeDouble(
                   m_last_tree_pm_diagnostics.residual_remote_request_packet_imbalance_ratio)},
               {"pm_routed_density_records", std::to_string(tree_pm_profile.pm_profile.routed_density_records)},
@@ -2412,44 +2574,27 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_owned_local_index_by_cell[cell_index] = static_cast<int>(source_index);
     }
 
-    m_local_active_indices.clear();
-    m_local_active_global_indices.clear();
-    m_active_target_particle_row.clear();
-    m_active_target_cell_row.clear();
-    m_active_target_species_tag.clear();
-    m_active_target_softening_comoving.clear();
-    m_active_target_softening_override_mask.clear();
-    const std::size_t target_capacity = core::checkedSizeAdd(
+     m_local_active_indices.clear();
+     m_local_active_global_indices.clear();
+     m_active_target_particle_row.clear();
+     m_active_target_cell_row.clear();
+     const std::size_t target_capacity = core::checkedSizeAdd(
+
         active_particles.size(), authoritative_source_rows.gas_cell_rows.size(),
         "gravity authoritative target capacity");
     m_local_active_indices.reserve(target_capacity);
     m_local_active_global_indices.reserve(active_particles.size());
     m_active_target_particle_row.reserve(target_capacity);
-    m_active_target_cell_row.reserve(target_capacity);
-    m_active_target_species_tag.reserve(target_capacity);
-    if (has_softening_values) {
-      m_active_target_softening_comoving.reserve(target_capacity);
-    }
-    if (has_softening_masks) {
-      m_active_target_softening_override_mask.reserve(target_capacity);
-    }
+     m_active_target_cell_row.reserve(target_capacity);
+
 
     const auto appendTarget = [&](std::uint32_t source_index,
                                   std::uint32_t particle_row,
                                   std::uint32_t cell_row) {
-      m_local_active_indices.push_back(source_index);
-      m_active_target_particle_row.push_back(particle_row);
-      m_active_target_cell_row.push_back(cell_row);
-      m_active_target_species_tag.push_back(
-          m_local_source_species_tag[source_index]);
-      if (has_softening_values) {
-        m_active_target_softening_comoving.push_back(
-            m_local_source_softening_comoving[source_index]);
-      }
-      if (has_softening_masks) {
-        m_active_target_softening_override_mask.push_back(
-            m_local_source_softening_override_mask[source_index]);
-      }
+       m_local_active_indices.push_back(source_index);
+       m_active_target_particle_row.push_back(particle_row);
+       m_active_target_cell_row.push_back(cell_row);
+
     };
 
     for (const std::uint32_t global_index : active_particles) {
@@ -2525,12 +2670,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<std::uint8_t> m_local_source_softening_override_mask;
   std::vector<std::uint32_t> m_local_source_particle_row;
   std::vector<std::uint32_t> m_local_source_cell_row;
-  std::vector<std::uint32_t> m_active_target_particle_row;
-  std::vector<std::uint32_t> m_active_target_cell_row;
-  std::vector<std::uint32_t> m_active_target_species_tag;
-  std::vector<double> m_active_target_softening_comoving;
-  std::vector<std::uint8_t> m_active_target_softening_override_mask;
-  std::vector<std::uint8_t> m_source_is_high_res;
+   std::vector<std::uint32_t> m_active_target_particle_row;
+   std::vector<std::uint32_t> m_active_target_cell_row;
+   std::vector<std::uint8_t> m_source_is_high_res;
+
   std::vector<std::uint8_t> m_active_is_high_res;
   std::filesystem::path m_zoom_region_path;
   bool m_zoom_membership_loaded = false;
@@ -2539,7 +2682,18 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<std::uint32_t> m_local_active_indices;
   std::vector<std::uint32_t> m_local_active_global_indices;
   std::vector<std::uint32_t> m_force_refresh_particle_indices;
+  // Stable decomposition-local leaf identities/SFC intervals replaced only at
+  // segment/restart/ownership-change install; survives ordinary drift refits
+  // (may include currently-empty leaves).
+  std::vector<parallel::TopDomainLeaf> m_authoritative_top_domain_seed_leaves;
+  // Current published routing leaves for the stamped source generation; may
+  // omit currently-empty seed groups; refitted from the seed set.
   std::vector<parallel::TopDomainLeaf> m_authoritative_top_domain_leaves;
+  std::uint64_t m_authoritative_top_domain_source_generation = 0U;
+  bool m_authoritative_top_domain_source_generation_valid = false;
+  bool m_domain_geometry_refreshed_this_solve = false;
+  std::uint64_t m_domain_geometry_refreshed_leaf_count = 0U;
+  std::uint64_t m_domain_geometry_out_of_seed_range_source_count = 0U;
   std::size_t m_local_kick_particle_count = 0U;
   gravity::TreePmDiagnostics m_last_tree_pm_diagnostics{};
   parallel::DecompositionRuntimeMeasurements m_last_decomposition_measurements{};
