@@ -2,8 +2,10 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "cosmosim/cosmosim.hpp"
@@ -307,6 +309,85 @@ int main() {
       /*expected_particle_id_sum=*/(42ULL * 43ULL) / 2ULL,
       /*expected_particle_id_xor=*/xorRangeOneToN(42ULL)));
 
+  // P2 geometry lifecycle on the required two-rank TreePM run: published
+  // top-domain routing geometry must never take a fallback path for covered
+  // sources, and the P1 residual pair identity must hold solve by solve with
+  // a nonzero incoming remote contribution under distributed execution.
+  {
+    std::ifstream events_file(report.operational_report_json_path);
+    assert(events_file.good());
+    std::stringstream events_buffer;
+    events_buffer << events_file.rdbuf();
+    const std::string treepm_events = events_buffer.str();
+    assert(treepm_events.find("\"event_kind\": \"gravity.treepm_let\"") != std::string::npos);
+    assert(treepm_events.find("\"domain_geometry_fallback_used\": \"false\"") != std::string::npos);
+    assert(treepm_events.find("\"domain_geometry_fallback_reason\": \"none\"") != std::string::npos);
+    assert(treepm_events.find("\"domain_geometry_uncovered_source_count\": \"0\"") != std::string::npos);
+
+    auto extractPayloadValues = [](const std::string& text, std::string_view key) {
+      std::vector<std::string> values;
+      const std::string needle = "\"" + std::string(key) + "\": \"";
+      std::size_t pos = 0U;
+      while ((pos = text.find(needle, pos)) != std::string::npos) {
+        const std::size_t begin = pos + needle.size();
+        const std::size_t end = text.find('"', begin);
+        if (end == std::string::npos) {
+          break;
+        }
+        values.push_back(text.substr(begin, end - begin));
+        pos = end + 1U;
+      }
+      return values;
+    };
+    const std::vector<std::string> totals =
+        extractPayloadValues(treepm_events, "total_pair_evaluations");
+    const std::vector<std::string> locals =
+        extractPayloadValues(treepm_events, "local_pair_evaluations");
+    const std::vector<std::string> remotes =
+        extractPayloadValues(treepm_events, "remote_pair_evaluations");
+    assert(totals.size() == 5U);
+    assert(locals.size() == totals.size());
+    assert(remotes.size() == totals.size());
+    std::uint64_t incoming_remote_pairs = 0ULL;
+    for (std::size_t i = 0U; i < totals.size(); ++i) {
+      assert(std::stoull(totals[i]) ==
+             std::stoull(locals[i]) + std::stoull(remotes[i]));
+      incoming_remote_pairs += std::stoull(remotes[i]);
+    }
+    assert(incoming_remote_pairs > 0ULL);
+  }
+
+  // P5 startup planner admission: with world_size > 1 the compact startup
+  // planner's transient live set is the first governed admission, so a
+  // 1-byte process budget must reject collectively with the production owner
+  // tag before any planner population is allocated.
+  {
+    std::string budget_config =
+        buildConfigText(/*cadence_steps=*/1, world_size,
+                        "treepm_mpi_startup_planner_budget_reject");
+    budget_config += "process_memory_budget_bytes = 1\n";
+    const cosmosim::core::FrozenConfig budget_frozen =
+        cosmosim::core::loadFrozenConfigFromString(
+            budget_config, "test_reference_workflow_treepm_mpi_startup_budget");
+    cosmosim::workflows::ReferenceWorkflowRunner budget_runner(budget_frozen);
+    cosmosim::workflows::ReferenceWorkflowOptions budget_options;
+    budget_options.write_outputs = false;
+    budget_options.initial_particle_scheduler_identity_records =
+        schedulerSeedForRank(world_rank);
+    bool rejected = false;
+    try {
+      (void)budget_runner.run(budget_options);
+    } catch (const std::runtime_error& ex) {
+      const std::string_view message(ex.what());
+      rejected =
+          message.find("memory reservation rejected") != std::string_view::npos &&
+          message.find("hard_limit_bytes=1") != std::string_view::npos &&
+          message.find("owner=parallel.decomposition.startup_planner") !=
+              std::string_view::npos;
+    }
+    assert(rejected);
+  }
+
 #if COSMOSIM_ENABLE_HDF5
   {
     auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
@@ -327,8 +408,16 @@ int main() {
     cosmosim::workflows::ReferenceWorkflowOptions direct_options;
     direct_options.write_outputs = true;
     direct_options.max_steps_override = 2;
+    // Output-writing scenarios must share one output root across ranks:
+    // snapshot_layout=auto resolves to a collective single-file MPI write in
+    // Parallel-HDF5 builds, which requires every rank to open the same
+    // collective snapshot path. Per-rank roots would give each rank a
+    // different path (rank N's shared snapshot directory is only created by
+    // rank 0), and the mismatched MPI_File_open collectives deadlock inside
+    // OpenMPI ompio. Restart files remain per-rank via the rankNNN-suffixed
+    // run directory.
     const cosmosim::workflows::ReferenceWorkflowReport direct_report =
-        direct_runner.run(root / ("rank_" + std::to_string(world_rank) + "_direct"), direct_options);
+        direct_runner.run(root / "direct", direct_options);
     assert(direct_report.restart_roundtrip_executed);
     assert(direct_report.restart_roundtrip_ok);
 
@@ -348,7 +437,7 @@ int main() {
     first_options.write_outputs = true;
     first_options.max_steps_override = 1;
     const cosmosim::workflows::ReferenceWorkflowReport first_report =
-        restart_runner.run(root / ("rank_" + std::to_string(world_rank) + "_first"), first_options);
+        restart_runner.run(root / "first", first_options);
     assert(first_report.restart_roundtrip_executed);
     assert(first_report.restart_roundtrip_ok);
     assert(!first_report.restart_path.empty());
@@ -371,7 +460,7 @@ int main() {
     resumed_options.restart_state_override = &first_restart;
     resumed_options.max_steps_override = 1;
     const cosmosim::workflows::ReferenceWorkflowReport resumed_report =
-        restart_runner.run(root / ("rank_" + std::to_string(world_rank) + "_resumed"), resumed_options);
+        restart_runner.run(root / "resumed", resumed_options);
     assert(resumed_report.restart_roundtrip_executed);
     assert(resumed_report.restart_roundtrip_ok);
     assert(resumed_report.completed_steps == 1U);
@@ -388,9 +477,7 @@ int main() {
       bad_options.write_outputs = false;
       bad_options.restart_state_override = &mismatched_world_restart;
       bad_options.max_steps_override = 1;
-      (void)restart_runner.run(
-          root / ("rank_" + std::to_string(world_rank) + "_bad_rank_count"),
-          bad_options);
+      (void)restart_runner.run(root / "bad_rank_count", bad_options);
     } catch (const std::runtime_error& ex) {
       const std::string message = ex.what();
       rank_count_resume_threw =

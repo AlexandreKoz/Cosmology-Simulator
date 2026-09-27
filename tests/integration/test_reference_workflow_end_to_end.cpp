@@ -321,12 +321,19 @@ int main() {
           output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
     } catch (const std::runtime_error& ex) {
       const std::string_view message(ex.what());
+      // The first governed admission to execute may reject first. Since the
+      // P4 startup decomposition closure the startup seed/top-domain
+      // reservation fires before any gravity-stage reservation, so the
+      // rejection owner is not necessarily gravity-owned. Either the DMO
+      // process preflight or a MemoryGovernor reservation rejection pinned to
+      // the 1-byte hard limit proves the run failed closed before
+      // materializing large staging/tree/PM workspaces.
       rejected =
           message.find("DMO process memory preflight requires") != std::string_view::npos ||
           (message.find("memory reservation rejected") != std::string_view::npos &&
            message.find("hard_limit_bytes=1") != std::string_view::npos &&
-           (message.find("gravity.treepm.phase_peak") != std::string_view::npos ||
-            message.find("gravity.gravity_kick_pre") != std::string_view::npos));
+           (message.find("owner=parallel.") != std::string_view::npos ||
+            message.find("owner=gravity.") != std::string_view::npos));
     }
     assert(rejected);
   }
@@ -349,8 +356,22 @@ int main() {
         "science_light_interval_steps = 1\n"
         "science_heavy_interval_steps = 8\n"
         "\n[parallel]\n"
-        "process_memory_budget_bytes = 1073741824\n"
-        "process_output_restart_overlap_bytes = 1021000000\n"
+        // Budget/overlap arithmetic is pinned to measured production memory
+        // behavior: the in-step accounted peak is baseline + committed =
+        // 67,235,394 bytes (dominated by the hydro active-batch scratch arena),
+        // while at the analysis stage almost everything is released
+        // (baseline 94,166 + committed 2,392). Red pressure therefore requires
+        // the overlap reserve itself to sit above the 95% red threshold
+        // (0.95 * budget), while the budget must still admit the mid-step peak.
+        // budget = 1,400,000,000 leaves 1,764,606 bytes over the measured peak,
+        // and overlap = 1,331,000,000 keeps analysis accounted demand 1,096,558
+        // bytes above the red threshold with ~68.9 MB of headroom for the
+        // required run-health bundle. The previous pair (1,073,741,824 /
+        // 1,021,000,000) left ~15 KB of headroom mid-step, so the required AMR
+        // sweep was rejected and the fixture failed its own completed_steps
+        // assertion.
+        "process_memory_budget_bytes = 1400000000\n"
+        "process_output_restart_overlap_bytes = 1331000000\n"
         "process_memory_safety_margin_fraction = 0.0\n";
     const auto pressure_frozen = cosmosim::core::loadFrozenConfigFromString(
         pressure_config, "test_reference_workflow_red_pressure");
@@ -409,6 +430,12 @@ int main() {
     cosmosim::workflows::ReferenceWorkflowOptions catchup_options;
     catchup_options.step_index = 3U;
     catchup_options.max_steps_override = 8U;
+    // Pin dt so the 8-step segment fits the time_end_code window
+    // (0.0108 - 0.01 = 0.0008 = 8 * 1e-4). Adaptive CFL currently proposes
+    // ~1.49e-4 for this fixture, which reached time_end after only 6 steps and
+    // failed the completed_steps == 8 assertions. A pinned dt keeps the
+    // cadence bookkeeping under test independent of physics-driven dt drift.
+    catchup_options.dt_time_code = 1.0e-4;
     catchup_options.write_outputs = false;
     catchup_options.register_runtime_modules =
         [pressure_toggle](cosmosim::workflows::RuntimeModuleRegistry& registry) {
@@ -555,6 +582,80 @@ int main() {
     assert(terminal_events.find("\"dropped_count\": \"1\"") != std::string::npos);
   }
 
+  // P1 residual observability identity plus P3 OpenMP worker telemetry: the
+  // exact pair-evaluation identity holds event by event, configured worker
+  // telemetry tracks the requested team size, and residual counters are
+  // deterministic across OpenMP team sizes.
+  {
+    auto extractPayloadValues = [](const std::string& text, std::string_view key) {
+      std::vector<std::string> values;
+      const std::string needle = "\"" + std::string(key) + "\": \"";
+      std::size_t pos = 0U;
+      while ((pos = text.find(needle, pos)) != std::string::npos) {
+        const std::size_t begin = pos + needle.size();
+        const std::size_t end = text.find('"', begin);
+        if (end == std::string::npos) {
+          break;
+        }
+        values.push_back(text.substr(begin, end - begin));
+        pos = end + 1U;
+      }
+      return values;
+    };
+    std::vector<std::vector<std::string>> totals_by_threads;
+    std::vector<std::vector<std::string>> locals_by_threads;
+    std::vector<std::vector<std::string>> remotes_by_threads;
+#ifdef _OPENMP
+    const std::vector<int> omp_thread_sizes{1, 2, 4};
+#else
+    // A non-OpenMP build fail-closes parallel.omp_threads > 1 in core config,
+    // so only the serial worker telemetry can be qualified here.
+    const std::vector<int> omp_thread_sizes{1};
+#endif
+    for (const int omp_threads : omp_thread_sizes) {
+      const std::string label = std::to_string(omp_threads);
+      std::string omp_config =
+          buildConfigText(1, "reference_integration_omp_workers_" + label, "cic");
+      omp_config += "\n[parallel]\nomp_threads = " + label + "\n";
+      const auto omp_frozen = cosmosim::core::loadFrozenConfigFromString(
+          omp_config, "test_reference_workflow_omp_workers");
+      cosmosim::workflows::ReferenceWorkflowRunner omp_runner(omp_frozen);
+      const cosmosim::workflows::ReferenceWorkflowReport omp_report =
+          omp_runner.run(
+              output_dir,
+              cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+      assert(omp_report.completed_steps == 2U);
+      const std::string omp_events = readFile(omp_report.operational_report_json_path);
+      const auto totals = extractPayloadValues(omp_events, "total_pair_evaluations");
+      const auto locals = extractPayloadValues(omp_events, "local_pair_evaluations");
+      const auto remotes = extractPayloadValues(omp_events, "remote_pair_evaluations");
+      const auto configured = extractPayloadValues(omp_events, "openmp_configured_workers");
+      const auto observed = extractPayloadValues(omp_events, "openmp_observed_workers");
+      assert(totals.size() == 5U);
+      assert(locals.size() == totals.size());
+      assert(remotes.size() == totals.size());
+      for (std::size_t i = 0U; i < totals.size(); ++i) {
+        assert(std::stoull(totals[i]) == std::stoull(locals[i]) + std::stoull(remotes[i]));
+      }
+      assert(configured.size() == totals.size());
+      assert(observed.size() == totals.size());
+      for (std::size_t i = 0U; i < configured.size(); ++i) {
+        assert(std::stoul(configured[i]) == static_cast<unsigned long>(omp_threads));
+        // Observed worker telemetry reflects the configured team size.
+        assert(std::stoul(observed[i]) == std::stoul(configured[i]));
+      }
+      totals_by_threads.push_back(totals);
+      locals_by_threads.push_back(locals);
+      remotes_by_threads.push_back(remotes);
+    }
+    assert(totals_by_threads.size() == omp_thread_sizes.size());
+    for (std::size_t run = 1U; run < totals_by_threads.size(); ++run) {
+      assert(totals_by_threads[run] == totals_by_threads[0]);
+      assert(locals_by_threads[run] == locals_by_threads[0]);
+      assert(remotes_by_threads[run] == remotes_by_threads[0]);
+    }
+  }
+
   std::string endpoint_config =
       buildConfigText(1, "reference_integration_endpoint_clip", "cic");
   const std::string original_endpoint = "time_end_code = 0.0102";
@@ -625,10 +726,14 @@ int main() {
       "time_end_code = 0.0104");
   const std::size_t time_cadence_steps = time_cadence_config.find("max_global_steps = 2");
   assert(time_cadence_steps != std::string::npos);
+  // The fixture's adaptive gravity CFL dt (~1.49e-4) sits below the option cap
+  // (2.0e-4), so the timeline phases below a cap-bound design: output-event
+  // clips land at steps 2 and 4, and the 0.0104 endpoint is reached by an
+  // endpoint clip on step 5. The step budget must cover that fifth step.
   time_cadence_config.replace(
       time_cadence_steps,
       std::string("max_global_steps = 2").size(),
-      "max_global_steps = 4");
+      "max_global_steps = 5");
   const auto time_cadence_frozen = cosmosim::core::loadFrozenConfigFromString(
       time_cadence_config, "test_reference_workflow_time_cadence");
   cosmosim::workflows::ReferenceWorkflowRunner time_cadence_runner(time_cadence_frozen);
@@ -643,12 +748,37 @@ int main() {
   const auto time_event_restart =
       cosmosim::io::readRestartCheckpointHdf5(time_cadence_report.restart_path);
   assert(std::abs(time_event_restart.integrator_state.current_time_code - 0.0103) < 1.0e-15);
-  assert(std::abs(time_event_restart.integrator_state.dt_time_code - 0.0002) < 1.0e-15);
+  const std::string time_cadence_events = readFile(time_cadence_report.operational_report_json_path);
+  {
+    // The final checkpoint's integrator dt is the unclipped resume dt latched
+    // at the last clipping output boundary (the time coordinator restores it
+    // into the integrator before the checkpoint is written). With the adaptive
+    // CFL below the option cap that latched value is the CFL dt, not the cap.
+    // Anchor on the last time.output_event_clip event: endpoint clips share the
+    // same payload key but a later one belongs to the post-checkpoint step.
+    const std::string clip_kind_key = "\"event_kind\": \"time.output_event_clip\"";
+    const std::string::size_type last_clip_pos = time_cadence_events.rfind(clip_kind_key);
+    assert(last_clip_pos != std::string::npos);
+    const std::string unclipped_key = "\"unclipped_dt_time_code\": \"";
+    const std::string::size_type unclipped_pos =
+        time_cadence_events.find(unclipped_key, last_clip_pos);
+    assert(unclipped_pos != std::string::npos);
+    const std::string::size_type last_unclipped_pos = unclipped_pos + unclipped_key.size();
+    const std::string::size_type value_end =
+        time_cadence_events.find('"', last_unclipped_pos);
+    assert(value_end != std::string::npos);
+    std::istringstream unclipped_stream(
+        time_cadence_events.substr(last_unclipped_pos, value_end - last_unclipped_pos));
+    double resume_dt_expected = 0.0;
+    unclipped_stream >> resume_dt_expected;
+    assert(resume_dt_expected > 0.0);
+    assert(std::abs(time_event_restart.integrator_state.dt_time_code - resume_dt_expected) <=
+           1.0e-15);
+  }
   assert(std::abs(
       time_event_restart.output_cadence_state.snapshot_interval_time_code - 0.00015) < 1.0e-15);
   assert(std::abs(
       time_event_restart.output_cadence_state.next_snapshot_time_code - 0.01045) < 1.0e-15);
-  const std::string time_cadence_events = readFile(time_cadence_report.operational_report_json_path);
   assert(time_cadence_events.find("\"event_kind\": \"time.output_event_clip\"") !=
          std::string::npos);
   const auto time_cadence_resume_report = time_cadence_runner.run(

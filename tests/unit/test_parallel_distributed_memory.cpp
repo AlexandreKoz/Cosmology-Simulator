@@ -14,6 +14,7 @@
 #include <span>
 #include "../../src/parallel/internal/memory_constrained_sfc.hpp"
 
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 #include "../../src/workflows/internal/runtime_decomposition_source_storage.hpp"
@@ -2226,6 +2227,184 @@ void testCompactPlannerContractValidation() {
   }
 }
 
+// P5 qualification: the compact planner's dense-index contract must reject
+// every population that is not a permutation of [0, record count): duplicates,
+// holes (which by pigeonhole imply a duplicate when every value is in range),
+// and out-of-range values all fail closed before ownership is consumed.
+void testCompactPlannerDenseIndexContract() {
+  using cosmosim::parallel::buildMortonSfcDecompositionFromCompact;
+  using cosmosim::parallel::DecompositionConfig;
+  using cosmosim::parallel::DecompositionItem;
+  using cosmosim::parallel::DecompositionWorkComponents;
+  using cosmosim::parallel::makeCompactRuntimeDecompositionRecords;
+
+  const DecompositionConfig config = makePlannerFixtureConfig(2, false, true);
+  const std::vector<DecompositionItem> items = makePlannerFixtureItems("uniform", 4, 2);
+  const std::vector<DecompositionWorkComponents> components = extractComponents(items);
+  constexpr std::size_t k_record_count = 4U;
+
+  std::size_t permutation_plans = 0U;
+  std::size_t rejected_populations = 0U;
+  for (std::size_t code = 0U; code < 256U; ++code) {
+    auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    assert(records.size() == k_record_count);
+    std::size_t value = code;
+    for (std::size_t i = 0U; i < records.size(); ++i) {
+      records[i].local_index = value % k_record_count;
+      value /= k_record_count;
+    }
+    std::vector<std::size_t> sorted_indices(records.size(), 0U);
+    for (std::size_t i = 0U; i < records.size(); ++i) {
+      sorted_indices[i] = records[i].local_index;
+    }
+    std::sort(sorted_indices.begin(), sorted_indices.end());
+    const bool is_permutation = std::adjacent_find(sorted_indices.begin(), sorted_indices.end()) ==
+            sorted_indices.end() &&
+        sorted_indices.back() == k_record_count - 1U;
+    bool succeeded = false;
+    try {
+      const auto plan =
+          buildMortonSfcDecompositionFromCompact(records, config, components);
+      succeeded = true;
+      assert(plan.owning_rank_by_item.size() == k_record_count);
+      for (const int owner : plan.owning_rank_by_item) {
+        // The -1 sentinel must never survive a successful plan.
+        assert(owner >= 0);
+        assert(owner < config.world_size);
+      }
+    } catch (const std::invalid_argument&) {
+      succeeded = false;
+    }
+    if (is_permutation) {
+      assert(succeeded);
+      ++permutation_plans;
+    } else {
+      assert(!succeeded);
+      ++rejected_populations;
+    }
+  }
+  assert(permutation_plans == 24U);
+  assert(rejected_populations == 256U - 24U);
+
+  // Message identity for the two guard classes.
+  {
+    auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    records[3].local_index = records[0].local_index;
+    bool matched = false;
+    try {
+      (void)buildMortonSfcDecompositionFromCompact(records, config, components);
+    } catch (const std::invalid_argument& e) {
+      matched = std::string_view(e.what()) ==
+          "compact decomposition local_index must be unique within the record population";
+    }
+    assert(matched);
+  }
+  {
+    auto records = makeCompactRuntimeDecompositionRecords(items, config);
+    records[0].local_index = k_record_count;
+    bool matched = false;
+    try {
+      (void)buildMortonSfcDecompositionFromCompact(records, config, components);
+    } catch (const std::invalid_argument& e) {
+      matched = std::string_view(e.what()) ==
+          "compact decomposition record local_index must be dense within [0, record count)";
+    }
+    assert(matched);
+  }
+}
+
+// P5 qualification: the startup planner's transient live-set estimate models
+// the documented planner layout term-for-term, fails closed on impossible
+// populations, and is the byte count admitted through the single
+// MemoryGovernor under the production owner tag.
+void testCompactStartupPlannerTransientAdmission() {
+  using cosmosim::parallel::CompactRuntimeDecompositionRecord;
+  using cosmosim::parallel::CompactStartupPlannerMemoryEstimate;
+  using cosmosim::parallel::estimateCompactStartupPlannerTransientBytes;
+
+  const std::size_t entity_upper_bound = 42U;
+  const std::size_t patch_count = 6U;
+  const std::size_t cell_count = 42U;
+  const std::size_t world_size = 4U;
+  const std::size_t pm_x_bins = 16U;
+  const std::size_t density_grid_cell_count = 32U * 32U * 32U;
+
+  const CompactStartupPlannerMemoryEstimate estimate =
+      estimateCompactStartupPlannerTransientBytes(
+          entity_upper_bound, patch_count, cell_count, world_size, pm_x_bins,
+          density_grid_cell_count);
+
+  assert(estimate.compact_record_bytes ==
+         entity_upper_bound * sizeof(CompactRuntimeDecompositionRecord));
+  assert(estimate.memory_group_bytes ==
+         entity_upper_bound *
+             (sizeof(std::size_t) * 2U + sizeof(std::uint64_t) + sizeof(double)));
+  assert(estimate.owning_rank_bytes == entity_upper_bound * sizeof(int));
+  assert(estimate.sorted_index_bytes == entity_upper_bound * sizeof(std::size_t));
+  assert(estimate.occupancy_bytes ==
+         (density_grid_cell_count * 3U + pm_x_bins) * sizeof(std::uint32_t));
+  assert(estimate.patch_mapping_bytes ==
+         patch_count * sizeof(std::uint32_t) * 2U);
+  const std::size_t rank_metric_lane =
+      sizeof(double) * 14U + sizeof(std::uint64_t) * 5U +
+      sizeof(std::size_t) * 2U;
+  const std::size_t expected_other_scratch =
+      world_size * rank_metric_lane +
+      (world_size + 1U) * sizeof(std::size_t) +
+      cell_count * sizeof(std::uint32_t) +
+      patch_count * sizeof(std::uint32_t);
+  assert(estimate.other_known_scratch_bytes == expected_other_scratch);
+  assert(estimate.total_bytes ==
+         estimate.compact_record_bytes + estimate.memory_group_bytes +
+             estimate.owning_rank_bytes + estimate.sorted_index_bytes +
+             estimate.occupancy_bytes + estimate.patch_mapping_bytes +
+             estimate.other_known_scratch_bytes);
+  assert(estimate.total_bytes > 0U);
+
+  // Checked arithmetic: impossible populations fail closed instead of
+  // wrapping into an undersized admission.
+  bool overflowed = false;
+  try {
+    (void)estimateCompactStartupPlannerTransientBytes(
+        std::numeric_limits<std::size_t>::max(), 0U, 0U, 1U, 0U, 0U);
+  } catch (const std::overflow_error&) {
+    overflowed = true;
+  }
+  assert(overflowed);
+
+  // Startup memory-rejection behavior at the governor seam: the modeled
+  // transient live set is admitted under the production owner tag, and a
+  // budget below it rejects with that owner pinned to the refusal.
+  constexpr std::string_view k_owner = "parallel.decomposition.startup_planner";
+  cosmosim::core::MemoryGovernor rejecting(
+      cosmosim::core::MemoryGovernorPolicy{
+          .hard_limit_bytes = estimate.total_bytes - 1U});
+  bool rejected = false;
+  try {
+    auto reservation = rejecting.reserve(
+        cosmosim::core::MemoryClass::kPhaseResident, estimate.total_bytes,
+        k_owner);
+    reservation.commit();
+  } catch (const std::runtime_error& ex) {
+    const std::string_view message(ex.what());
+    rejected = message.find("memory reservation rejected") != std::string_view::npos &&
+        message.find("owner=parallel.decomposition.startup_planner") !=
+            std::string_view::npos &&
+        message.find("hard_limit_bytes=") != std::string_view::npos;
+  }
+  assert(rejected);
+
+  cosmosim::core::MemoryGovernor accepting(
+      cosmosim::core::MemoryGovernorPolicy{
+          .hard_limit_bytes = estimate.total_bytes + 1024U * 1024U});
+  auto admitted = accepting.reserve(
+      cosmosim::core::MemoryClass::kPhaseResident, estimate.total_bytes,
+      k_owner);
+  admitted.commit();
+  assert(admitted.committed());
+  assert(accepting.snapshot().accounted_bytes >= estimate.total_bytes);
+}
+
 void testExplicitComponentWeightedLoadAuthority() {
   using cosmosim::parallel::DecompositionConfig;
   using cosmosim::parallel::DecompositionItem;
@@ -2392,6 +2571,8 @@ int main() {
   testDistributedExecutionTopologyCpuOnly();
   testRichAndCompactPlannerEquivalence();
   testCompactPlannerContractValidation();
+  testCompactPlannerDenseIndexContract();
+  testCompactStartupPlannerTransientAdmission();
   testExplicitComponentWeightedLoadAuthority();
   testRuntimeDecompositionSourceMemoryEstimateMatchesStorage();
   testDistributedExecutionTopologyCudaAssignment();
