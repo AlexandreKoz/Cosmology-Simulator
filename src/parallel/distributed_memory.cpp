@@ -4166,6 +4166,10 @@ RuntimeRebalancePlan buildCompactDistributedRuntimeRebalancePlan(
   }
 
   if (decomposition_config.max_rank_memory_bytes != 0U) {
+    // Declared outside the try block so the post-collective repair predicate
+    // can capture it; it is only consumed when the collective preparation
+    // phase above succeeded on every rank.
+    std::uint64_t persistent_limit = 0U;
     std::exception_ptr memory_failure;
     try {
       if (decomposition_config.rank_transient_reserve_bytes >=
@@ -4173,7 +4177,7 @@ RuntimeRebalancePlan buildCompactDistributedRuntimeRebalancePlan(
         throw std::invalid_argument(
             "distributed decomposition transient reserve must be smaller than the hard rank memory ceiling");
       }
-      const std::uint64_t persistent_limit =
+      persistent_limit =
           decomposition_config.max_rank_memory_bytes -
           decomposition_config.rank_transient_reserve_bytes;
       proposed_memory.assign(rank_count, 0U);

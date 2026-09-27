@@ -53,11 +53,45 @@ int main() {
   const std::filesystem::path source_dir = COSMOSIM_SOURCE_DIR;
   checkEveryStarFormingProfileSelectsModel(source_dir / "configs");
   checkExample(source_dir / "configs/cosmo_cube.param.txt", cosmosim::core::SimulationMode::kCosmoCube);
+#ifdef _OPENMP
   checkExample(
       source_dir / "configs/chui_firstlight_32_smoke.param.txt",
       cosmosim::core::SimulationMode::kCosmoCube);
   const auto firstlight = cosmosim::core::loadFrozenConfigFromFile(
       source_dir / "configs/chui_firstlight_32_smoke.param.txt");
+#else
+  {
+    // A non-OpenMP build must fail closed on the example's four-thread team
+    // request, exactly as core config documents.
+    bool thread_team_rejected = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromFile(
+          source_dir / "configs/chui_firstlight_32_smoke.param.txt");
+    } catch (const cosmosim::core::ConfigError& error) {
+      thread_team_rejected =
+          std::string(error.what()).find(
+              "parallel.omp_threads > 1 requires a binary built with OpenMP support") !=
+          std::string::npos;
+    }
+    assert(thread_team_rejected);
+  }
+  // Reload with a serial team size so every remaining firstlight invariant is
+  // still exercised on a non-OpenMP build.
+  const auto firstlight = cosmosim::core::loadFrozenConfigFromString(
+      [&] {
+        std::ifstream firstlight_stream(
+            source_dir / "configs/chui_firstlight_32_smoke.param.txt");
+        std::ostringstream firstlight_text;
+        firstlight_text << firstlight_stream.rdbuf();
+        std::string serial_team_text = firstlight_text.str();
+        const std::size_t team_position = serial_team_text.find("omp_threads = 4");
+        assert(team_position != std::string::npos);
+        serial_team_text.replace(team_position, std::string("omp_threads = 4").size(),
+                                 "omp_threads = 1");
+        return serial_team_text;
+      }(),
+      "chui_firstlight_32_smoke");
+#endif
   const auto firstlight_reparsed = cosmosim::core::loadFrozenConfigFromString(
       firstlight.normalized_text, "chui_firstlight_32_smoke_normalized");
   assert(firstlight_reparsed.normalized_text == firstlight.normalized_text);
