@@ -1141,6 +1141,11 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeaves(
       id_hash *= 1099511628211ULL;
     };
     mix_id(static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner_rank)));
+    // Multiple leaf groups may legitimately share identical begin/end Morton
+    // keys when tied keys straddle a deterministic group boundary. Include the
+    // stable within-rank group ordinal so those leaves remain distinct pseudo
+    // nodes while preserving identity across geometry-only refits.
+    mix_id(static_cast<std::uint64_t>(leaf_ordinal));
     mix_id(leaf.sfc_key_begin);
     mix_id(leaf.sfc_key_end);
     for (std::size_t slot = begin; slot < end; ++slot) {
@@ -1263,6 +1268,7 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromCompact(
       id_hash *= 1099511628211ULL;
     };
     mix_id(static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner_rank)));
+    mix_id(static_cast<std::uint64_t>(leaf_ordinal));
     mix_id(leaf.sfc_key_begin);
     mix_id(leaf.sfc_key_end);
     for (std::size_t slot = begin; slot < end; ++slot) {
@@ -1436,6 +1442,7 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromSource(
       id_hash *= 1099511628211ULL;
     };
     mix_id(static_cast<std::uint64_t>(static_cast<std::uint32_t>(owner_rank)));
+    mix_id(static_cast<std::uint64_t>(leaf_ordinal));
     mix_id(leaf.sfc_key_begin);
     mix_id(leaf.sfc_key_end);
     for (std::size_t slot = begin; slot < end; ++slot) {

@@ -350,7 +350,9 @@ struct DecompositionPlan {
 // for locality-aware consumers such as TreePM. A rank may own multiple leaves.
 // Bounds describe authoritative decomposition units rather than a gravity-tree
 // root, so topology validity is tied to the decomposition epoch/geometry, not
-// the frequency with which a local gravity tree is rebuilt.
+// the frequency with which a local gravity tree is rebuilt. domain_leaf_id is
+// deterministic for the seed grouping and must distinguish tied SFC intervals;
+// geometry-only refits retain that seed identity unchanged.
 struct TopDomainLeaf {
   std::uint64_t domain_leaf_id = 0;
   int owner_rank = -1;

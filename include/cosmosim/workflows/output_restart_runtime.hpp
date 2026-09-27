@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include "cosmosim/core/time_integration.hpp"
@@ -96,6 +97,10 @@ class OutputRestartRuntime final {
   core::ProfilerSession& m_profiler;
   PendingOutputBoundary& m_pending_output;
   bool m_write_outputs_enabled = false;
+  // Tracks science snapshots committed by this runtime instance so normal
+  // endpoint closure can avoid duplicating a cadence write without treating a
+  // pre-existing committed namespace from another invocation as idempotent.
+  std::optional<std::uint64_t> m_last_committed_snapshot_step_index;
 };
 
 }  // namespace cosmosim::workflows::internal

@@ -497,6 +497,47 @@ bool maybeWriteOutputs(
         : core::checkedIntegralNarrow<std::uint32_t>(topology.world_size, "snapshot member count");
     const std::filesystem::path shared_run_directory =
         report.shared_run_directory.empty() ? report.run_directory : report.shared_run_directory;
+    if (collective_single_file) {
+      std::string local_shared_run_directory;
+      std::exception_ptr path_preparation_failure;
+      try {
+        std::error_code absolute_error;
+        std::filesystem::path absolute_shared_run_directory =
+            std::filesystem::absolute(shared_run_directory, absolute_error);
+        if (absolute_error) {
+          throw std::runtime_error(
+              "failed to resolve collective science snapshot directory '" +
+              shared_run_directory.string() + "': " + absolute_error.message());
+        }
+        local_shared_run_directory =
+            absolute_shared_run_directory.lexically_normal().generic_string();
+      } catch (...) {
+        path_preparation_failure = std::current_exception();
+      }
+      FailureCoordinator(services).rethrowCollectiveFailure(
+          path_preparation_failure,
+          "collective science snapshot shared-path preparation");
+
+      std::vector<std::uint8_t> root_path_bytes;
+      if (services.mpi_context.isRoot()) {
+        root_path_bytes.assign(
+            local_shared_run_directory.begin(), local_shared_run_directory.end());
+      }
+      const std::vector<std::uint8_t> agreed_path_bytes =
+          services.mpi_context.broadcastBytesFromRoot(root_path_bytes, 0);
+      const std::string agreed_shared_run_directory(
+          agreed_path_bytes.begin(), agreed_path_bytes.end());
+      std::exception_ptr path_consensus_failure;
+      if (local_shared_run_directory != agreed_shared_run_directory) {
+        path_consensus_failure = std::make_exception_ptr(std::runtime_error(
+            "collective single-file science snapshot requires one identical shared run "
+            "directory on every MPI rank; root='" + agreed_shared_run_directory +
+            "' local='" + local_shared_run_directory + "'"));
+      }
+      FailureCoordinator(services).rethrowCollectiveFailure(
+          path_consensus_failure,
+          "collective science snapshot shared-path consensus");
+    }
     const std::filesystem::path snapshot_directory = shared_run_directory / "snapshots";
     const std::filesystem::path final_single_path = snapshot_directory /
         singleSnapshotFilename(config.output.output_stem, integrator_state.step_index);
@@ -1351,6 +1392,7 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
              context.integrator_state.step_index);
   }
 
+  const bool snapshot_requested = m_pending_output.snapshot_due;
   const bool output_flushed = maybeWriteOutputs(
       m_frozen_config,
       m_config,
@@ -1372,6 +1414,9 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
       persisted_next_snapshot_time_code,
       m_pending_output.restart_resume_dt_time_code);
   if (output_flushed) {
+    if (snapshot_requested) {
+      m_last_committed_snapshot_step_index = context.integrator_state.step_index;
+    }
     m_pending_output.snapshot_due = false;
     m_pending_output.checkpoint_due = false;
     m_pending_output.step_event_due = false;
@@ -1396,37 +1441,8 @@ void OutputRestartRuntime::ensureFinalEndpointSnapshot(
     return;  // bounded segment/restart probe, not authoritative normal endpoint
   }
   core::assertCanWriteSnapshotAtBoundary(integrator_state);
-
-  const std::filesystem::path shared_run_directory =
-      m_report.shared_run_directory.empty() ? m_report.run_directory
-                                            : m_report.shared_run_directory;
-  const std::filesystem::path completion_path = shared_run_directory / "snapshots" /
-      (m_config.output.output_stem + "_" +
-       formatThreeDigitIndex(integrator_state.step_index) + ".complete");
-  std::uint64_t root_already_committed = 0U;
-  std::exception_ptr inspection_failure;
-  if (m_services.mpi_context.isRoot()) {
-    try {
-      if (std::filesystem::exists(completion_path)) {
-        io::SnapshotReadOptions options;
-        options.require_complete_chui_set = true;
-        const io::SnapshotSetInspection inspection =
-            io::inspectSnapshotSet(completion_path, options);
-        if (!inspection.complete ||
-            !timelineTimesEqual(
-                inspection.scale_factor, integrator_state.current_scale_factor)) {
-          throw std::runtime_error(
-              "snapshot at final step index exists but does not represent the authoritative endpoint state");
-        }
-        root_already_committed = 1U;
-      }
-    } catch (...) {
-      inspection_failure = std::current_exception();
-    }
-  }
-  FailureCoordinator(m_services).rethrowCollectiveFailure(
-      inspection_failure, "final endpoint snapshot identity check");
-  if (m_services.mpi_context.allreduceSumUint64(root_already_committed) != 0U) {
+  if (m_last_committed_snapshot_step_index.has_value() &&
+      *m_last_committed_snapshot_step_index == integrator_state.step_index) {
     return;
   }
 
@@ -1444,6 +1460,7 @@ void OutputRestartRuntime::ensureFinalEndpointSnapshot(
     throw std::runtime_error(
         "failed to commit required final endpoint science snapshot at an output-safe boundary");
   }
+  m_last_committed_snapshot_step_index = integrator_state.step_index;
 }
 
 }  // namespace cosmosim::workflows::internal

@@ -73,7 +73,12 @@ Authoritative top-domain seed leaves use the direct
 record (`sfc_key`, entity ID, local index, kind), one in-place total-order sort,
 grouping into `≤ max_leaves_per_rank` leaves, and streaming AABB/work recovery
 from canonical particle positions and complete AMR patch cell bounds. Seed
-owner/epoch/SFC interval identity matches the prior builder; the committed
+identity is deterministic across all three seed builders and includes the
+owner rank, stable within-rank leaf ordinal, and SFC interval. The ordinal is
+required because tied Morton keys may legitimately place multiple leaf groups
+on the same `[sfc_key_begin, sfc_key_end]` interval; geometry-only refits retain
+the seed identity unchanged. Seed owner/epoch/SFC interval semantics otherwise
+match the prior builder; the committed
 phase reservation spans construction and installation into the gravity owner's
 seed/published vectors; `refitAuthoritativeTopDomainLeaves` is unchanged.
 
