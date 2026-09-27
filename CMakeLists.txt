@@ -512,7 +512,17 @@ add_library(cosmosim_analysis STATIC
   src/analysis/diagnostics.cpp
   src/analysis/halo_workflow.cpp)
 add_library(cosmosim_parallel STATIC
-  src/parallel/distributed_memory.cpp)
+  src/parallel/distributed_memory.cpp
+  src/parallel/distributed_memory_transport.cpp
+  src/parallel/distributed_memory_diagnostics.cpp
+  src/parallel/distributed_memory_ghost.cpp
+  src/parallel/distributed_memory_restart.cpp
+  src/parallel/distributed_memory_pm.cpp
+  src/parallel/distributed_memory_mpi.cpp
+  src/parallel/distributed_memory_tree_pm.cpp
+  src/parallel/distributed_memory_amr.cpp
+  src/parallel/distributed_memory_hydro.cpp
+  src/parallel/distributed_memory_device.cpp)
 target_link_libraries(cosmosim_gravity PUBLIC cosmosim_parallel)
 target_link_libraries(cosmosim_analysis PUBLIC cosmosim_parallel)
 
