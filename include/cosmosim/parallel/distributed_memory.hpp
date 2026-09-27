@@ -895,10 +895,17 @@ class GhostExchangeBuffer {
   void packFrom(
       const GhostExchangeBufferSoA& source,
       std::span<const std::uint32_t> local_indices);
+  void packFrom(
+      const ReadOnlyGhostExchangeView& source,
+      std::span<const std::uint32_t> local_indices);
 
   void packFrom(
       const GhostTransferDescriptor& descriptor,
       const GhostExchangeBufferSoA& source,
+      std::span<const std::uint32_t> local_indices);
+  void packFrom(
+      const GhostTransferDescriptor& descriptor,
+      const ReadOnlyGhostExchangeView& source,
       std::span<const std::uint32_t> local_indices);
 
   void unpackAppendTo(GhostExchangeBufferSoA& destination) const;
@@ -1076,6 +1083,12 @@ struct GhostRefreshCommitReport {
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     const GhostExchangeBufferSoA& authoritative_local_state,
     const GhostLayerEpoch& expected_epoch);
+[[nodiscard]] BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
+    const MpiContext& mpi_context,
+    const GhostExchangePlan& plan,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const ReadOnlyGhostExchangeView& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch);
 
 // Correctness-first high-level ghost refresh. Local ghost descriptors declare
 // which remote particle IDs this rank needs. The blocking path first exchanges
@@ -1086,6 +1099,11 @@ struct GhostRefreshCommitReport {
     const MpiContext& mpi_context,
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     const GhostExchangeBufferSoA& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch);
+[[nodiscard]] BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
+    const MpiContext& mpi_context,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const ReadOnlyGhostExchangeView& authoritative_local_state,
     const GhostLayerEpoch& expected_epoch);
 
 struct RankDeviceAssignment {

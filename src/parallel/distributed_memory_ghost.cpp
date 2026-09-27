@@ -68,9 +68,10 @@ constexpr std::uint16_t kGhostLanePressure = 1U << 8U;
 constexpr std::uint16_t kGhostLaneInternalEnergy = 1U << 9U;
 constexpr std::uint16_t kGhostKnownLaneMask = (1U << 10U) - 1U;
 
-[[nodiscard]] std::uint16_t ghostOptionalLaneMask(const GhostExchangeBufferSoA& source) noexcept {
+template <typename SourceView>
+[[nodiscard]] std::uint16_t ghostOptionalLaneMask(const SourceView& source) noexcept {
   std::uint16_t mask = 0U;
-  const auto add_if_present = [&mask](const std::vector<double>& lane, std::uint16_t bit) {
+  const auto add_if_present = [&mask](const auto& lane, std::uint16_t bit) {
     if (!lane.empty()) {
       mask = static_cast<std::uint16_t>(mask | bit);
     }
@@ -86,6 +87,12 @@ constexpr std::uint16_t kGhostKnownLaneMask = (1U << 10U) - 1U;
   add_if_present(source.pressure_code, kGhostLanePressure);
   add_if_present(source.internal_energy_code, kGhostLaneInternalEnergy);
   return mask;
+}
+
+[[nodiscard]] double optionalLaneValue(
+    std::span<const double> lane,
+    std::size_t index) {
+  return lane.empty() ? 0.0 : lane[index];
 }
 
 }  // namespace
@@ -219,8 +226,14 @@ void GhostExchangeBuffer::replaceEncodedBytes(std::vector<std::uint8_t> bytes) {
 }
 
 void GhostExchangeBuffer::packFrom(const GhostExchangeBufferSoA& source, std::span<const std::uint32_t> local_indices) {
+  packFrom(makeReadOnlyGhostExchangeView(source), local_indices);
+}
+
+void GhostExchangeBuffer::packFrom(
+    const ReadOnlyGhostExchangeView& source,
+    std::span<const std::uint32_t> local_indices) {
   if (!source.isConsistent()) {
-    throw std::invalid_argument("ghost source SoA fields must have matching sizes");
+    throw std::invalid_argument("ghost source view fields must have matching sizes");
   }
 
   m_bytes.clear();
@@ -249,6 +262,13 @@ void GhostExchangeBuffer::packFrom(const GhostExchangeBufferSoA& source, std::sp
 void GhostExchangeBuffer::packFrom(
     const GhostTransferDescriptor& descriptor,
     const GhostExchangeBufferSoA& source,
+    std::span<const std::uint32_t> local_indices) {
+  packFrom(descriptor, makeReadOnlyGhostExchangeView(source), local_indices);
+}
+
+void GhostExchangeBuffer::packFrom(
+    const GhostTransferDescriptor& descriptor,
+    const ReadOnlyGhostExchangeView& source,
     std::span<const std::uint32_t> local_indices) {
   validateGhostRefreshPayloadDescriptor(descriptor);
   if (descriptor.local_indices.size() != local_indices.size() ||

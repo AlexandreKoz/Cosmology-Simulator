@@ -235,13 +235,21 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
 
   // Staging is intentionally limited to fields used by gravity. Targets are
   // source-index views, so there is no second target coordinate triplet here.
+  // High-resolution classification is cold unless the zoom long-range
+  // correction is active; do not charge its byte lanes to homogeneous runs.
+  const std::uint64_t zoom_mask_bytes_per_source =
+      input.zoom_enabled ? sizeof(std::uint8_t) : 0U;
+  const std::uint64_t zoom_mask_bytes_per_target =
+      input.zoom_enabled ? sizeof(std::uint8_t) : 0U;
   const std::uint64_t source_staging_bytes = checkedMul(
       input.local_source_count,
-      5U * sizeof(double) + 3U * sizeof(std::uint32_t) + 2U * sizeof(std::uint8_t),
+      5U * sizeof(double) + 3U * sizeof(std::uint32_t) + sizeof(std::uint8_t) +
+          zoom_mask_bytes_per_source,
       "gravity source staging estimate overflow");
   const std::uint64_t target_view_bytes = checkedMul(
       input.local_target_count,
-      5U * sizeof(std::uint32_t) + 2U * sizeof(double) + 2U * sizeof(std::uint8_t),
+      5U * sizeof(std::uint32_t) + 2U * sizeof(double) + sizeof(std::uint8_t) +
+          zoom_mask_bytes_per_target,
       "gravity target view estimate overflow");
   const std::uint64_t ordering_bytes = checkedMul(
       input.local_source_count,

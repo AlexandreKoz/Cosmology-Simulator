@@ -1032,11 +1032,10 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
     context.pm_refresh_directive = {};
     context.has_active_gravity_particles = false;
     context.active_gravity_particles = {};
-    if (stage == IntegrationStage::kDrift || stage == IntegrationStage::kGravityKickPre ||
-        stage == IntegrationStage::kGravityKickPost) {
+    if (stage == IntegrationStage::kDrift) {
       if (workspace == nullptr) {
         throw std::runtime_error(
-            "drift/kick stages require TransientStepWorkspace for compact active gravity views");
+            "drift stage requires TransientStepWorkspace for the active gravity view");
       }
       if (active_set.hasParticleSubset(state.particles.size())) {
         context.active_gravity_particles = buildGravityParticleKernelView(

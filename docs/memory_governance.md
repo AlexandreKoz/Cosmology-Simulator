@@ -115,15 +115,18 @@ commitment. The allocator reports current logical use, retained capacity,
 historical logical-use high-water, and retained-capacity high-water separately.
 
 The production `TransientStepWorkspace` receives the process governor from the
-reference workflow through `RuntimeServices`. After the collective DMO process
-preflight succeeds, the production gravity runtime admits the all-particle
-`uint32` index lane through this arena. Rank-local reservation/allocation
-failures are passed through `FailureCoordinator` before later TreePM
-collectives, so a low-headroom rank cannot simply throw while peers continue.
-The admitted block is reused by later direct gravity views in the step and its
-commitment survives workspace reset as long as the backing block remains
-resident. Existing standalone callers may construct an ungoverned scratch
-allocator for compatibility and isolated unit work.
+reference workflow through `RuntimeServices`. On a force-refresh pre-kick, the
+production gravity runtime admits the all-particle `uint32` index lane through
+this arena after the collective DMO process preflight succeeds. On a cached
+pre-kick, where that full process preflight is intentionally skipped, admission
+occurs after the already-collective gravity phase reservation and before the
+subsequent drift view is constructed. Rank-local reservation/allocation failures
+are passed through `FailureCoordinator` before peers can diverge. The drift view
+therefore reuses this one governed physical owner rather than first retaining an
+N-sized compatibility vector. The admitted block survives workspace reset as
+long as the backing block remains resident. Existing standalone and subset
+callers may still use the compatibility path when governed scratch has not been
+admitted.
 
 Authoritative particle and gas-cell scheduler retained capacities are explicit
 persistent `MemoryEntry` owners. Governor baseline reconciliation therefore

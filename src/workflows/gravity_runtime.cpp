@@ -1009,6 +1009,24 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
     FailureCoordinator(m_services).rethrowCollectiveFailure(
         gravity_admission_failure, "gravity TreePM memory admission");
+
+    const auto admitAllParticleIndexScratch = [&]() {
+      if (context.workspace == nullptr ||
+          context.stage != core::IntegrationStage::kGravityKickPre ||
+          context.active_set.hasParticleSubset(particle_count)) {
+        return;
+      }
+      std::exception_ptr scratch_admission_failure;
+      try {
+        context.workspace->prepareGravityParticleIndexScratch(particle_count);
+      } catch (...) {
+        scratch_admission_failure = std::current_exception();
+      }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          scratch_admission_failure,
+          "gravity all-particle scratch admission");
+    };
+
     const bool particle_cache_generation_changed =
         m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
         m_particle_force_cache_valid.size() != particle_count;
@@ -1070,6 +1088,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
       throw std::runtime_error("TreePM force-refresh stage lacks an integrator-issued PM refresh directive");
     }
     if (is_kick_stage && !is_force_refresh_stage) {
+      // The drift view is constructed only after the pre-kick handler returns.
+      // Admit its one governed all-particle index owner here even on a pure
+      // cache hit, where the full force-refresh process preflight is skipped.
+      admitAllParticleIndexScratch();
       applyCachedKick(context);
       return;
     }
@@ -1299,26 +1321,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
           std::to_string(global_required_bytes));
     }
 
-    // M1B production memory-governor closure: after every rank has completed
-    // the authoritative process-memory preflight, admit one real retained
-    // all-particle index lane through the governed monotonic scratch arena.
-    // Reservation/allocation failure is coordinated before any peer can enter
-    // the subsequent TreePM collectives.  The current pre-kick view may still
-    // reference the compatibility vector; drift/post-kick direct views reuse
-    // this admitted scratch lane during the same step.
-    std::exception_ptr scratch_admission_failure;
-    try {
-      if (context.workspace != nullptr &&
-          context.stage == core::IntegrationStage::kGravityKickPre &&
-          !context.active_set.hasParticleSubset(particle_count)) {
-        context.workspace->prepareGravityParticleIndexScratch(particle_count);
-      }
-    } catch (...) {
-      scratch_admission_failure = std::current_exception();
-    }
-    FailureCoordinator(m_services).rethrowCollectiveFailure(
-        scratch_admission_failure,
-        "gravity all-particle scratch admission");
+    // After every rank has completed the authoritative process-memory
+    // preflight, admit the one physical all-particle uint32 index lane needed
+    // by the subsequent direct drift view. The pre-kick no longer constructs
+    // an N-sized compatibility vector before this governed owner exists.
+    admitAllParticleIndexScratch();
 
     rebuildOwnedParticleCompactView(
         context,
@@ -1339,7 +1346,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
     m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
-    m_active_is_high_res.assign(m_local_active_indices.size(), 0U);
     m_active_slot_by_particle.assign(particle_count, -1);
     m_active_slot_by_cell.assign(cell_count, -1);
     constexpr std::uint32_t no_target_row =
@@ -1354,48 +1360,58 @@ class GravityRuntimeImpl final : public GravityRuntime {
             static_cast<int>(target_slot);
       }
     }
-    ensureZoomMembershipLoaded(context.state);
-    const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
-    const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
-    const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
-    m_source_is_high_res.assign(m_local_source_x.size(), 0U);
-    for (std::size_t i = 0; i < m_local_source_x.size(); ++i) {
-      if (!m_zoom_high_res_particle_ids.empty()) {
-        const std::uint32_t particle_row = m_local_source_particle_row[i];
-        if (particle_row != no_target_row) {
-          const std::uint64_t particle_id =
-              context.state.particle_sidecar.particle_id[particle_row];
-          m_source_is_high_res[i] =
-              m_zoom_high_res_particle_ids.contains(particle_id) ? 1U : 0U;
-          continue;
-        }
-        const std::uint32_t cell_row = m_local_source_cell_row[i];
-        if (cell_row != no_target_row) {
-          const auto parent_id =
-              context.state.parentParticleIdForGasCellRow(cell_row);
-          if (parent_id.has_value()) {
+    if (m_tree_pm_options.enable_zoom_long_range_correction) {
+      ensureZoomMembershipLoaded(context.state);
+      const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
+      const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
+      const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
+      m_source_is_high_res.assign(m_local_source_x.size(), 0U);
+      m_active_is_high_res.assign(m_local_active_indices.size(), 0U);
+      for (std::size_t i = 0; i < m_local_source_x.size(); ++i) {
+        if (!m_zoom_high_res_particle_ids.empty()) {
+          const std::uint32_t particle_row = m_local_source_particle_row[i];
+          if (particle_row != no_target_row) {
+            const std::uint64_t particle_id =
+                context.state.particle_sidecar.particle_id[particle_row];
             m_source_is_high_res[i] =
-                m_zoom_high_res_particle_ids.contains(*parent_id) ? 1U : 0U;
+                m_zoom_high_res_particle_ids.contains(particle_id) ? 1U : 0U;
             continue;
           }
+          const std::uint32_t cell_row = m_local_source_cell_row[i];
+          if (cell_row != no_target_row) {
+            const auto parent_id =
+                context.state.parentParticleIdForGasCellRow(cell_row);
+            if (parent_id.has_value()) {
+              m_source_is_high_res[i] =
+                  m_zoom_high_res_particle_ids.contains(*parent_id) ? 1U : 0U;
+              continue;
+            }
+          }
+          // A parentless refined cell has no particle lineage authority. Fall
+          // back to the explicit spatial zoom region rather than inventing one.
         }
-        // A parentless refined cell has no particle lineage authority. Fall
-        // back to the explicit spatial zoom region rather than inventing one.
+        const double dx = m_local_source_x[i] - m_tree_pm_options.zoom_region_center_x_comoving;
+        const double dy = m_local_source_y[i] - m_tree_pm_options.zoom_region_center_y_comoving;
+        const double dz = m_local_source_z[i] - m_tree_pm_options.zoom_region_center_z_comoving;
+        const double wrapped_dx = dx - box_size_x * std::nearbyint(dx / box_size_x);
+        const double wrapped_dy = dy - box_size_y * std::nearbyint(dy / box_size_y);
+        const double wrapped_dz = dz - box_size_z * std::nearbyint(dz / box_size_z);
+        const double r = std::sqrt(
+            wrapped_dx * wrapped_dx + wrapped_dy * wrapped_dy + wrapped_dz * wrapped_dz);
+        m_source_is_high_res[i] =
+            (r <= m_tree_pm_options.zoom_region_radius_comoving) ? 1U : 0U;
       }
-      const double dx = m_local_source_x[i] - m_tree_pm_options.zoom_region_center_x_comoving;
-      const double dy = m_local_source_y[i] - m_tree_pm_options.zoom_region_center_y_comoving;
-      const double dz = m_local_source_z[i] - m_tree_pm_options.zoom_region_center_z_comoving;
-      const double wrapped_dx = dx - box_size_x * std::nearbyint(dx / box_size_x);
-      const double wrapped_dy = dy - box_size_y * std::nearbyint(dy / box_size_y);
-      const double wrapped_dz = dz - box_size_z * std::nearbyint(dz / box_size_z);
-      const double r = std::sqrt(wrapped_dx * wrapped_dx + wrapped_dy * wrapped_dy + wrapped_dz * wrapped_dz);
-      m_source_is_high_res[i] = (r <= m_tree_pm_options.zoom_region_radius_comoving) ? 1U : 0U;
+      for (std::size_t i = 0; i < m_local_active_indices.size(); ++i) {
+        m_active_is_high_res[i] = m_source_is_high_res[m_local_active_indices[i]];
+      }
+      m_tree_pm_options.source_is_high_res = m_source_is_high_res;
+      m_tree_pm_options.active_is_high_res = m_active_is_high_res;
+    } else {
+      m_source_is_high_res.clear();
+      m_active_is_high_res.clear();
+      m_tree_pm_options.source_is_high_res = {};
+      m_tree_pm_options.active_is_high_res = {};
     }
-    for (std::size_t i = 0; i < m_local_active_indices.size(); ++i) {
-      m_active_is_high_res[i] = m_source_is_high_res[m_local_active_indices[i]];
-    }
-    m_tree_pm_options.source_is_high_res = m_source_is_high_res;
-    m_tree_pm_options.active_is_high_res = m_active_is_high_res;
 
     m_active_previous_acceleration_magnitude.clear();
     const bool relative_mac_cache_compatible =

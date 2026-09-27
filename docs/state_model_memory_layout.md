@@ -51,9 +51,11 @@ allocation and its committed reservation is retained with that block. `reset()` 
 without releasing retained block capacity or the corresponding commitment. Current logical use,
 logical-use high-water, retained capacity, and retained-capacity high-water are therefore distinct
 quantities. The rung-zero production gravity path carves its all-particle `uint32` index lane from
-this arena after collective process-memory preflight; later direct gravity views reuse that governed
-storage rather than requiring an additional retained vector capacity. Standalone/test construction
-without a governor remains supported. See
+this arena before the direct drift view is constructed. Fresh-force pre-kicks retain the collective
+process-memory preflight before admission; cached pre-kicks admit after the collective gravity phase
+reservation because they do not enter the full force-refresh preflight. The direct all-particle view
+therefore reuses the governed storage rather than retaining an additional N-sized compatibility
+vector. Standalone/test and subset construction without this admitted lane remains supported. See
 `docs/memory_governance.md` for reconciliation semantics.
 
 ## Active-set views

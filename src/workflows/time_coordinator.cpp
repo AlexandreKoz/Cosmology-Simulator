@@ -569,9 +569,10 @@ enum class SchedulerElementFamily {
       view.particles.black_hole_accretion_rate_code.size() != bh_count) {
     throw std::invalid_argument("black-hole timestep criteria view has mismatched extents");
   }
-  std::vector<std::size_t> bh_row_by_particle(
-      particle_count, std::numeric_limits<std::size_t>::max());
-  if (config.physics.enable_black_hole_agn) {
+  std::vector<std::size_t> bh_row_by_particle;
+  if (config.physics.enable_black_hole_agn && bh_count != 0U) {
+    bh_row_by_particle.assign(
+        particle_count, std::numeric_limits<std::size_t>::max());
     for (std::size_t bh_index = 0; bh_index < bh_count; ++bh_index) {
       const std::uint32_t particle_index =
           view.particles.black_hole_particle_index[bh_index];
@@ -590,6 +591,9 @@ enum class SchedulerElementFamily {
   const auto black_hole_dt_for_particle = [&](std::uint32_t particle_index) -> std::optional<double> {
     if (!config.physics.enable_black_hole_agn || particle_index >= view.particles.species_tag.size() ||
         view.particles.species_tag[particle_index] != static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
+      return std::nullopt;
+    }
+    if (bh_row_by_particle.empty()) {
       return std::nullopt;
     }
     const std::size_t bh_index = bh_row_by_particle[particle_index];

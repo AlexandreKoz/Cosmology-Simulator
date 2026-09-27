@@ -648,6 +648,18 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     const GhostExchangeBufferSoA& authoritative_local_state,
     const GhostLayerEpoch& expected_epoch) {
+  return executeBlockingGhostRefreshExchangeFromDescriptors(
+      mpi_context,
+      local_ghost_descriptors,
+      makeReadOnlyGhostExchangeView(authoritative_local_state),
+      expected_epoch);
+}
+
+BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
+    const MpiContext& mpi_context,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const ReadOnlyGhostExchangeView& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch) {
   const int world_rank = mpi_context.worldRank();
   const int world_size = mpi_context.worldSize();
   std::unordered_map<std::uint64_t, std::uint32_t> owned_index_by_particle_id;
@@ -959,6 +971,20 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
     std::span<const LocalGhostDescriptor> local_ghost_descriptors,
     const GhostExchangeBufferSoA& authoritative_local_state,
     const GhostLayerEpoch& expected_epoch) {
+  return executeBlockingGhostRefreshExchange(
+      mpi_context,
+      plan,
+      local_ghost_descriptors,
+      makeReadOnlyGhostExchangeView(authoritative_local_state),
+      expected_epoch);
+}
+
+BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
+    const MpiContext& mpi_context,
+    const GhostExchangePlan& plan,
+    std::span<const LocalGhostDescriptor> local_ghost_descriptors,
+    const ReadOnlyGhostExchangeView& authoritative_local_state,
+    const GhostLayerEpoch& expected_epoch) {
   BlockingGhostExchangeResult result;
   result.received_ghosts.epoch = expected_epoch;
 
@@ -1011,7 +1037,7 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
     // gas/hydro lanes merely because an exchange occurs.
     result.received_ghosts.entity_id.reserve(total_receive_records);
     const auto reserve_if_source_present = [total_receive_records](
-                                                const std::vector<double>& source,
+                                                std::span<const double> source,
                                                 std::vector<double>* destination) {
       if (!source.empty()) {
         destination->reserve(total_receive_records);
