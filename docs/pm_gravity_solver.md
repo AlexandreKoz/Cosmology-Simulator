@@ -85,12 +85,25 @@ After `solvePoissonPeriodic(grid, options, ...)` returns successfully:
 - `grid.force_x()`, `grid.force_y()`, `grid.force_z()` contain the scale-free
   comoving kernel components from `A_i(k) = -i k_i Psi_k`.
 
-Potential is a supported output, not an incidental side effect.
+Potential is a supported output, not an incidental side effect. The ordinary
+`solvePoissonPeriodic(...)` API therefore remains potential-producing. Production
+periodic TreePM uses the explicit `solvePoissonPeriodicForcesOnly(...)` contract:
+it produces the same three force fields but never materializes the real-space
+potential lane unless some caller has explicitly requested that storage.
+
+`PmGridStorage` owns real potential on demand. Non-const `grid.potential()` is the
+compatibility materialization boundary, `ensurePotentialStorage()` is the explicit
+materialization API, and const potential access never allocates.
+`interpolatePotential(...)` requires already-materialized potential and fails
+explicitly if called on a force-only grid.
 
 For particle-space sampling:
 
 - `interpolateForces(...)` gathers mesh acceleration to particles using the same assignment kernel selected for deposition.
 - `interpolatePotential(...)` gathers mesh potential to particles using the same geometry and stencil.
+- indexed force targets dereference the validated `coordinate_source_index` directly
+  against the borrowed source coordinate lanes; no compact XYZ coordinate replica is
+  built. Compact-coordinate callers retain the existing contiguous path.
 
 Matched deposition + gather is a hard contract for both schemes in this stage.
 
@@ -342,26 +355,37 @@ sender/origin/destination identity, stale epochs, invalid sequence, or non-finit
 coordinates/mass before accumulation. Accepted mass is accumulated only into
 owner-local slab storage and is normalized by local cell volume.
 
-The periodic PM solve reuses persistent solver-owned spectral scratch buffers for:
+The periodic PM plan now owns only the full-volume arrays that have an explicit
+solver role:
 
-- the copied potential spectrum used for mesh potential reconstruction,
-- the temporary gradient spectrum used to recover `a_x`, `a_y`, and `a_z`.
+- `real`: FFTW real execution storage, including backend-required padding;
+- `fourier`: the FFT execution spectrum and destructive inverse-input buffer;
+- `potential_k`: the preserved master potential spectrum used to regenerate each
+  inverse input;
+- `poisson_kernel`: the cached Poisson/deconvolution/TreePM split scalar operator.
 
-This keeps the PM operator auditable while avoiding repeated per-solve heap allocation churn on the hot periodic solve path.
+There is no separate `working_k` owner and no full-volume gradient-operator
+storage. Before each force inverse, the solver derives the differentiated axis'
+wave number from current slab/transposed spectral indices and writes
+`(-i*k_axis) * potential_k` directly into `fourier`. The signed-mode arithmetic
+and the per-axis zero Nyquist multiplier are the same as the previous cached
+gradient representation.
 
 Plan/scratch caches are keyed by slab layout ownership metadata (`world_size`, `world_rank`,
 `owned_x.begin`, `owned_x.end`) and are reused until layout/communicator metadata changes.
 
 `estimatePmPlanResourcesMemory(...)` uses the same PM shape/slab contract to preflight the
-solver-owned `real`, `fourier`, `potential_k`, `working_k`, `poisson_kernel`, and three gradient
-arrays. In an active FFTW-MPI session it uses `fftw_mpi_local_size_3d[_transposed]` so backend
-over-allocation is reflected before the vectors are created; compile-only/no-MPI environments use a
-conservative geometry fallback. These vectors are **known CHUI-owned memory**, not an FFTW
-"unknown" reserve. FFTW plan internals remain an explicit external-reserve category.
-Inverse normalization is applied exactly once per inverse field (`φ`, `a_x`, `a_y`, `a_z`).
-FFTW-MPI ranks with a legal zero-width slab retain a logical extent of zero but
-receive a one-element dummy allocation for backend pointer safety; they still
-participate in plan creation, transforms, and all PM collectives.
+solver-owned `real`, two complex spectral arrays (`fourier`, `potential_k`), and one scalar
+spectral array (`poisson_kernel`). In an active FFTW-MPI session it uses
+`fftw_mpi_local_size_3d[_transposed]` so backend over-allocation is reflected before the vectors
+are created; compile-only/no-MPI environments use a conservative geometry fallback. These
+vectors are **known CHUI-owned memory**, not an FFTW "unknown" reserve. For the usual
+distributed padded-real geometry this is conceptually `56 * alloc_local` bytes, with
+`alloc_local` remaining backend-authoritative. FFTW plan internals remain an explicit
+external-reserve category. Inverse normalization is applied exactly once per requested inverse
+field. FFTW-MPI ranks with a legal zero-width slab retain a logical extent of zero but receive a
+one-element dummy allocation for backend pointer safety; they still participate in plan creation,
+transforms, and all PM collectives.
 
 ### PM force-slab halo exchange
 

@@ -63,7 +63,6 @@ struct GravityMemoryEstimateInput {
   bool zoom_enabled = false;
   PmGridShape zoom_pm_shape{};
   bool periodic_tree_coordinates = true;
-  bool indexed_target_coordinates = true;
   bool cuda_resident = false;
   std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
   std::uint64_t pm_exchange_batch_bytes = 16ULL * 1024ULL * 1024ULL;

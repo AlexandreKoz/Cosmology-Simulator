@@ -259,16 +259,6 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       input.local_target_count,
       3U * sizeof(double),
       "gravity acceleration estimate overflow");
-  // The legacy PM interpolation backend still requires contiguous target
-  // coordinates internally. Source-index targets therefore avoid persistent
-  // workflow/coordinator copies, but pay one bounded PM gather triplet while
-  // interpolation is active.
-  const std::uint64_t pm_target_gather_bytes = input.indexed_target_coordinates
-      ? checkedMul(
-          input.local_target_count,
-          3U * sizeof(double),
-          "gravity PM target gather estimate overflow")
-      : 0U;
   const std::uint64_t periodic_tree_coordinate_bytes = input.periodic_tree_coordinates
       ? checkedMul(
           input.local_source_count,
@@ -310,9 +300,10 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       input.mpi_world_rank);
   const std::uint64_t local_pm_cells =
       static_cast<std::uint64_t>(pm_layout.localCellCount());
-  // Density, potential and three force components.
+  // Production periodic TreePM owns density plus three force components.
+  // Real-space potential is demand-driven and is not materialized by this path.
   const std::uint64_t pm_owned_bytes = checkedMul(
-      local_pm_cells, 5U * sizeof(double), "gravity PM owned estimate overflow");
+      local_pm_cells, 4U * sizeof(double), "gravity PM owned estimate overflow");
   const PmPlanResourcesMemoryEstimate pm_plan_memory =
       estimatePmPlanResourcesMemory(input.pm_shape, pm_layout, input.decomposition_mode);
   const std::uint64_t zoom_cells = input.zoom_enabled
@@ -411,11 +402,6 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
               "gravity.estimate.force_accumulators", acceleration_bytes,
               "authoritative compact active acceleration triplet");
-  if (pm_target_gather_bytes > 0U) {
-    addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
-                "gravity.estimate.pm_indexed_target_coordinate_gather", pm_target_gather_bytes,
-                "bounded PM interpolation scratch; no persistent coordinator target triplet");
-  }
   if (periodic_tree_coordinate_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
                 "gravity.estimate.periodic_tree_coordinate_staging", periodic_tree_coordinate_bytes,
@@ -438,7 +424,8 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
               "gravity.estimate.tree_ordering_workspace", ordering_bytes);
   addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kTransient,
-              "gravity.estimate.pm_owned_fields", pm_owned_bytes);
+              "gravity.estimate.pm_owned_fields", pm_owned_bytes,
+              "periodic TreePM force-only grid: density plus three force fields; real potential is demand-driven");
   addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
               "gravity.estimate.pm_plan_resources_owned_arrays",
               pm_plan_memory.total_owned_bytes,
@@ -448,7 +435,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   if (zoom_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kTransient,
                 "gravity.estimate.zoom_pm_owned_fields", zoom_bytes,
-                "coarse/focused lifetimes are serialized; estimate reports the focused peak contribution");
+                "coarse/focused lifetimes are serialized; focused isolated PM retains real potential and defines the modeled correction-grid peak");
   }
   if (tree_mpi_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,

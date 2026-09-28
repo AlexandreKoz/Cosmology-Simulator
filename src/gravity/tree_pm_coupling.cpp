@@ -2154,7 +2154,8 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     m_last_pm_slab_halo_exchange = {};
     m_grid.clearForceHaloCache();
     if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
-      m_pm_solver.solvePoissonPeriodic(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
+      m_pm_solver.solvePoissonPeriodicForcesOnly(
+          m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
     } else {
       m_pm_solver.solvePoissonIsolatedOpen(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
     }
@@ -2396,7 +2397,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
             pm_options,
             profile != nullptr ? &profile->pm_profile : nullptr);
         if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
-          m_pm_solver.solvePoissonPeriodic(
+          m_pm_solver.solvePoissonPeriodicForcesOnly(
               high_res_coarse_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
         } else {
           m_pm_solver.solvePoissonIsolatedOpen(

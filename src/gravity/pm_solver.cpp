@@ -635,6 +635,7 @@ enum class PmCollectiveEntryKind : int {
   kSolvePoissonIsolatedOpen = 5,
   kInterpolateForceTargetView = 6,
   kSolveForParticles = 7,
+  kSolvePoissonPeriodicForcesOnly = 8,
 };
 
 void validatePmCollectiveEntryConsensus(
@@ -1467,11 +1468,7 @@ class PmSolver::Impl {
     std::vector<double> real;
     std::vector<std::complex<double>> fourier;
     std::vector<std::complex<double>> potential_k;
-    std::vector<std::complex<double>> working_k;
     std::vector<double> poisson_kernel;
-    std::vector<double> grad_kx;
-    std::vector<double> grad_ky;
-    std::vector<double> grad_kz;
 #if COSMOSIM_ENABLE_FFTW
     fftw_plan forward_plan = nullptr;
     fftw_plan inverse_plan = nullptr;
@@ -1534,9 +1531,6 @@ class PmSolver::Impl {
 
 
   struct IndexedTargetWorkspace {
-    std::vector<double> gathered_x;
-    std::vector<double> gathered_y;
-    std::vector<double> gathered_z;
     std::vector<double> compact_ax;
     std::vector<double> compact_ay;
     std::vector<double> compact_az;
@@ -1842,11 +1836,7 @@ class PmSolver::Impl {
       plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
-      plan.working_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.poisson_kernel.assign(allocated_local_complex_size, 0.0);
-      plan.grad_kx.assign(allocated_local_complex_size, 0.0);
-      plan.grad_ky.assign(allocated_local_complex_size, 0.0);
-      plan.grad_kz.assign(allocated_local_complex_size, 0.0);
     }
 #endif
 #if COSMOSIM_ENABLE_MPI
@@ -1888,11 +1878,7 @@ class PmSolver::Impl {
       plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
-      plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.poisson_kernel.assign(expected_local_complex_size, 0.0);
-      plan.grad_kx.assign(expected_local_complex_size, 0.0);
-      plan.grad_ky.assign(expected_local_complex_size, 0.0);
-      plan.grad_kz.assign(expected_local_complex_size, 0.0);
       plan.forward_plan = fftw_plan_dft_r2c_3d(
           static_cast<int>(m_shape.nx),
           static_cast<int>(m_shape.ny),
@@ -1919,11 +1905,7 @@ class PmSolver::Impl {
     plan.real.assign(storage_layout.real_element_count, 0.0);
     plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.working_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.poisson_kernel.assign(expected_local_complex_size, 0.0);
-    plan.grad_kx.assign(expected_local_complex_size, 0.0);
-    plan.grad_ky.assign(expected_local_complex_size, 0.0);
-    plan.grad_kz.assign(expected_local_complex_size, 0.0);
 #endif
 
 #if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
@@ -1956,7 +1938,6 @@ class PmSolver::Impl {
   [[nodiscard]] std::span<double> realGrid() { return activePlan().real; }
   [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return activePlan().fourier; }
   [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return activePlan().potential_k; }
-  [[nodiscard]] std::span<std::complex<double>> workingScratch() { return activePlan().working_k; }
 
   [[nodiscard]] bool ensureSpectralOperators(
       PlanResources& plan,
@@ -1975,9 +1956,6 @@ class PmSolver::Impl {
     }
 
     std::fill(plan.poisson_kernel.begin(), plan.poisson_kernel.end(), 0.0);
-    std::fill(plan.grad_kx.begin(), plan.grad_kx.end(), 0.0);
-    std::fill(plan.grad_ky.begin(), plan.grad_ky.end(), 0.0);
-    std::fill(plan.grad_kz.begin(), plan.grad_kz.end(), 0.0);
 
     const std::size_t nz_complex = shape.nz / 2U + 1U;
     const double prefactor = -4.0 * k_pi * options.gravitational_constant_code;
@@ -1985,13 +1963,7 @@ class PmSolver::Impl {
     const double dky = 2.0 * k_pi / lengths.ly;
     const double dkz = 2.0 * k_pi / lengths.lz;
 
-    auto set_entry = [&](std::size_t index,
-                         double kx,
-                         double ky,
-                         double kz,
-                         double grad_kx,
-                         double grad_ky,
-                         double grad_kz) {
+    auto set_entry = [&](std::size_t index, double kx, double ky, double kz) {
       const double k2 = kx * kx + ky * ky + kz * kz;
       if (k2 == 0.0) {
         return;
@@ -1999,53 +1971,42 @@ class PmSolver::Impl {
       double window_correction = 1.0;
       if (options.enable_window_deconvolution) {
         const int window_exponent = assignmentWindowExponent(options.assignment_scheme);
-        const double wx = std::pow(sinc(0.5 * kx * lengths.lx / static_cast<double>(shape.nx)), static_cast<double>(window_exponent));
-        const double wy = std::pow(sinc(0.5 * ky * lengths.ly / static_cast<double>(shape.ny)), static_cast<double>(window_exponent));
-        const double wz = std::pow(sinc(0.5 * kz * lengths.lz / static_cast<double>(shape.nz)), static_cast<double>(window_exponent));
+        const double wx = std::pow(
+            sinc(0.5 * kx * lengths.lx / static_cast<double>(shape.nx)),
+            static_cast<double>(window_exponent));
+        const double wy = std::pow(
+            sinc(0.5 * ky * lengths.ly / static_cast<double>(shape.ny)),
+            static_cast<double>(window_exponent));
+        const double wz = std::pow(
+            sinc(0.5 * kz * lengths.lz / static_cast<double>(shape.nz)),
+            static_cast<double>(window_exponent));
         const double transfer_window = wx * wy * wz;
         window_correction = 1.0 / std::max(transfer_window * transfer_window, 1.0e-12);
       }
       double split_filter = 1.0;
       if (options.tree_pm_split_scale_comoving > 0.0) {
-        split_filter = treePmGaussianFourierLongRangeFilterUnchecked(std::sqrt(k2), options.tree_pm_split_scale_comoving);
+        split_filter = treePmGaussianFourierLongRangeFilterUnchecked(
+            std::sqrt(k2), options.tree_pm_split_scale_comoving);
       }
       plan.poisson_kernel[index] = prefactor * window_correction * split_filter / k2;
-      plan.grad_kx[index] = grad_kx;
-      plan.grad_ky[index] = grad_ky;
-      plan.grad_kz[index] = grad_kz;
-    };
-
-    const auto first_derivative_mode = [](std::size_t mode_index,
-                                          std::size_t mode_count,
-                                          double wave_number) {
-      // In an even-length real DFT the Nyquist coefficient is self-conjugate.
-      // A first derivative is odd, so assigning +/-i*k to that self-conjugate
-      // coefficient would violate the Hermitian contract required by c2r.
-      // The standard pseudospectral convention is therefore a zero Nyquist
-      // multiplier on the differentiated axis only.
-      return mode_count % 2U == 0U && mode_index == mode_count / 2U
-          ? 0.0
-          : wave_number;
     };
 
     if (plan.spectral_transposed) {
       for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
         const std::size_t iy = plan.transposed_begin_y + local_iy;
-        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
-                                                           : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
+        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
+            ? static_cast<std::ptrdiff_t>(iy)
+            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
         const double ky = dky * static_cast<double>(ny_mode);
         for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-          const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
-                                                             : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
+          const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
+              ? static_cast<std::ptrdiff_t>(ix)
+              : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
           const double kx = dkx * static_cast<double>(nx_mode);
           for (std::size_t iz = 0; iz < nz_complex; ++iz) {
             const double kz = dkz * static_cast<double>(iz);
             const std::size_t index = (local_iy * shape.nx + ix) * nz_complex + iz;
-            set_entry(
-                index, kx, ky, kz,
-                first_derivative_mode(ix, shape.nx, kx),
-                first_derivative_mode(iy, shape.ny, ky),
-                first_derivative_mode(iz, shape.nz, kz));
+            set_entry(index, kx, ky, kz);
           }
         }
       }
@@ -2053,21 +2014,19 @@ class PmSolver::Impl {
       const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
       for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
         const std::size_t ix = global_x_begin + local_ix;
-        const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U ? static_cast<std::ptrdiff_t>(ix)
-                                                           : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
+        const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
+            ? static_cast<std::ptrdiff_t>(ix)
+            : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
         const double kx = dkx * static_cast<double>(nx_mode);
         for (std::size_t iy = 0; iy < shape.ny; ++iy) {
-          const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U ? static_cast<std::ptrdiff_t>(iy)
-                                                             : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
+          const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
+              ? static_cast<std::ptrdiff_t>(iy)
+              : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
           const double ky = dky * static_cast<double>(ny_mode);
           for (std::size_t iz = 0; iz < nz_complex; ++iz) {
             const double kz = dkz * static_cast<double>(iz);
             const std::size_t index = (local_ix * shape.ny + iy) * nz_complex + iz;
-            set_entry(
-                index, kx, ky, kz,
-                first_derivative_mode(ix, shape.nx, kx),
-                first_derivative_mode(iy, shape.ny, ky),
-                first_derivative_mode(iz, shape.nz, kz));
+            set_entry(index, kx, ky, kz);
           }
         }
       }
@@ -2082,6 +2041,93 @@ class PmSolver::Impl {
     plan.cached_window_deconvolution = options.enable_window_deconvolution;
     plan.cached_assignment_scheme = options.assignment_scheme;
     return true;
+  }
+
+  void fillGradientSpectrum(
+      PlanResources& plan,
+      const BoxLengths& lengths,
+      const PmGridShape& shape,
+      int axis) {
+    if (axis < 0 || axis > 2) {
+      throw std::invalid_argument("PM spectral gradient axis must be 0, 1, or 2");
+    }
+
+    auto dst = fourierGrid();
+    const auto potential_k = std::span<const std::complex<double>>(
+        plan.potential_k.data(), plan.potential_k.size());
+    std::fill(dst.begin(), dst.end(), std::complex<double>(0.0, 0.0));
+
+    const std::size_t nz_complex = shape.nz / 2U + 1U;
+    const double dkx = 2.0 * k_pi / lengths.lx;
+    const double dky = 2.0 * k_pi / lengths.ly;
+    const double dkz = 2.0 * k_pi / lengths.lz;
+
+    const auto first_derivative_mode = [](std::size_t mode_index,
+                                          std::size_t mode_count,
+                                          double wave_number) {
+      // Preserve the existing real-DFT first-derivative convention: only the
+      // Nyquist coefficient of the differentiated even-length axis is zero.
+      return mode_count % 2U == 0U && mode_index == mode_count / 2U
+          ? 0.0
+          : wave_number;
+    };
+
+    const auto set_entry = [&](std::size_t index,
+                               std::size_t ix,
+                               std::size_t iy,
+                               std::size_t iz,
+                               double kx,
+                               double ky,
+                               double kz) {
+      const double gradient = axis == 0
+          ? first_derivative_mode(ix, shape.nx, kx)
+          : (axis == 1
+              ? first_derivative_mode(iy, shape.ny, ky)
+              : first_derivative_mode(iz, shape.nz, kz));
+      dst[index] = std::complex<double>(0.0, -gradient) * potential_k[index];
+    };
+
+    if (plan.spectral_transposed) {
+      for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
+        const std::size_t iy = plan.transposed_begin_y + local_iy;
+        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
+            ? static_cast<std::ptrdiff_t>(iy)
+            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
+        const double ky = dky * static_cast<double>(ny_mode);
+        for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+          const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
+              ? static_cast<std::ptrdiff_t>(ix)
+              : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
+          const double kx = dkx * static_cast<double>(nx_mode);
+          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+            const double kz = dkz * static_cast<double>(iz);
+            const std::size_t index = (local_iy * shape.nx + ix) * nz_complex + iz;
+            set_entry(index, ix, iy, iz, kx, ky, kz);
+          }
+        }
+      }
+      return;
+    }
+
+    const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
+    for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+      const std::size_t ix = global_x_begin + local_ix;
+      const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
+          ? static_cast<std::ptrdiff_t>(ix)
+          : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
+      const double kx = dkx * static_cast<double>(nx_mode);
+      for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
+            ? static_cast<std::ptrdiff_t>(iy)
+            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
+        const double ky = dky * static_cast<double>(ny_mode);
+        for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+          const double kz = dkz * static_cast<double>(iz);
+          const std::size_t index = (local_ix * shape.ny + iy) * nz_complex + iz;
+          set_entry(index, ix, iy, iz, kx, ky, kz);
+        }
+      }
+    }
   }
 
   double forwardFft() {
@@ -2477,15 +2523,12 @@ class PmSolver::Impl {
     {
       std::uint64_t current = 0U;
       std::uint64_t capacity = 0U;
-      accumulate(current, capacity, m_indexed_target_workspace.gathered_x);
-      accumulate(current, capacity, m_indexed_target_workspace.gathered_y);
-      accumulate(current, capacity, m_indexed_target_workspace.gathered_z);
       accumulate(current, capacity, m_indexed_target_workspace.compact_ax);
       accumulate(current, capacity, m_indexed_target_workspace.compact_ay);
       accumulate(current, capacity, m_indexed_target_workspace.compact_az);
       emit(core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
            "pm_solver.indexed_target_workspace", current, capacity, capacity,
-           "retained indexed-target coordinate/output scratch; capacity is its allocation high-water");
+           "retained indexed-global output scatter scratch only; indexed coordinates borrow canonical source lanes directly");
     }
 
     {
@@ -2495,11 +2538,7 @@ class PmSolver::Impl {
         accumulate(current, capacity, resources.real);
         accumulate(current, capacity, resources.fourier);
         accumulate(current, capacity, resources.potential_k);
-        accumulate(current, capacity, resources.working_k);
         accumulate(current, capacity, resources.poisson_kernel);
-        accumulate(current, capacity, resources.grad_kx);
-        accumulate(current, capacity, resources.grad_ky);
-        accumulate(current, capacity, resources.grad_kz);
       }
       emit(core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
            "pm_solver.plan_cache_owned_arrays", current, capacity, capacity,
@@ -2653,13 +2692,12 @@ PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
       "PM plan-memory real bytes");
 
   estimate.complex_spectral_array_bytes = checked_bytes(
-      checkedProduct(3U, storage_layout.allocated_local_complex_cells,
+      checkedProduct(2U, storage_layout.allocated_local_complex_cells,
                      "PM plan-memory complex spectral arrays"),
       sizeof(std::complex<double>),
       "PM plan-memory complex spectral bytes");
   estimate.scalar_spectral_array_bytes = checked_bytes(
-      checkedProduct(4U, storage_layout.allocated_local_complex_cells,
-                     "PM plan-memory scalar spectral arrays"),
+      storage_layout.allocated_local_complex_cells,
       sizeof(double),
       "PM plan-memory scalar spectral bytes");
   const auto checked_add_bytes = [](std::uint64_t lhs, std::uint64_t rhs,
@@ -2739,7 +2777,6 @@ PmGridStorage::PmGridStorage(PmGridShape shape, parallel::PmSlabLayout layout)
     : m_shape(shape),
       m_layout(std::move(layout)),
       m_density(m_layout.localCellCount(), 0.0),
-      m_potential(m_layout.localCellCount(), 0.0),
       m_force_x(m_layout.localCellCount(), 0.0),
       m_force_y(m_layout.localCellCount(), 0.0),
       m_force_z(m_layout.localCellCount(), 0.0) {
@@ -2779,11 +2816,23 @@ std::span<const double> PmGridStorage::density() const {
 }
 
 std::span<double> PmGridStorage::potential() {
+  ensurePotentialStorage();
   return m_potential;
 }
 
 std::span<const double> PmGridStorage::potential() const {
   return m_potential;
+}
+
+bool PmGridStorage::hasPotentialStorage() const noexcept {
+  return m_potential.size() == localCellCount();
+}
+
+void PmGridStorage::ensurePotentialStorage() {
+  if (hasPotentialStorage()) {
+    return;
+  }
+  m_potential.assign(localCellCount(), 0.0);
 }
 
 std::span<double> PmGridStorage::force_x() {
@@ -2910,7 +2959,9 @@ std::size_t PmGridStorage::linearIndex(std::size_t ix, std::size_t iy, std::size
 
 void PmGridStorage::clear() {
   std::fill(m_density.begin(), m_density.end(), 0.0);
-  std::fill(m_potential.begin(), m_potential.end(), 0.0);
+  if (!m_potential.empty()) {
+    std::fill(m_potential.begin(), m_potential.end(), 0.0);
+  }
   std::fill(m_force_x.begin(), m_force_x.end(), 0.0);
   std::fill(m_force_y.begin(), m_force_y.end(), 0.0);
   std::fill(m_force_z.begin(), m_force_z.end(), 0.0);
@@ -3606,7 +3657,25 @@ void PmSolver::assignDensity(
   }
 }
 
-void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile) {
+void PmSolver::solvePoissonPeriodic(
+    PmGridStorage& grid,
+    const PmSolveOptions& options,
+    PmProfileEvent* profile) {
+  solvePoissonPeriodicImpl(grid, options, /*materialize_potential=*/true, profile);
+}
+
+void PmSolver::solvePoissonPeriodicForcesOnly(
+    PmGridStorage& grid,
+    const PmSolveOptions& options,
+    PmProfileEvent* profile) {
+  solvePoissonPeriodicImpl(grid, options, /*materialize_potential=*/false, profile);
+}
+
+void PmSolver::solvePoissonPeriodicImpl(
+    PmGridStorage& grid,
+    const PmSolveOptions& options,
+    bool materialize_potential,
+    PmProfileEvent* profile) {
 #if COSMOSIM_ENABLE_MPI
   double distributed_plan_preflight_mpi_wait_ms = 0.0;
   int mpi_world_size = 1;
@@ -3616,7 +3685,9 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
     const bool rank_local_serial_layout =
         grid.slabLayout().world_size == 1 && grid.ownsFullDomain();
     validatePmCollectiveEntryConsensus(
-        PmCollectiveEntryKind::kSolvePoissonPeriodic,
+        materialize_potential
+            ? PmCollectiveEntryKind::kSolvePoissonPeriodic
+            : PmCollectiveEntryKind::kSolvePoissonPeriodicForcesOnly,
         rank_local_serial_layout,
         m_shape,
         options,
@@ -3666,7 +3737,6 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   auto real = m_impl->realGrid();
   auto fourier = m_impl->fourierGrid();
   auto potential_k = m_impl->potentialScratch();
-  auto working_k = m_impl->workingScratch();
 
   std::fill(real.begin(), real.end(), 0.0);
   if (plan.is_distributed) {
@@ -3720,9 +3790,7 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
 
   std::copy(fourier.begin(), fourier.end(), potential_k.begin());
 
-  auto inverse_into = [this, profile, &plan, &grid](std::span<const std::complex<double>> src, std::span<double> dst) {
-    auto fourier_dst = m_impl->fourierGrid();
-    std::copy(src.begin(), src.end(), fourier_dst.begin());
+  auto inverse_current_spectrum_into = [this, profile, &plan, &grid](std::span<double> dst) {
     const double fft_time = m_impl->inverseFft();
     auto real_values = m_impl->realGrid();
 #if COSMOSIM_ENABLE_FFTW
@@ -3755,35 +3823,31 @@ void PmSolver::solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& o
   };
 
   const auto grad_start = std::chrono::steady_clock::now();
-  inverse_into(potential_k, grid.potential());
+  if (materialize_potential) {
+    grid.ensurePotentialStorage();
+    std::copy(potential_k.begin(), potential_k.end(), fourier.begin());
+    inverse_current_spectrum_into(grid.potential());
+  }
 
-  auto fill_gradient_k = [&](std::span<std::complex<double>> dst, int axis) {
-    const std::span<const double> grad = axis == 0
-        ? std::span<const double>(plan.grad_kx.data(), plan.grad_kx.size())
-        : (axis == 1
-            ? std::span<const double>(plan.grad_ky.data(), plan.grad_ky.size())
-            : std::span<const double>(plan.grad_kz.data(), plan.grad_kz.size()));
-    for (std::size_t index = 0; index < dst.size(); ++index) {
-      dst[index] = std::complex<double>(0.0, -grad[index]) * potential_k[index];
-    }
-  };
-
-  fill_gradient_k(working_k, 0);
-  inverse_into(working_k, grid.force_x());
-  fill_gradient_k(working_k, 1);
-  inverse_into(working_k, grid.force_y());
-  fill_gradient_k(working_k, 2);
-  inverse_into(working_k, grid.force_z());
+  m_impl->fillGradientSpectrum(plan, lengths, m_shape, 0);
+  inverse_current_spectrum_into(grid.force_x());
+  m_impl->fillGradientSpectrum(plan, lengths, m_shape, 1);
+  inverse_current_spectrum_into(grid.force_y());
+  m_impl->fillGradientSpectrum(plan, lengths, m_shape, 2);
+  inverse_current_spectrum_into(grid.force_z());
   const auto grad_stop = std::chrono::steady_clock::now();
   if (profile != nullptr) {
     profile->gradient_ms += std::chrono::duration<double, std::milli>(grad_stop - grad_start).count();
   }
 
   if (profile != nullptr) {
-    profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) * 6U;
+    profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) *
+        (materialize_potential ? 6U : 5U);
     if (plan.spectral_transposed) {
       profile->fft_transpose_bytes +=
-          static_cast<std::uint64_t>(sizeof(std::complex<double>)) * static_cast<std::uint64_t>(fourier.size()) * 8ULL;
+          static_cast<std::uint64_t>(sizeof(std::complex<double>)) *
+          static_cast<std::uint64_t>(fourier.size()) *
+          (materialize_potential ? 8ULL : 6ULL);
     }
   }
 }
@@ -4185,12 +4249,6 @@ void PmSolver::interpolateForces(
               throw std::invalid_argument(
                   "PmSolver::interpolateForces indexed coordinate map extent must match active count");
             }
-            for (const TreeLocalIndex source_index : target_view.coordinate_source_index) {
-              if (static_cast<std::size_t>(source_index) >= target_view.pos_x_comoving.size()) {
-                throw std::out_of_range(
-                    "PmSolver::interpolateForces coordinate source index out of range");
-              }
-            }
           } else {
             if (!target_view.coordinate_source_index.empty()) {
               throw std::invalid_argument(
@@ -4254,41 +4312,21 @@ void PmSolver::interpolateForces(
   }
 
   auto& indexed_workspace = m_impl->indexedTargetWorkspace();
-  std::span<const double> target_x = target_view.pos_x_comoving;
-  std::span<const double> target_y = target_view.pos_y_comoving;
-  std::span<const double> target_z = target_view.pos_z_comoving;
-  if (indexed_coordinates) {
-    indexed_workspace.gathered_x.resize(active_count);
-    indexed_workspace.gathered_y.resize(active_count);
-    indexed_workspace.gathered_z.resize(active_count);
-    for (std::size_t active_i = 0; active_i < active_count; ++active_i) {
-      const std::size_t source_i = static_cast<std::size_t>(
-          target_view.coordinate_source_index[active_i]);
-      if (source_i >= target_view.pos_x_comoving.size()) {
-        throw std::out_of_range(
-            "PmSolver::interpolateForces coordinate source index out of range");
-      }
-      indexed_workspace.gathered_x[active_i] = target_view.pos_x_comoving[source_i];
-      indexed_workspace.gathered_y[active_i] = target_view.pos_y_comoving[source_i];
-      indexed_workspace.gathered_z[active_i] = target_view.pos_z_comoving[source_i];
-    }
-    target_x = indexed_workspace.gathered_x;
-    target_y = indexed_workspace.gathered_y;
-    target_z = indexed_workspace.gathered_z;
-  }
-
   switch (target_view.output_layout) {
     case PmForceOutputLayout::kCompactActive: {
       if (active_count != target_view.accel_x_comoving.size() ||
           active_count != target_view.accel_y_comoving.size() ||
           active_count != target_view.accel_z_comoving.size()) {
-        throw std::invalid_argument("PmSolver::interpolateForces compact active output extents must match active count");
+        throw std::invalid_argument(
+            "PmSolver::interpolateForces compact active output extents must match active count");
       }
-      interpolateForces(
+      interpolateForcesImpl(
           grid,
-          target_x,
-          target_y,
-          target_z,
+          target_view.pos_x_comoving,
+          target_view.pos_y_comoving,
+          target_view.pos_z_comoving,
+          target_view.coordinate_source_index,
+          target_view.coordinate_layout,
           target_view.accel_x_comoving,
           target_view.accel_y_comoving,
           target_view.accel_z_comoving,
@@ -4301,17 +4339,20 @@ void PmSolver::interpolateForces(
         if (particle_index >= target_view.accel_x_comoving.size() ||
             particle_index >= target_view.accel_y_comoving.size() ||
             particle_index >= target_view.accel_z_comoving.size()) {
-          throw std::out_of_range("PmSolver::interpolateForces indexed active particle output index out of range");
+          throw std::out_of_range(
+              "PmSolver::interpolateForces indexed active particle output index out of range");
         }
       }
       indexed_workspace.compact_ax.assign(active_count, 0.0);
       indexed_workspace.compact_ay.assign(active_count, 0.0);
       indexed_workspace.compact_az.assign(active_count, 0.0);
-      interpolateForces(
+      interpolateForcesImpl(
           grid,
-          target_x,
-          target_y,
-          target_z,
+          target_view.pos_x_comoving,
+          target_view.pos_y_comoving,
+          target_view.pos_z_comoving,
+          target_view.coordinate_source_index,
+          target_view.coordinate_layout,
           indexed_workspace.compact_ax,
           indexed_workspace.compact_ay,
           indexed_workspace.compact_az,
@@ -4339,8 +4380,65 @@ void PmSolver::interpolateForces(
     std::span<double> accel_z,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+  interpolateForcesImpl(
+      grid, pos_x, pos_y, pos_z, {}, PmForceCoordinateLayout::kCompactActive,
+      accel_x, accel_y, accel_z, options, profile);
+}
+
+void PmSolver::interpolateForcesImpl(
+    const PmGridStorage& grid,
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const TreeLocalIndex> coordinate_source_index,
+    PmForceCoordinateLayout coordinate_layout,
+    std::span<double> accel_x,
+    std::span<double> accel_y,
+    std::span<double> accel_z,
+    const PmSolveOptions& options,
+    PmProfileEvent* profile) const {
+  const bool indexed_coordinates =
+      coordinate_layout == PmForceCoordinateLayout::kIndexedSource;
+  const std::size_t target_count =
+      indexed_coordinates ? coordinate_source_index.size() : pos_x.size();
+
+  const auto validate_coordinate_contract = [&](bool validate_source_indices) {
+    if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size()) {
+      throw std::invalid_argument(
+          "PmSolver::interpolateForces coordinate source extents must match");
+    }
+    switch (coordinate_layout) {
+      case PmForceCoordinateLayout::kCompactActive:
+        if (!coordinate_source_index.empty()) {
+          throw std::invalid_argument(
+              "PmSolver::interpolateForces compact coordinates must not provide source indices");
+        }
+        break;
+      case PmForceCoordinateLayout::kIndexedSource:
+        if (validate_source_indices) {
+          for (std::size_t i = 0; i < coordinate_source_index.size(); ++i) {
+            if (static_cast<std::size_t>(coordinate_source_index[i]) >= pos_x.size()) {
+              throw std::out_of_range(
+                  "PmSolver::interpolateForces coordinate source index is out of range; active_index=" +
+                  std::to_string(i));
+            }
+          }
+        }
+        break;
+      default:
+        throw std::invalid_argument(
+            "PmSolver::interpolateForces received an unsupported coordinate layout");
+    }
+    if (target_count != accel_x.size() || target_count != accel_y.size() ||
+        target_count != accel_z.size()) {
+      throw std::invalid_argument(
+          "PmSolver::interpolateForces target/output extents must match");
+    }
+  };
+
   const PmDecompositionView decomposition_view(
       m_shape, grid.slabLayout(), options.decomposition_mode);
+  bool coordinate_indices_collectively_validated = false;
 #if COSMOSIM_ENABLE_MPI
   double distributed_preflight_mpi_wait_ms = 0.0;
   int mpi_world_size = 1;
@@ -4365,10 +4463,7 @@ void PmSolver::interpolateForces(
           if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
             throw std::invalid_argument("PM solver/grid shape mismatch in interpolateForces");
           }
-          if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != accel_x.size() ||
-              pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
-            throw std::invalid_argument("Particle coordinate/acceleration spans must match in interpolateForces");
-          }
+          validate_coordinate_contract(/*validate_source_indices=*/true);
           if (!grid.slabLayout().isValid()) {
             throw std::invalid_argument("PmSolver::interpolateForces requires a valid PM slab layout");
           }
@@ -4385,16 +4480,14 @@ void PmSolver::interpolateForces(
                 "PmSolver::interpolateForces mesh dimensions exceed fixed-width routing indices");
           }
         });
+    coordinate_indices_collectively_validated = true;
   }
 #endif
   validateOptions(m_shape, options);
   if (grid.shape().nx != m_shape.nx || grid.shape().ny != m_shape.ny || grid.shape().nz != m_shape.nz) {
     throw std::invalid_argument("PM solver/grid shape mismatch in interpolateForces");
   }
-  if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != accel_x.size() ||
-      pos_x.size() != accel_y.size() || pos_x.size() != accel_z.size()) {
-    throw std::invalid_argument("Particle coordinate/acceleration spans must match in interpolateForces");
-  }
+  validate_coordinate_contract(!coordinate_indices_collectively_validated);
   if (!grid.slabLayout().isValid()) {
     throw std::invalid_argument("PmSolver::interpolateForces requires a valid PM slab layout");
   }
@@ -4418,6 +4511,15 @@ void PmSolver::interpolateForces(
   }
 #endif
 
+  // The coordinate source is non-owning. The layout decision is invariant
+  // for the call, so this predictable row indirection replaces the former
+  // O(active_count) XYZ gather without branching inside the PM stencil loops.
+  const auto coordinate_row = [&](std::size_t target_row) noexcept -> std::size_t {
+    return indexed_coordinates
+        ? static_cast<std::size_t>(coordinate_source_index[target_row])
+        : target_row;
+  };
+
   const auto start = std::chrono::steady_clock::now();
 
   const BoxLengths lengths = effectiveBoxLengths(options);
@@ -4432,8 +4534,10 @@ void PmSolver::interpolateForces(
     throw std::invalid_argument("PmSolver::interpolateForces mesh dimensions exceed fixed-width routing indices");
   }
   std::optional<std::size_t> first_non_finite_target_index;
-  for (std::size_t p = 0; p < pos_x.size(); ++p) {
-    if (!std::isfinite(pos_x[p]) || !std::isfinite(pos_y[p]) || !std::isfinite(pos_z[p])) {
+  for (std::size_t p = 0; p < target_count; ++p) {
+    const std::size_t source_row = coordinate_row(p);
+    if (!std::isfinite(pos_x[source_row]) || !std::isfinite(pos_y[source_row]) ||
+        !std::isfinite(pos_z[source_row])) {
       first_non_finite_target_index = p;
       break;
     }
@@ -4445,20 +4549,21 @@ void PmSolver::interpolateForces(
   }
 
   if (!distributed_slabs) {
-    for (std::size_t p = 0; p < pos_x.size(); ++p) {
+    for (std::size_t p = 0; p < target_count; ++p) {
+      const std::size_t source_row = coordinate_row(p);
       const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
       if (!periodic &&
-          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
-           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
-           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+          (!positionInsideOpenDomain(pos_x[source_row], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[source_row], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[source_row], lengths.lz))) {
         accel_x[p] = 0.0;
         accel_y[p] = 0.0;
         accel_z[p] = 0.0;
         continue;
       }
-      const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
-      const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
-      const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
+      const double x = (periodic ? wrapPosition(pos_x[source_row], lengths.lx) : pos_x[source_row]) * inv_dx;
+      const double y = (periodic ? wrapPosition(pos_y[source_row], lengths.ly) : pos_y[source_row]) * inv_dy;
+      const double z = (periodic ? wrapPosition(pos_z[source_row], lengths.lz) : pos_z[source_row]) * inv_dz;
 
       const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
       const PmAxisStencil1d sy = makeAxisStencil(y, options.assignment_scheme);
@@ -4577,7 +4682,7 @@ void PmSolver::interpolateForces(
               k_pm_plane_interpolation_request_wire_bytes);
         });
     auto& exchange = *exchange_ptr;
-    const std::uint64_t local_target_count = static_cast<std::uint64_t>(pos_x.size());
+    const std::uint64_t local_target_count = static_cast<std::uint64_t>(target_count);
     std::uint64_t global_max_target_count = 0U;
     measurePmMpiWait(routed_mpi_wait_ms, [&]() {
       requirePmMpiSuccess(
@@ -4704,17 +4809,18 @@ void PmSolver::interpolateForces(
           [&]() {
             // Pass 1 counts at most one request per particle/destination x-plane group.
             for (std::size_t p = begin; p < end; ++p) {
+              const std::size_t source_row = coordinate_row(p);
               if (p > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
                 throw std::invalid_argument(
                     "PmSolver::interpolateForces origin particle index exceeds routing token limit");
               }
               if (!periodic &&
-                  (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
-                   !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
-                   !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+                  (!positionInsideOpenDomain(pos_x[source_row], lengths.lx) ||
+                   !positionInsideOpenDomain(pos_y[source_row], lengths.ly) ||
+                   !positionInsideOpenDomain(pos_z[source_row], lengths.lz))) {
                 continue;
               }
-              const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+              const double x = (periodic ? wrapPosition(pos_x[source_row], lengths.lx) : pos_x[source_row]) * inv_dx;
               const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
               std::array<PmXPlaneGroup, 3> groups{};
               const std::size_t group_count = makePmXPlaneGroups(
@@ -4774,15 +4880,16 @@ void PmSolver::interpolateForces(
             // x-plane groups. The receiver expands the y/z stencil and returns one
             // accumulated force response per request.
             for (std::size_t p = begin; p < end; ++p) {
+              const std::size_t source_row = coordinate_row(p);
               if (!periodic &&
-                  (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
-                   !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
-                   !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+                  (!positionInsideOpenDomain(pos_x[source_row], lengths.lx) ||
+                   !positionInsideOpenDomain(pos_y[source_row], lengths.ly) ||
+                   !positionInsideOpenDomain(pos_z[source_row], lengths.lz))) {
                 continue;
               }
-              const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
-              const double y = (periodic ? wrapPosition(pos_y[p], lengths.ly) : pos_y[p]) * inv_dy;
-              const double z = (periodic ? wrapPosition(pos_z[p], lengths.lz) : pos_z[p]) * inv_dz;
+              const double x = (periodic ? wrapPosition(pos_x[source_row], lengths.lx) : pos_x[source_row]) * inv_dx;
+              const double y = (periodic ? wrapPosition(pos_y[source_row], lengths.ly) : pos_y[source_row]) * inv_dy;
+              const double z = (periodic ? wrapPosition(pos_z[source_row], lengths.lz) : pos_z[source_row]) * inv_dz;
               const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
               std::array<PmXPlaneGroup, 3> groups{};
               const std::size_t group_count = makePmXPlaneGroups(
@@ -5035,13 +5142,14 @@ void PmSolver::interpolateForces(
         }
         std::uint32_t expected_sequence = round_sequence_begin;
         for (std::size_t p = begin; p < end; ++p) {
+          const std::size_t source_row = coordinate_row(p);
           if (!periodic &&
-              (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
-               !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
-               !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+              (!positionInsideOpenDomain(pos_x[source_row], lengths.lx) ||
+               !positionInsideOpenDomain(pos_y[source_row], lengths.ly) ||
+               !positionInsideOpenDomain(pos_z[source_row], lengths.lz))) {
             continue;
           }
-          const double x = (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+          const double x = (periodic ? wrapPosition(pos_x[source_row], lengths.lx) : pos_x[source_row]) * inv_dx;
           const PmAxisStencil1d sx = makeAxisStencil(x, options.assignment_scheme);
           std::array<PmXPlaneGroup, 3> groups{};
           const std::size_t group_count = makePmXPlaneGroups(
@@ -5158,7 +5266,7 @@ void PmSolver::interpolateForces(
   const auto stop = std::chrono::steady_clock::now();
   if (profile != nullptr) {
     profile->interpolate_ms += std::chrono::duration<double, std::milli>(stop - start).count();
-    profile->bytes_moved += bytesForParticles(pos_x.size());
+    profile->bytes_moved += bytesForParticles(target_count);
   }
 }
 
@@ -5199,6 +5307,10 @@ void PmSolver::interpolatePotential(
           if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != potential.size()) {
             throw std::invalid_argument("Particle coordinate/potential spans must match in interpolatePotential");
           }
+          if (!grid.hasPotentialStorage()) {
+            throw std::logic_error(
+                "PmSolver::interpolatePotential requires materialized real-space PM potential storage");
+          }
           if (!grid.slabLayout().isValid()) {
             throw std::invalid_argument("PmSolver::interpolatePotential requires a valid PM slab layout");
           }
@@ -5223,6 +5335,10 @@ void PmSolver::interpolatePotential(
   }
   if (pos_x.size() != pos_y.size() || pos_x.size() != pos_z.size() || pos_x.size() != potential.size()) {
     throw std::invalid_argument("Particle coordinate/potential spans must match in interpolatePotential");
+  }
+  if (!grid.hasPotentialStorage()) {
+    throw std::logic_error(
+        "PmSolver::interpolatePotential requires materialized real-space PM potential storage");
   }
   if (!grid.slabLayout().isValid()) {
     throw std::invalid_argument("PmSolver::interpolatePotential requires a valid PM slab layout");

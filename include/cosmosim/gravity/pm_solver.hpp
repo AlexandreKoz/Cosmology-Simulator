@@ -232,7 +232,7 @@ struct PmProfileEvent {
   std::uint64_t routed_combined_buffer_high_water_bytes = 0;
   std::uint64_t routed_workspace_high_water_bytes = 0;
   std::uint64_t force_halo_cache_hits = 0;
-  // Counts reconstruction of the scale-free Poisson/gradient operator arrays.
+  // Counts reconstruction of cached scale-free Poisson/deconvolution/split operator state.
   std::uint64_t spectral_operator_rebuilds = 0;
   std::uint64_t isolated_open_root_workspace_estimate_bytes = 0;
   std::uint64_t isolated_open_root_workspace_limit_bytes = 0;
@@ -280,8 +280,14 @@ class PmGridStorage {
   [[nodiscard]] std::span<double> density();
   [[nodiscard]] std::span<const double> density() const;
 
+  // Non-const access is the explicit compatibility materialization boundary for
+  // real-space potential storage. Const access never allocates and returns an
+  // empty span until potential has been materialized by a potential-producing
+  // solve or ensurePotentialStorage().
   [[nodiscard]] std::span<double> potential();
   [[nodiscard]] std::span<const double> potential() const;
+  [[nodiscard]] bool hasPotentialStorage() const noexcept;
+  void ensurePotentialStorage();
 
   [[nodiscard]] std::span<double> force_x();
   [[nodiscard]] std::span<const double> force_x() const;
@@ -421,6 +427,13 @@ class PmSolver {
   // After return, grid.potential() and grid.force_{x,y,z}() are populated and
   // available for direct mesh inspection and interpolation.
   void solvePoissonPeriodic(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
+  // Production TreePM force-only contract. It computes the same periodic force
+  // fields without materializing PmGridStorage's real-space potential lane.
+  // Existing potential-producing PM APIs retain solvePoissonPeriodic().
+  void solvePoissonPeriodicForcesOnly(
+      PmGridStorage& grid,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr);
   void solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOptions& options, PmProfileEvent* profile = nullptr);
 
   void interpolateForces(
@@ -473,6 +486,24 @@ class PmSolver {
   [[nodiscard]] std::size_t planBuildCount() const;
 
  private:
+  void solvePoissonPeriodicImpl(
+      PmGridStorage& grid,
+      const PmSolveOptions& options,
+      bool materialize_potential,
+      PmProfileEvent* profile);
+  void interpolateForcesImpl(
+      const PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<const TreeLocalIndex> coordinate_source_index,
+      PmForceCoordinateLayout coordinate_layout,
+      std::span<double> accel_x,
+      std::span<double> accel_y,
+      std::span<double> accel_z,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile) const;
+
   class Impl;
   PmGridShape m_shape;
   std::unique_ptr<Impl> m_impl;

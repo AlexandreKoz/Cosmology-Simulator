@@ -947,7 +947,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
                 .periodic_tree_coordinates =
                     m_tree_pm_options.pm_options.boundary_condition ==
                     gravity::PmBoundaryCondition::kPeriodic,
-                .indexed_target_coordinates = true,
                 .cuda_resident = m_runtime_topology.usesCuda(),
                 .tree_exchange_batch_bytes =
                     m_tree_pm_options.tree_exchange_batch_bytes,
@@ -1167,7 +1166,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
             .zoom_pm_shape = m_tree_pm_options.zoom_focused_pm_shape,
             .periodic_tree_coordinates =
                 m_tree_pm_options.pm_options.boundary_condition == gravity::PmBoundaryCondition::kPeriodic,
-            .indexed_target_coordinates = true,
             .cuda_resident = m_runtime_topology.usesCuda(),
             .tree_exchange_batch_bytes = m_tree_pm_options.tree_exchange_batch_bytes,
             .pm_exchange_batch_bytes = m_tree_pm_options.pm_options.routing_exchange_batch_bytes,
