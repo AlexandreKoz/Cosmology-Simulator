@@ -82,34 +82,49 @@ struct PeriodicBoxLengths {
 }
 
 // Wrapped periodic coordinates are finite and non-negative, so IEEE-754 bit
-// order equals numerical order. Eight stable byte passes remove the three
-// O(N log N) comparison sorts from every periodic tree rebuild while reusing
-// buffers already owned by the coordinator.
-void radixSortNonNegativeDoubles(
-    std::vector<double>& values,
-    std::vector<double>& scratch) {
+// order equals numerical order. The sortable representation lives in the
+// tree solver's shared construction key lanes; no coordinate-sized scratch
+// owner is retained by TreePM.
+void radixSortNonNegativeDoubleBits(
+    std::span<std::uint64_t> values,
+    std::span<std::uint64_t> scratch) {
   if (values.size() < 2U) {
     return;
   }
-  scratch.resize(values.size());
-  for (unsigned pass = 0; pass < 8U; ++pass) {
+  if (scratch.size() < values.size()) {
+    throw std::logic_error(
+        "Periodic TreePM radix sort requires pre-sized shared key scratch");
+  }
+  scratch = scratch.first(values.size());
+  constexpr unsigned k_radix_pass_count = sizeof(std::uint64_t);
+  static_assert(k_radix_pass_count == 8U);
+  static_assert((k_radix_pass_count % 2U) == 0U);
+  bool source_is_primary = true;
+  for (unsigned pass = 0; pass < k_radix_pass_count; ++pass) {
     std::array<std::size_t, 256> counts{};
-    const auto& source = (pass % 2U == 0U) ? values : scratch;
-    auto& destination = (pass % 2U == 0U) ? scratch : values;
+    const std::span<const std::uint64_t> source = source_is_primary
+        ? std::span<const std::uint64_t>(values)
+        : std::span<const std::uint64_t>(scratch);
+    const std::span<std::uint64_t> destination = source_is_primary
+        ? scratch
+        : values;
     const unsigned shift = pass * 8U;
-    for (const double value : source) {
-      const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
+    for (const std::uint64_t bits : source) {
       ++counts[(bits >> shift) & 0xffU];
     }
     std::array<std::size_t, 256> offsets{};
     for (std::size_t bucket = 1U; bucket < offsets.size(); ++bucket) {
       offsets[bucket] = offsets[bucket - 1U] + counts[bucket - 1U];
     }
-    for (const double value : source) {
-      const std::uint64_t bits = std::bit_cast<std::uint64_t>(value);
+    for (const std::uint64_t bits : source) {
       const std::size_t bucket = static_cast<std::size_t>((bits >> shift) & 0xffU);
-      destination[offsets[bucket]++] = value;
+      destination[offsets[bucket]++] = bits;
     }
+    source_is_primary = !source_is_primary;
+  }
+  if (!source_is_primary) {
+    throw std::logic_error(
+        "Periodic TreePM radix pass count left authoritative order in scratch storage");
   }
 }
 
@@ -121,8 +136,8 @@ void unwrapPeriodicAxis(
     std::span<const double> input,
     double box_size_comoving,
     std::vector<double>& output,
-    std::vector<double>& wrapped,
-    std::vector<double>& ordered) {
+    std::span<std::uint64_t> ordered_bits,
+    std::span<std::uint64_t> radix_scratch_bits) {
   if (!std::isfinite(box_size_comoving) || box_size_comoving <= 0.0) {
     throw std::invalid_argument("Periodic TreePM tree geometry requires finite positive axis lengths");
   }
@@ -130,8 +145,13 @@ void unwrapPeriodicAxis(
   if (input.empty()) {
     return;
   }
+  if (ordered_bits.size() < input.size() || radix_scratch_bits.size() < input.size()) {
+    throw std::logic_error(
+        "Periodic TreePM unwrapping requires pre-sized shared construction key lanes");
+  }
+  ordered_bits = ordered_bits.first(input.size());
+  radix_scratch_bits = radix_scratch_bits.first(input.size());
 
-  wrapped.assign(input.size(), 0.0);
   for (std::size_t i = 0; i < input.size(); ++i) {
     if (!std::isfinite(input[i])) {
       throw std::invalid_argument("Periodic TreePM tree geometry requires finite source coordinates");
@@ -142,21 +162,23 @@ void unwrapPeriodicAxis(
     } else if (value < 0.0) {
       value += box_size_comoving;
     }
-    wrapped[i] = value;
+    output[i] = value;
+    ordered_bits[i] = std::bit_cast<std::uint64_t>(value);
   }
 
-  ordered.assign(wrapped.begin(), wrapped.end());
-  // output is not yet authoritative here, so reuse it as radix scratch.
-  radixSortNonNegativeDoubles(ordered, output);
-  double anchor = ordered.front();
-  if (ordered.size() > 1U) {
+  radixSortNonNegativeDoubleBits(ordered_bits, radix_scratch_bits);
+  double anchor = std::bit_cast<double>(ordered_bits.front());
+  if (ordered_bits.size() > 1U) {
     double largest_gap = -1.0;
-    double best_anchor = ordered.front();
-    for (std::size_t i = 0; i < ordered.size(); ++i) {
-      const std::size_t next_index = (i + 1U) % ordered.size();
-      const double next_value = next_index == 0U ? ordered.front() + box_size_comoving : ordered[next_index];
-      const double gap = next_value - ordered[i];
-      const double candidate_anchor = ordered[next_index];
+    double best_anchor = anchor;
+    for (std::size_t i = 0; i < ordered_bits.size(); ++i) {
+      const std::size_t next_index = (i + 1U) % ordered_bits.size();
+      const double current_value = std::bit_cast<double>(ordered_bits[i]);
+      const double candidate_anchor = std::bit_cast<double>(ordered_bits[next_index]);
+      const double next_value = next_index == 0U
+          ? candidate_anchor + box_size_comoving
+          : candidate_anchor;
+      const double gap = next_value - current_value;
       if (gap > largest_gap || (gap == largest_gap && candidate_anchor < best_anchor)) {
         largest_gap = gap;
         best_anchor = candidate_anchor;
@@ -165,8 +187,10 @@ void unwrapPeriodicAxis(
     anchor = best_anchor;
   }
 
-  for (std::size_t i = 0; i < wrapped.size(); ++i) {
-    output[i] = wrapped[i] < anchor ? wrapped[i] + box_size_comoving : wrapped[i];
+  for (double& wrapped_value : output) {
+    if (wrapped_value < anchor) {
+      wrapped_value += box_size_comoving;
+    }
   }
 }
 
@@ -1805,8 +1829,6 @@ core::MemoryReport TreePmCoordinator::memoryReport() const {
    add_tree_scratch("treepm.periodic_tree_source_x_comoving", m_tree_source_x_comoving);
    add_tree_scratch("treepm.periodic_tree_source_y_comoving", m_tree_source_y_comoving);
    add_tree_scratch("treepm.periodic_tree_source_z_comoving", m_tree_source_z_comoving);
-   add_tree_scratch("treepm.periodic_wrapped_axis_scratch", m_periodic_wrapped_axis_scratch);
-   add_tree_scratch("treepm.periodic_ordered_axis_scratch", m_periodic_ordered_axis_scratch);
    add_tree_scratch("treepm.let_domain_cache.top_level_leaves", m_let_domain_cache.top_level_domain_leaves);
 
    const auto add_mpi = [&builder](std::string label, const auto& container) {
@@ -2547,15 +2569,17 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     const auto source_preprocess_start = std::chrono::steady_clock::now();
     if (options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
       const PeriodicBoxLengths box_lengths = effectivePeriodicBoxLengths(options.pm_options);
+      const auto construction_scratch =
+          m_tree_solver.beginConstructionWorkspace(pos_x_comoving.size());
       unwrapPeriodicAxis(
           pos_x_comoving, box_lengths.lx, m_tree_source_x_comoving,
-          m_periodic_wrapped_axis_scratch, m_periodic_ordered_axis_scratch);
+          construction_scratch.key_primary, construction_scratch.key_scratch);
       unwrapPeriodicAxis(
           pos_y_comoving, box_lengths.ly, m_tree_source_y_comoving,
-          m_periodic_wrapped_axis_scratch, m_periodic_ordered_axis_scratch);
+          construction_scratch.key_primary, construction_scratch.key_scratch);
       unwrapPeriodicAxis(
           pos_z_comoving, box_lengths.lz, m_tree_source_z_comoving,
-          m_periodic_wrapped_axis_scratch, m_periodic_ordered_axis_scratch);
+          construction_scratch.key_primary, construction_scratch.key_scratch);
       tree_source_x = m_tree_source_x_comoving;
       tree_source_y = m_tree_source_y_comoving;
       tree_source_z = m_tree_source_z_comoving;

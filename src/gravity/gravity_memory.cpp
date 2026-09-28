@@ -251,10 +251,10 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       5U * sizeof(std::uint32_t) + 2U * sizeof(double) + sizeof(std::uint8_t) +
           zoom_mask_bytes_per_target,
       "gravity target view estimate overflow");
-  const std::uint64_t ordering_bytes = checkedMul(
+  const std::uint64_t tree_construction_bytes = checkedMul(
       input.local_source_count,
-      sizeof(std::uint64_t) + 2U * sizeof(std::uint32_t) + sizeof(double),
-      "gravity ordering estimate overflow");
+      2U * sizeof(std::uint64_t) + 2U * sizeof(TreeLocalIndex) + sizeof(double),
+      "gravity tree construction estimate overflow");
   const std::uint64_t acceleration_bytes = checkedMul(
       input.local_target_count,
       3U * sizeof(double),
@@ -262,7 +262,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   const std::uint64_t periodic_tree_coordinate_bytes = input.periodic_tree_coordinates
       ? checkedMul(
           input.local_source_count,
-          5U * sizeof(double),
+          3U * sizeof(double),
           "gravity periodic tree staging estimate overflow")
       : 0U;
   const std::uint64_t zoom_active_correction_bytes = input.zoom_enabled
@@ -405,7 +405,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   if (periodic_tree_coordinate_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
                 "gravity.estimate.periodic_tree_coordinate_staging", periodic_tree_coordinate_bytes,
-                "three unwrapped tree coordinates plus two reused axis-ordering workspaces");
+                "three final unwrapped tree coordinates; periodic axis sorting borrows the shared tree construction key lanes");
   }
   if (zoom_active_correction_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
@@ -422,7 +422,8 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
               "gravity.estimate.tree_nodes", tree_nodes_bytes,
               "leaf-derived estimate; dynamic growth remains possible for adversarial geometry");
   addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
-              "gravity.estimate.tree_ordering_workspace", ordering_bytes);
+              "gravity.estimate.tree_construction_ownership", tree_construction_bytes,
+              "final TreeLocalIndex permutation + resolved double source epsilon + shared uint64 key primary/key scratch + TreeLocalIndex radix/partition scratch");
   addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kTransient,
               "gravity.estimate.pm_owned_fields", pm_owned_bytes,
               "periodic TreePM force-only grid: density plus three force fields; real potential is demand-driven");

@@ -12,6 +12,8 @@
 
 namespace cosmosim::gravity {
 
+class TreePmCoordinator;
+
 inline constexpr std::uint32_t kMaximumTreeDepth = 64U;
 
 enum class TreeOpeningCriterion {
@@ -175,6 +177,15 @@ class TreeGravitySolver {
   void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 
  private:
+  friend class TreePmCoordinator;
+
+  struct ConstructionScratchView {
+    std::span<std::uint64_t> key_primary;
+    std::span<std::uint64_t> key_scratch;
+  };
+
+  [[nodiscard]] ConstructionScratchView beginConstructionWorkspace(
+      std::size_t source_count);
   [[nodiscard]] bool built() const;
   [[nodiscard]] TreeLocalIndex buildNodeRecursive(
       std::span<const double> pos_x_comoving,
@@ -199,8 +210,9 @@ class TreeGravitySolver {
 
   TreeNodeSoa m_nodes;
   TreeMortonOrdering m_ordering;
+  std::vector<std::uint64_t> m_morton_key_scratch;
   std::vector<double> m_source_softening_epsilon_comoving;
-  std::vector<TreeLocalIndex> m_partition_scratch;
+  std::vector<TreeLocalIndex> m_construction_index_scratch;
   std::size_t m_build_source_count = 0;
   GravitySourceGeneration m_build_source_generation{};
   TreeBuildGeneration m_tree_build_generation{};
@@ -210,6 +222,9 @@ class TreeGravitySolver {
   TreeMultipoleOrder m_build_multipole_order = TreeMultipoleOrder::kMonopole;
   std::size_t m_build_max_leaf_size = 0;
   TreeSofteningPolicy m_build_softening{};
+  std::size_t m_construction_source_count = 0U;
+  bool m_construction_in_progress = false;
+  bool m_build_valid = false;
 };
 
 }  // namespace cosmosim::gravity

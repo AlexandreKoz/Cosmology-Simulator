@@ -83,6 +83,15 @@ extent, COMs, quadrupoles, and raw second moments all remain compact when a
 physical cluster crosses `0/L`. The caller-owned wrapped particle lanes remain
 authoritative and are still used for PM deposition.
 
+Tree construction owns one reusable population-scale workspace: two
+`uint64_t` key lanes and one 32-bit local-index lane. Periodic preprocessing
+stores each axis's original wrapped values directly in its final unwrapped
+coordinate lane, encodes the non-negative IEEE-754 representation into the two
+key lanes for the stable byte-radix order, selects the same largest-gap anchor,
+and then transforms that final coordinate lane in place. X, Y, and Z reuse the
+same key storage sequentially; TreePM does not retain separate wrapped/ordered
+axis vectors.
+
 During short-range traversal, node-center, COM, and particle deltas are reduced
 with the axis-specific minimum image. Periodic AABB distance functions also
 accept unwrapped intervals, so cutoff pruning cannot discard a nearby image of
@@ -279,6 +288,14 @@ alone is intentionally not a PM-field invalidator. Dense-row acceleration
 history is invalidated immediately on ownership change. The lower-level
 `solveActiveSetWithPmCadence` refresh flag remains test/future-integration
 surface only; production rung zero does not exercise local-bin PM reuse.
+
+The tree workspace borrow is also the explicit build-validity boundary. A warm
+rebuild invalidates the prior nodes/ordering before overwriting retained Morton
+storage, builds the new key/permutation in place, uses the workspace index lane
+as radix scratch and then recursive partition scratch, and publishes the next
+`TreeBuildGeneration` only after topology and multipoles complete. Failed
+construction therefore leaves the prior generation number unpublished and the
+partially rebuilt tree inaccessible through the guarded node/ordering views.
 
 TreePM acceleration lanes store scale-free `A`. The post-step adaptive
 timestep criterion combines those lanes with comoving softening through

@@ -404,11 +404,6 @@ class TreePmCoordinator {
   std::vector<double> m_tree_source_x_comoving;
   std::vector<double> m_tree_source_y_comoving;
   std::vector<double> m_tree_source_z_comoving;
-  // One pair of reusable axis workspaces is sufficient because x/y/z are
-  // unwrapped sequentially. This removes six population-sized allocations per
-  // periodic rebuild while retaining the exact largest-circular-gap algorithm.
-  std::vector<double> m_periodic_wrapped_axis_scratch;
-  std::vector<double> m_periodic_ordered_axis_scratch;
 
   // Zoom correction is optional and owns compact lanes only while the selected
   // profile enables it. Ordinary source-index targets alias authoritative

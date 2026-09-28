@@ -341,20 +341,6 @@ void TreeGravitySolver::build(
   if (pos_x_comoving.size() > static_cast<std::size_t>(kInvalidTreeLocalIndex)) {
     throw std::overflow_error("Tree gravity source count exceeds the 32-bit tree-index contract");
   }
-
-  m_build_source_count = pos_x_comoving.size();
-  m_build_source_generation = source_generation;
-  m_build_source_fingerprint = !source_generation.valid()
-      ? sourceFingerprint(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code)
-      : 0U;
-  m_build_multipole_order = options.multipole_order;
-  m_build_max_leaf_size = options.max_leaf_size;
-  m_build_softening = options.softening;
-
-  m_nodes.clear();
-  m_max_depth = 0U;
-  m_source_softening_epsilon_comoving.clear();
-  m_source_softening_epsilon_comoving.resize(pos_x_comoving.size(), options.softening.epsilon_comoving);
   if (!softening_view.source_particle_epsilon_comoving.empty() &&
       softening_view.source_particle_epsilon_comoving.size() != pos_x_comoving.size()) {
     throw std::invalid_argument("Tree gravity source softening sidecar size must match source particle count");
@@ -366,15 +352,49 @@ void TreeGravitySolver::build(
   if (!softening_view.source_species_tag.empty() && softening_view.source_species_tag.size() != pos_x_comoving.size()) {
     throw std::invalid_argument("Tree gravity source species sidecar size must match source particle count");
   }
+
+  if (!m_construction_in_progress ||
+      m_construction_source_count != pos_x_comoving.size()) {
+    (void)beginConstructionWorkspace(pos_x_comoving.size());
+  } else {
+    // Periodic TreePM preprocessing may already have borrowed the construction
+    // key lanes. The previous build was invalidated at that borrow boundary;
+    // keep the same capacities and start topology construction from empty
+    // nodes without reacquiring population-scale storage.
+    m_build_valid = false;
+    m_nodes.clear();
+    m_max_depth = 0U;
+  }
+
+  m_build_source_count = pos_x_comoving.size();
+  m_build_source_generation = source_generation;
+  m_build_source_fingerprint = !source_generation.valid()
+      ? sourceFingerprint(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code)
+      : 0U;
+  m_build_multipole_order = options.multipole_order;
+  m_build_max_leaf_size = options.max_leaf_size;
+  m_build_softening = options.softening;
+
+  m_source_softening_epsilon_comoving.clear();
+  m_source_softening_epsilon_comoving.resize(pos_x_comoving.size(), options.softening.epsilon_comoving);
   for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
     m_source_softening_epsilon_comoving[i] = resolveSourceSofteningEpsilon(i, options.softening, softening_view);
   }
-  m_partition_scratch.assign(pos_x_comoving.size(), 0U);
   const auto ordering_start = std::chrono::steady_clock::now();
-  m_ordering = buildMortonOrdering(pos_x_comoving, pos_y_comoving, pos_z_comoving);
+  buildMortonOrderingInPlace(
+      pos_x_comoving,
+      pos_y_comoving,
+      pos_z_comoving,
+      m_ordering,
+      m_morton_key_scratch,
+      m_construction_index_scratch);
   const auto ordering_stop = std::chrono::steady_clock::now();
   if (pos_x_comoving.empty()) {
-    m_tree_build_generation = nextGravityIdentity(m_tree_build_generation, "Tree build generation overflow");
+    const TreeBuildGeneration next_generation =
+        nextGravityIdentity(m_tree_build_generation, "Tree build generation overflow");
+    m_tree_build_generation = next_generation;
+    m_construction_in_progress = false;
+    m_build_valid = true;
     if (profile != nullptr) {
       *profile = {};
       profile->build_count = 1U;
@@ -431,11 +451,15 @@ void TreeGravitySolver::build(
   }
   const auto topology_stop = std::chrono::steady_clock::now();
   m_node_capacity_high_water = std::max(m_node_capacity_high_water, m_nodes.center_x_comoving.capacity());
-  m_tree_build_generation = nextGravityIdentity(m_tree_build_generation, "Tree build generation overflow");
 
   const auto multipole_start = std::chrono::steady_clock::now();
   accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, 0, options.multipole_order);
   const auto multipole_stop = std::chrono::steady_clock::now();
+  const TreeBuildGeneration next_generation =
+      nextGravityIdentity(m_tree_build_generation, "Tree build generation overflow");
+  m_tree_build_generation = next_generation;
+  m_construction_in_progress = false;
+  m_build_valid = true;
 
   if (profile != nullptr) {
     profile->build_count = 1U;
@@ -723,10 +747,16 @@ void TreeGravitySolver::evaluateActiveSet(
 }
 
 const TreeNodeSoa& TreeGravitySolver::nodes() const {
+  if (!m_build_valid) {
+    throw std::runtime_error("Tree nodes are not valid while a rebuild is in progress");
+  }
   return m_nodes;
 }
 
 const TreeMortonOrdering& TreeGravitySolver::ordering() const {
+  if (!m_build_valid) {
+    throw std::runtime_error("Tree ordering is not valid while a rebuild is in progress");
+  }
   return m_ordering;
 }
 
@@ -742,9 +772,41 @@ std::uint32_t TreeGravitySolver::maxDepth() const noexcept {
   return m_max_depth;
 }
 
+TreeGravitySolver::ConstructionScratchView TreeGravitySolver::beginConstructionWorkspace(
+    std::size_t source_count) {
+  if (source_count > static_cast<std::size_t>(kInvalidTreeLocalIndex)) {
+    throw std::overflow_error(
+        "Tree construction workspace exceeds the 32-bit tree-index contract");
+  }
+
+  // The first workspace borrow is the rebuild invalidation boundary. Retained
+  // capacities survive, but no caller may treat the previous nodes/ordering as
+  // authoritative while these lanes are being overwritten.
+  m_build_valid = false;
+  m_construction_in_progress = false;
+  m_nodes.clear();
+  m_max_depth = 0U;
+
+  m_ordering.sorted_particle_index.resize(source_count);
+  m_ordering.morton_key.resize(source_count);
+  m_morton_key_scratch.resize(source_count);
+  m_construction_index_scratch.resize(source_count);
+
+  m_construction_source_count = source_count;
+  m_construction_in_progress = true;
+  return ConstructionScratchView{
+      .key_primary = m_ordering.morton_key,
+      .key_scratch = m_morton_key_scratch,
+  };
+}
+
 void TreeGravitySolver::appendMemoryReport(core::MemoryReportBuilder& builder) const {
   m_nodes.appendMemoryReport(builder);
-  const auto add = [&builder](core::MemorySubsystem subsystem, std::string label, const auto& container) {
+  const auto add = [&builder](
+                       core::MemorySubsystem subsystem,
+                       std::string label,
+                       const auto& container,
+                       std::string note) {
     const std::uint64_t capacity_bytes = core::ownedCapacityBytesForContainer(container);
     builder.addEntry(core::MemoryEntry{.subsystem = subsystem,
                                        .lifetime = core::MemoryLifetime::kTransient,
@@ -753,16 +815,37 @@ void TreeGravitySolver::appendMemoryReport(core::MemoryReportBuilder& builder) c
                                        .owned_capacity_bytes = capacity_bytes,
                                        .high_water_bytes = capacity_bytes,
                                        .estimated_next_step_bytes = 0U,
-                                       .uncertainty_note = "retained vector capacity is the observed allocation high-water; next-step requirement is not predicted"});
+                                       .uncertainty_note = std::move(note)});
   };
-  add(core::MemorySubsystem::kTree, "tree.ordering.sorted_particle_index", m_ordering.sorted_particle_index);
-  add(core::MemorySubsystem::kTree, "tree.ordering.morton_key", m_ordering.morton_key);
-  add(core::MemorySubsystem::kTree, "tree.source_softening", m_source_softening_epsilon_comoving);
-  add(core::MemorySubsystem::kScratch, "tree.partition_scratch", m_partition_scratch);
+  add(
+      core::MemorySubsystem::kTree,
+      "tree.ordering.sorted_particle_index",
+      m_ordering.sorted_particle_index,
+      "retained final permutation; capacity reused across warm rebuilds");
+  add(
+      core::MemorySubsystem::kScratch,
+      "tree.construction.key_primary",
+      m_ordering.morton_key,
+      "one physical uint64 lane reused by periodic sorting and authoritative Morton keys");
+  add(
+      core::MemorySubsystem::kScratch,
+      "tree.construction.key_scratch",
+      m_morton_key_scratch,
+      "one physical uint64 lane reused by periodic and Morton stable-radix passes");
+  add(
+      core::MemorySubsystem::kScratch,
+      "tree.construction.index_scratch",
+      m_construction_index_scratch,
+      "one physical TreeLocalIndex lane reused by Morton radix indexing then recursive partitioning");
+  add(
+      core::MemorySubsystem::kTree,
+      "tree.source_softening",
+      m_source_softening_epsilon_comoving,
+      "retained resolved source epsilon; M48-09 scalar specialization intentionally deferred");
 }
 
 bool TreeGravitySolver::built() const {
-  return m_nodes.size() > 0;
+  return m_build_valid && !m_nodes.center_x_comoving.empty();
 }
 
 TreeLocalIndex TreeGravitySolver::buildNodeRecursive(
@@ -833,7 +916,7 @@ TreeLocalIndex TreeGravitySolver::buildNodeRecursive(
     octant_offsets[i + 1] = octant_offsets[i] + octant_count[i];
   }
 
-  if (m_partition_scratch.size() < m_ordering.sorted_particle_index.size()) {
+  if (m_construction_index_scratch.size() < m_ordering.sorted_particle_index.size()) {
     throw std::logic_error("Tree partition workspace is smaller than the source ordering");
   }
   std::array<TreeLocalCount, 8> cursor{};
@@ -846,12 +929,12 @@ TreeLocalIndex TreeGravitySolver::buildNodeRecursive(
     const std::uint8_t octant = octantForParticle(
         pos_x_comoving[particle], pos_y_comoving[particle], pos_z_comoving[particle], center_x_comoving, center_y_comoving,
         center_z_comoving);
-    m_partition_scratch[cursor[octant]++] = particle;
+    m_construction_index_scratch[cursor[octant]++] = particle;
   }
 
   std::copy(
-      m_partition_scratch.begin() + begin,
-      m_partition_scratch.begin() + end,
+      m_construction_index_scratch.begin() + begin,
+      m_construction_index_scratch.begin() + end,
       m_ordering.sorted_particle_index.begin() + begin);
 
   const TreeLocalIndex child_base = checkedTreeLocalIndex(m_nodes.size(), "tree child base exceeds local index policy");

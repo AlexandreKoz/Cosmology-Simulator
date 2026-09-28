@@ -9,21 +9,41 @@
 namespace cosmosim::gravity {
 namespace {
 
-void radixSortMortonOrdering(TreeMortonOrdering& ordering) {
+void radixSortMortonOrdering(
+    TreeMortonOrdering& ordering,
+    std::span<std::uint64_t> scratch_key,
+    std::span<TreeLocalIndex> scratch_index) {
   const std::size_t count = ordering.morton_key.size();
   if (count < 2U) {
     return;
   }
+  if (ordering.sorted_particle_index.size() != count ||
+      scratch_key.size() < count || scratch_index.size() < count) {
+    throw std::logic_error(
+        "Morton radix sort requires pre-sized primary and shared scratch lanes");
+  }
 
-  std::vector<std::uint64_t> scratch_key(count);
-  std::vector<TreeLocalIndex> scratch_index(count);
+  scratch_key = scratch_key.first(count);
+  scratch_index = scratch_index.first(count);
+  constexpr unsigned k_radix_pass_count = sizeof(std::uint64_t);
+  static_assert(k_radix_pass_count == 8U);
+  static_assert((k_radix_pass_count % 2U) == 0U);
   bool source_is_primary = true;
-  for (unsigned shift = 0U; shift < 64U; shift += 8U) {
+  for (unsigned pass = 0U; pass < k_radix_pass_count; ++pass) {
+    const unsigned shift = pass * 8U;
     std::array<std::size_t, 256> bucket_count{};
-    const auto& source_key = source_is_primary ? ordering.morton_key : scratch_key;
-    const auto& source_index = source_is_primary ? ordering.sorted_particle_index : scratch_index;
-    auto& destination_key = source_is_primary ? scratch_key : ordering.morton_key;
-    auto& destination_index = source_is_primary ? scratch_index : ordering.sorted_particle_index;
+    const std::span<const std::uint64_t> source_key = source_is_primary
+        ? std::span<const std::uint64_t>(ordering.morton_key)
+        : std::span<const std::uint64_t>(scratch_key);
+    const std::span<const TreeLocalIndex> source_index = source_is_primary
+        ? std::span<const TreeLocalIndex>(ordering.sorted_particle_index)
+        : std::span<const TreeLocalIndex>(scratch_index);
+    const std::span<std::uint64_t> destination_key = source_is_primary
+        ? scratch_key
+        : std::span<std::uint64_t>(ordering.morton_key);
+    const std::span<TreeLocalIndex> destination_index = source_is_primary
+        ? scratch_index
+        : std::span<TreeLocalIndex>(ordering.sorted_particle_index);
 
     for (const std::uint64_t key : source_key) {
       ++bucket_count[static_cast<std::size_t>((key >> shift) & 0xFFU)];
@@ -40,11 +60,12 @@ void radixSortMortonOrdering(TreeMortonOrdering& ordering) {
     }
     source_is_primary = !source_is_primary;
   }
-  // Eight byte passes return the result to the primary arrays. Keep this
-  // assertion-like guard explicit in case the radix width is changed later.
+  // Eight byte passes return the authoritative result to the retained primary
+  // arrays. A future radix-width change must preserve that ownership contract
+  // rather than copying into another population-scale owner.
   if (!source_is_primary) {
-    ordering.morton_key = std::move(scratch_key);
-    ordering.sorted_particle_index = std::move(scratch_index);
+    throw std::logic_error(
+        "Morton radix pass count left authoritative ordering in scratch storage");
   }
 }
 
@@ -103,22 +124,28 @@ TreeBounds computeTreeBounds(
   return bounds;
 }
 
-TreeMortonOrdering buildMortonOrdering(
+void buildMortonOrderingInPlace(
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
-    std::span<const double> pos_z_comoving) {
+    std::span<const double> pos_z_comoving,
+    TreeMortonOrdering& ordering,
+    std::span<std::uint64_t> scratch_key,
+    std::span<TreeLocalIndex> scratch_index) {
   if (pos_x_comoving.size() > k_tree_local_index_max) {
     throw std::overflow_error(
         "Morton ordering exceeds the configured local tree-index contract");
   }
   const TreeBounds bounds = computeTreeBounds(pos_x_comoving, pos_y_comoving, pos_z_comoving);
-
-  TreeMortonOrdering ordering;
-  ordering.sorted_particle_index.resize(pos_x_comoving.size());
-  ordering.morton_key.resize(pos_x_comoving.size());
+  const std::size_t count = pos_x_comoving.size();
+  if (ordering.sorted_particle_index.size() != count ||
+      ordering.morton_key.size() != count || scratch_key.size() < count ||
+      scratch_index.size() < count) {
+    throw std::logic_error(
+        "Morton ordering build requires pre-sized retained construction storage");
+  }
 
   if (pos_x_comoving.empty()) {
-    return ordering;
+    return;
   }
 
   const double extent = std::max(bounds.maxExtentComoving(), 1.0e-12);
@@ -137,8 +164,7 @@ TreeMortonOrdering buildMortonOrdering(
 
   // Morton keys are fixed-width integers, so a stable byte-radix pass avoids
   // the former O(N log N) comparison sort and its extra size_t permutation.
-  radixSortMortonOrdering(ordering);
-  return ordering;
+  radixSortMortonOrdering(ordering, scratch_key, scratch_index);
 }
 
 }  // namespace cosmosim::gravity
