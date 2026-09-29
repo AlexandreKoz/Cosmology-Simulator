@@ -48,6 +48,33 @@ struct TreePmExchangeMemoryEstimate {
   std::uint64_t known_workspace_peak_bytes = 0U;
 };
 
+
+inline constexpr std::uint64_t k_gravity_communication_arena_certified_limit_bytes =
+    256ULL * 1024ULL * 1024ULL;
+
+struct GravityCommunicationArenaMemoryInput {
+  PmGridShape pm_shape{};
+  parallel::PmSlabLayout pm_layout{};
+  std::uint64_t pm_exchange_batch_bytes = 16ULL * 1024ULL * 1024ULL;
+  std::uint64_t tree_exchange_batch_bytes = 4ULL * 1024ULL * 1024ULL;
+};
+
+struct GravityCommunicationArenaMemoryEstimate {
+  std::uint64_t pm_density_required_bytes = 0U;
+  std::uint64_t pm_interpolation_required_bytes = 0U;
+  std::uint64_t pm_halo_staging_required_bytes = 0U;
+  std::uint64_t tree_exchange_required_bytes = 0U;
+  std::uint64_t required_capacity_bytes = 0U;
+  std::uint64_t certified_limit_bytes =
+      k_gravity_communication_arena_certified_limit_bytes;
+};
+
+// Source-derived physical contract for the one TreePM communication arena.
+// Sequential phase requirements are combined with max(), never sum().
+[[nodiscard]] GravityCommunicationArenaMemoryEstimate
+estimateGravityCommunicationArenaMemory(
+    const GravityCommunicationArenaMemoryInput& input);
+
 struct GravityMemoryEstimateInput {
   std::uint64_t local_source_count = 0U;
   std::uint64_t local_target_count = 0U;
@@ -77,6 +104,7 @@ struct GravityMemoryEstimate {
   std::uint64_t budget_required_bytes = 0U;
   std::uint64_t estimated_tree_nodes = 0U;
   std::uint64_t pm_plan_owned_bytes = 0U;
+  std::uint64_t communication_arena_bytes = 0U;
 };
 
 struct DmoProcessMemoryPolicy {

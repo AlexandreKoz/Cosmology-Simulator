@@ -165,21 +165,23 @@ TreePmExchangeMemoryEstimate estimateTreePmExchangeMemory(
   estimate.remote_accumulator_bytes = checkedMul(
       batch_targets, 3U * sizeof(double),
       "TreePM exchange remote accumulator capacity overflow");
-  // Eight int count/displacement metadata vectors sized to rank_count.
+  // Arena-backed rank metadata includes the eight communicator-wide
+  // count/displacement vectors, eight sparse-neighbor count/displacement
+  // vectors, requested-peer identities, and one communicated-peer byte lane.
   estimate.rank_metadata_bytes = checkedMul(
-      static_cast<std::uint64_t>(input.rank_count), 8U * sizeof(int),
+      static_cast<std::uint64_t>(input.rank_count),
+      17U * sizeof(int) + sizeof(std::uint8_t),
       "TreePM exchange rank metadata capacity overflow");
-  // Transient codec/duplicate-detection peak during a single peer iteration:
-  // temporary encoded request bytes + temporary encoded response bytes +
-  // decoded host request/response vectors + 24-byte duplicate-set payload
-  // per target. This is a conservative upper envelope, not an exact observed
-  // simultaneous peak. Host packet sizes equal wire widths; that identity is
-  // compile-time enforced by static_assert in tree_pm_coupling.cpp.
-  // unordered_set bucket/allocator overhead is intentionally excluded and
-  // remains an explicit uncertainty (covered only by process-level reserves).
+  // One-peer codec/validation capacity retained inside the arena lease:
+  // request encode + request decode + response encode + response construction
+  // + response decode + sorted uint64 identity scratch. Duplicate detection is
+  // exact but node-free, so there is no unbounded unordered_set allocator
+  // overhead outside the modeled workspace. Host packet sizes equal wire
+  // widths by static_assert in tree_pm_coupling.cpp.
   estimate.transient_codec_bytes = checkedMul(
       batch_targets,
-      2U * (kTreePmShortRangeRequestWireBytes + kTreePmShortRangeResponseWireBytes) + 24U,
+      2U * kTreePmShortRangeRequestWireBytes +
+          3U * kTreePmShortRangeResponseWireBytes + sizeof(std::uint64_t),
       "TreePM exchange transient codec capacity overflow");
 
   std::uint64_t known = estimate.wire_buffer_total_bytes;
@@ -196,6 +198,92 @@ TreePmExchangeMemoryEstimate estimateTreePmExchangeMemory(
   known = checkedAdd(known, estimate.transient_codec_bytes,
                      "TreePM exchange known workspace peak overflow");
   estimate.known_workspace_peak_bytes = known;
+  return estimate;
+}
+
+GravityCommunicationArenaMemoryEstimate estimateGravityCommunicationArenaMemory(
+    const GravityCommunicationArenaMemoryInput& input) {
+  if (!input.pm_shape.isValid() || !input.pm_layout.isValid()) {
+    throw std::invalid_argument(
+        "gravity communication arena estimate requires valid PM shape/layout");
+  }
+  if (input.pm_layout.global_nx != input.pm_shape.nx ||
+      input.pm_layout.global_ny != input.pm_shape.ny ||
+      input.pm_layout.global_nz != input.pm_shape.nz) {
+    throw std::invalid_argument(
+        "gravity communication arena PM shape/layout mismatch");
+  }
+  GravityCommunicationArenaMemoryEstimate estimate;
+  if (input.pm_layout.world_size <= 1) {
+    return estimate;
+  }
+
+  // Reuse the PM routing capacity model. Metadata widths come directly from
+  // the current density/interpolation workspace layouts; the 64 KiB structural
+  // headroom covers allocator alignment/bookkeeping inside the bounded PMR
+  // resource without turning it into a second payload allowance.
+  const std::uint64_t ranks =
+      static_cast<std::uint64_t>(input.pm_layout.world_size);
+  const std::uint64_t density_metadata_bytes = checkedMul(
+      ranks, 8U * sizeof(int) + sizeof(std::size_t),
+      "gravity PM density metadata estimate overflow");
+  const std::uint64_t interpolation_metadata_bytes = checkedMul(
+      ranks, 12U * sizeof(int) + sizeof(std::size_t),
+      "gravity PM interpolation metadata estimate overflow");
+  const PmRoutingCapacityModel density_model = modelPmRoutingCapacity(
+      input.pm_layout.world_size,
+      input.pm_exchange_batch_bytes,
+      k_pm_routing_modeled_workspace_limit_bytes,
+      density_metadata_bytes,
+      k_pm_routing_max_wire_record_bytes);
+  const PmRoutingCapacityModel interpolation_model = modelPmRoutingCapacity(
+      input.pm_layout.world_size,
+      input.pm_exchange_batch_bytes,
+      k_pm_routing_modeled_workspace_limit_bytes,
+      interpolation_metadata_bytes,
+      k_pm_routing_max_wire_record_bytes);
+  estimate.pm_density_required_bytes = checkedAdd(
+      density_model.max_simultaneous_workspace_bytes,
+      k_pm_routing_workspace_headroom_bytes,
+      "gravity PM density arena estimate overflow");
+  estimate.pm_interpolation_required_bytes = checkedAdd(
+      interpolation_model.max_simultaneous_workspace_bytes,
+      k_pm_routing_workspace_headroom_bytes,
+      "gravity PM interpolation arena estimate overflow");
+
+  // TreePM production receives directly into the persistent six-lane force
+  // halo cache.  Shared scratch therefore needs only left/right send staging.
+  if (input.pm_layout.local_nx() != 0U) {
+    const std::uint64_t plane_values = checkedMul(
+        static_cast<std::uint64_t>(input.pm_shape.ny),
+        static_cast<std::uint64_t>(input.pm_shape.nz),
+        "gravity PM halo plane estimate overflow");
+    estimate.pm_halo_staging_required_bytes = checkedMul(
+        plane_values, 2U * sizeof(double),
+        "gravity PM halo staging estimate overflow");
+  }
+
+  const TreePmExchangeMemoryEstimate tree_exchange =
+      estimateTreePmExchangeMemory(TreePmExchangeMemoryInput{
+          .rank_count = static_cast<std::uint32_t>(input.pm_layout.world_size),
+          .tree_exchange_batch_bytes = input.tree_exchange_batch_bytes,
+      });
+  estimate.tree_exchange_required_bytes = checkedAdd(
+      tree_exchange.known_workspace_peak_bytes,
+      k_pm_routing_workspace_headroom_bytes,
+      "gravity Tree exchange arena headroom overflow");
+  estimate.required_capacity_bytes = std::max(
+      std::max(estimate.pm_density_required_bytes,
+               estimate.pm_interpolation_required_bytes),
+      std::max(estimate.pm_halo_staging_required_bytes,
+               estimate.tree_exchange_required_bytes));
+  if (estimate.required_capacity_bytes > estimate.certified_limit_bytes) {
+    throw std::runtime_error(
+        "TreePM gravity communication arena requires " +
+        std::to_string(estimate.required_capacity_bytes) +
+        " bytes, exceeding certified 256 MiB/rank limit " +
+        std::to_string(estimate.certified_limit_bytes));
+  }
   return estimate;
 }
 
@@ -317,18 +405,24 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   const std::uint64_t zoom_bytes = checkedMul(
       zoom_local_cells, 5U * sizeof(double), "gravity zoom PM owned estimate overflow");
 
-  // TreePM short-range exchange: four wire buffers plus structured request/
-  // response/mask/count/accumulator/metadata workspace and the transient codec
-  // peak. Preflight uses the complete-graph degree so the MemoryGovernor
-  // covers worst-case simultaneous live set (was previously modeled as a
-  // flat 2 * batch_bytes independent of rank count).
-  const TreePmExchangeMemoryEstimate tree_exchange_memory =
-      estimateTreePmExchangeMemory(TreePmExchangeMemoryInput{
-          .rank_count = input.mpi_rank_count,
+  const GravityCommunicationArenaMemoryEstimate communication_arena =
+      estimateGravityCommunicationArenaMemory(GravityCommunicationArenaMemoryInput{
+          .pm_shape = input.pm_shape,
+          .pm_layout = pm_layout,
+          .pm_exchange_batch_bytes = input.pm_exchange_batch_bytes,
           .tree_exchange_batch_bytes = input.tree_exchange_batch_bytes,
       });
-  const std::uint64_t tree_mpi_bytes =
-      input.mpi_rank_count > 1U ? tree_exchange_memory.known_workspace_peak_bytes : 0U;
+  const std::uint64_t communication_arena_bytes =
+      communication_arena.required_capacity_bytes;
+  const std::uint64_t pm_force_halo_cache_bytes = input.mpi_rank_count > 1U
+      ? checkedMul(
+            checkedMul(
+                static_cast<std::uint64_t>(input.pm_shape.ny),
+                static_cast<std::uint64_t>(input.pm_shape.nz),
+                "gravity PM force halo cache plane overflow"),
+            6U * sizeof(double),
+            "gravity PM force halo cache estimate overflow")
+      : 0U;
   const core::OpenMpRuntimeInfo openmp_info = core::openMpRuntimeInfo();
   const std::uint64_t residual_worker_count =
       openmp_info.compiled
@@ -360,21 +454,6 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   const std::uint64_t treepm_worker_scratch_bytes = checkedAdd(
       treepm_worker_stack_bytes, treepm_worker_counter_bytes,
       "gravity residual worker scratch overflow");
-  // PM density and force routing retain exactly two reusable wire buffers. The
-  // configured policy is a per-peer payload ceiling, so a rank can receive one
-  // bounded chunk from every remote peer in the same collective round. This is
-  // O(rank_count * batch_bytes), independent of local particle count and TSC's
-  // 27-cell stencil.
-  const std::uint64_t remote_rank_count = input.mpi_rank_count > 1U
-      ? static_cast<std::uint64_t>(input.mpi_rank_count - 1U)
-      : 0U;
-  const std::uint64_t pm_routing_bytes = remote_rank_count == 0U
-      ? 0U
-      : checkedMul(
-          checkedMul(input.pm_exchange_batch_bytes, remote_rank_count,
-                     "gravity PM routing estimate overflow"),
-          2U,
-          "gravity PM routing estimate overflow");
   const std::uint64_t cuda_owned_workspace = input.cuda_resident
       ? checkedAdd(
             checkedMul(input.local_source_count, 4U * sizeof(double),
@@ -438,10 +517,65 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
                 "gravity.estimate.zoom_pm_owned_fields", zoom_bytes,
                 "coarse/focused lifetimes are serialized; focused isolated PM retains real potential and defines the modeled correction-grid peak");
   }
-  if (tree_mpi_bytes > 0U) {
-    addEstimate(builder, core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
-                "gravity.estimate.sparse_tree_exchange", tree_mpi_bytes,
-                "TreePM short-range wire buffers plus structured request/response/mask/count/accumulator/metadata workspace and transient codec peak; complete-graph peer degree and classic-MPI round clamp; unordered_set bucket/allocator overhead excluded");
+  if (pm_force_halo_cache_bytes > 0U) {
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kPmMesh,
+        .lifetime = core::MemoryLifetime::kPersistent,
+        .memory_class = core::MemoryClass::kPersistentCache,
+        .label = "gravity.estimate.pm_force_halo_cache",
+        .current_size_bytes = 0U,
+        .owned_capacity_bytes = pm_force_halo_cache_bytes,
+        .high_water_bytes = pm_force_halo_cache_bytes,
+        .estimated_next_step_bytes = pm_force_halo_cache_bytes,
+        .estimate_only = true,
+        .uncertainty_note =
+            "six retained one-plane force halo lanes survive staging reset through PM interpolation",
+    });
+  }
+  if (communication_arena_bytes > 0U) {
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kMpiBuffers,
+        .lifetime = core::MemoryLifetime::kTransient,
+        .memory_class = core::MemoryClass::kCommunication,
+        .label = "gravity.estimate.communication_arena",
+        .current_size_bytes = 0U,
+        .owned_capacity_bytes = communication_arena_bytes,
+        .high_water_bytes = communication_arena_bytes,
+        .estimated_next_step_bytes = communication_arena_bytes,
+        .estimate_only = true,
+        .uncertainty_note =
+            "one physical owner = max(PM density routing, PM halo staging, PM interpolation routing, short-range Tree exchange); sequential logical contributors are not summed",
+    });
+  }
+  const auto add_logical_communication_estimate = [&](
+      std::string label, std::uint64_t bytes) {
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kMpiBuffers,
+        .lifetime = core::MemoryLifetime::kTransient,
+        .memory_class = core::MemoryClass::kCommunication,
+        .label = std::move(label),
+        .current_size_bytes = 0U,
+        .owned_capacity_bytes = 0U,
+        .high_water_bytes = bytes,
+        .estimated_next_step_bytes = 0U,
+        .estimate_only = true,
+        .uncertainty_note =
+            "logical contributor to gravity.estimate.communication_arena; non-owning and excluded from physical peak sum",
+    });
+  };
+  if (communication_arena_bytes > 0U) {
+    add_logical_communication_estimate(
+        "gravity.estimate.communication_arena.pm_density_logical",
+        communication_arena.pm_density_required_bytes);
+    add_logical_communication_estimate(
+        "gravity.estimate.communication_arena.pm_halo_logical",
+        communication_arena.pm_halo_staging_required_bytes);
+    add_logical_communication_estimate(
+        "gravity.estimate.communication_arena.pm_interpolation_logical",
+        communication_arena.pm_interpolation_required_bytes);
+    add_logical_communication_estimate(
+        "gravity.estimate.communication_arena.tree_exchange_logical",
+        communication_arena.tree_exchange_required_bytes);
   }
    addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
                "gravity.estimate.treepm_residual_worker_scratch", treepm_worker_scratch_bytes,
@@ -452,11 +586,6 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
                  "deterministic block floating diagnostic storage; force accumulation order remains per target");
    }
 
-  if (pm_routing_bytes > 0U) {
-    addEstimate(builder, core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
-                "gravity.estimate.pm_routing_exchange", pm_routing_bytes,
-                "two reusable PM wire buffers; conservative all-remote-peer high-water from the configured per-peer batch policy, independent of particle count/stencil size");
-  }
   if (cuda_owned_workspace > 0U) {
     addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
                 "gravity.estimate.cuda_owned_persistent_workspace", cuda_owned_workspace,
@@ -469,7 +598,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   GravityMemoryEstimate result;
   result.report = std::move(builder).finish();
   result.report.notes.push_back(
-      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, runtime index/selection maps, PM indexed-target scratch, periodic tree staging, tree workspace, PM fields, explicit PM PlanResources arrays, optional zoom lanes, persistent force cache, sparse tree exchange, bounded PM routing buffers, and known CUDA buffers; canonical SimulationState is reported separately.");
+      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, runtime index/selection maps, PM indexed-target scratch, periodic tree staging, tree workspace, PM fields, explicit PM PlanResources arrays, optional zoom lanes, persistent force cache, persistent PM force-halo cache, one shared bounded gravity communication arena, and known CUDA buffers; canonical SimulationState is reported separately.");
   result.report.notes.push_back(
       std::string("PM estimate profile assignment=") +
       (input.assignment_scheme == PmAssignmentScheme::kTsc ? "tsc" : "cic") +
@@ -482,6 +611,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   result.external_backend_unknown_bytes = backend_unknown;
   result.estimated_tree_nodes = estimated_tree_nodes;
   result.pm_plan_owned_bytes = pm_plan_memory.total_owned_bytes;
+  result.communication_arena_bytes = communication_arena_bytes;
   std::uint64_t known_peak = 0U;
   for (const core::MemoryEntry& entry : result.report.entries) {
     if (entry.lifetime != core::MemoryLifetime::kUnknown) {

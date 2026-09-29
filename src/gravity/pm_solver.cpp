@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 #include <limits>
+#include <memory_resource>
 
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/checked_arithmetic.hpp"
@@ -593,12 +594,14 @@ void decodePmWireRecords(
 }
 
 #if COSMOSIM_ENABLE_MPI
-[[nodiscard]] const std::uint8_t* nonNullPmWireData(const std::vector<std::uint8_t>& bytes) {
+template <typename ByteVector>
+[[nodiscard]] const std::uint8_t* nonNullPmWireData(const ByteVector& bytes) {
   static constexpr std::uint8_t empty_payload = 0U;
   return bytes.empty() ? &empty_payload : bytes.data();
 }
 
-[[nodiscard]] std::uint8_t* nonNullPmWireData(std::vector<std::uint8_t>& bytes) {
+template <typename ByteVector>
+[[nodiscard]] std::uint8_t* nonNullPmWireData(ByteVector& bytes) {
   static std::uint8_t empty_payload = 0U;
   return bytes.empty() ? &empty_payload : bytes.data();
 }
@@ -974,8 +977,9 @@ struct PmXPlaneGroup {
   return group_count;
 }
 
+template <typename ByteVector>
 void resizePmWireBufferBounded(
-    std::vector<std::uint8_t>& buffer,
+    ByteVector& buffer,
     std::size_t required_bytes,
     std::size_t policy_limit_bytes,
     std::string_view context) {
@@ -990,7 +994,8 @@ void resizePmWireBufferBounded(
     // rather than resize() growth. This avoids implementation growth heuristics
     // retaining up to ~2x the logical payload and makes owned-capacity high water
     // track the configured routing policy.
-    std::vector<std::uint8_t> replacement(required_bytes);
+    ByteVector replacement(buffer.get_allocator());
+    replacement.resize(required_bytes);
     buffer.swap(replacement);
   } else {
     buffer.resize(required_bytes);
@@ -1489,44 +1494,75 @@ class PmSolver::Impl {
   };
 
   struct DensityExchangeBuffers {
+    explicit DensityExchangeBuffers(std::pmr::memory_resource* resource, std::size_t ranks)
+        : send_wire(resource), recv_wire(resource), send_counts(resource), send_displs(resource),
+          recv_counts(resource), recv_displs(resource), send_counts_bytes(resource),
+          send_displs_bytes(resource), recv_counts_bytes(resource), recv_displs_bytes(resource),
+          cursor(resource) {
+      send_counts.assign(ranks, 0);
+      send_displs.assign(ranks, 0);
+      recv_counts.assign(ranks, 0);
+      recv_displs.assign(ranks, 0);
+      send_counts_bytes.assign(ranks, 0);
+      send_displs_bytes.assign(ranks, 0);
+      recv_counts_bytes.assign(ranks, 0);
+      recv_displs_bytes.assign(ranks, 0);
+      cursor.assign(ranks, 0U);
+    }
+
     std::uint64_t workspace_high_water_bytes = 0U;
-    std::vector<std::uint8_t> send_wire;
-    std::vector<std::uint8_t> recv_wire;
-    std::vector<int> send_counts;
-    std::vector<int> send_displs;
-    std::vector<int> recv_counts;
-    std::vector<int> recv_displs;
-    std::vector<int> send_counts_bytes;
-    std::vector<int> send_displs_bytes;
-    std::vector<int> recv_counts_bytes;
-    std::vector<int> recv_displs_bytes;
-    // Reused for per-peer packing offsets so bounded rounds do not allocate
-    // O(world_size) scratch repeatedly. Capacity is part of the routing budget.
-    std::vector<std::size_t> cursor;
+    std::pmr::vector<std::uint8_t> send_wire;
+    std::pmr::vector<std::uint8_t> recv_wire;
+    std::pmr::vector<int> send_counts;
+    std::pmr::vector<int> send_displs;
+    std::pmr::vector<int> recv_counts;
+    std::pmr::vector<int> recv_displs;
+    std::pmr::vector<int> send_counts_bytes;
+    std::pmr::vector<int> send_displs_bytes;
+    std::pmr::vector<int> recv_counts_bytes;
+    std::pmr::vector<int> recv_displs_bytes;
+    std::pmr::vector<std::size_t> cursor;
   };
 
   struct PlaneInterpolationExchangeBuffers {
+    explicit PlaneInterpolationExchangeBuffers(std::pmr::memory_resource* resource, std::size_t ranks)
+        : send_wire(resource), recv_wire(resource), send_counts(resource), send_displs(resource),
+          recv_counts(resource), recv_displs(resource), send_counts_bytes(resource),
+          send_displs_bytes(resource), recv_counts_bytes(resource), recv_displs_bytes(resource),
+          send_response_counts_bytes(resource), send_response_displs_bytes(resource),
+          recv_response_counts_bytes(resource), recv_response_displs_bytes(resource), cursor(resource) {
+      send_counts.assign(ranks, 0);
+      send_displs.assign(ranks, 0);
+      recv_counts.assign(ranks, 0);
+      recv_displs.assign(ranks, 0);
+      send_counts_bytes.assign(ranks, 0);
+      send_displs_bytes.assign(ranks, 0);
+      recv_counts_bytes.assign(ranks, 0);
+      recv_displs_bytes.assign(ranks, 0);
+      send_response_counts_bytes.assign(ranks, 0);
+      send_response_displs_bytes.assign(ranks, 0);
+      recv_response_counts_bytes.assign(ranks, 0);
+      recv_response_displs_bytes.assign(ranks, 0);
+      cursor.assign(ranks, 0U);
+    }
+
     std::uint64_t workspace_high_water_bytes = 0U;
-    // Two physical wire buffers are reused across request/response phases. Requests
-    // are 96-byte plane records and responses are no larger than 64 bytes.
-    // Responses compact in-place, avoiding four simultaneous payload copies.
-    std::vector<std::uint8_t> send_wire;
-    std::vector<std::uint8_t> recv_wire;
-    std::vector<int> send_counts;
-    std::vector<int> send_displs;
-    std::vector<int> recv_counts;
-    std::vector<int> recv_displs;
-    std::vector<int> send_counts_bytes;
-    std::vector<int> send_displs_bytes;
-    std::vector<int> recv_counts_bytes;
-    std::vector<int> recv_displs_bytes;
-    std::vector<int> send_response_counts_bytes;
-    std::vector<int> send_response_displs_bytes;
-    std::vector<int> recv_response_counts_bytes;
-    std::vector<int> recv_response_displs_bytes;
-    // Shared by request packing and later response-stream validation; the two
-    // uses are phase-disjoint, so one retained rank-scale vector is sufficient.
-    std::vector<std::size_t> cursor;
+    // Two physical wire buffers are reused across request/response phases.
+    std::pmr::vector<std::uint8_t> send_wire;
+    std::pmr::vector<std::uint8_t> recv_wire;
+    std::pmr::vector<int> send_counts;
+    std::pmr::vector<int> send_displs;
+    std::pmr::vector<int> recv_counts;
+    std::pmr::vector<int> recv_displs;
+    std::pmr::vector<int> send_counts_bytes;
+    std::pmr::vector<int> send_displs_bytes;
+    std::pmr::vector<int> recv_counts_bytes;
+    std::pmr::vector<int> recv_displs_bytes;
+    std::pmr::vector<int> send_response_counts_bytes;
+    std::pmr::vector<int> send_response_displs_bytes;
+    std::pmr::vector<int> recv_response_counts_bytes;
+    std::pmr::vector<int> recv_response_displs_bytes;
+    std::pmr::vector<std::size_t> cursor;
   };
 
 
@@ -2165,45 +2201,66 @@ class PmSolver::Impl {
     return epoch;
   }
 
-  [[nodiscard]] DensityExchangeBuffers& densityExchangeBuffersForLayout(const parallel::PmSlabLayout& layout) {
-    if (m_density_exchange.world_size != layout.world_size || m_density_exchange.world_rank != layout.world_rank) {
-      m_density_exchange.world_size = layout.world_size;
-      m_density_exchange.world_rank = layout.world_rank;
-      m_density_exchange.buffers.send_counts.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.send_displs.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.recv_counts.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.recv_displs.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.send_counts_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.send_displs_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.recv_counts_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.recv_displs_bytes.assign(static_cast<std::size_t>(layout.world_size), 0);
-      m_density_exchange.buffers.cursor.assign(static_cast<std::size_t>(layout.world_size), 0U);
+  [[nodiscard]] std::pmr::memory_resource* communicationResource(
+      GravityCommunicationArena::Phase phase,
+      std::optional<GravityCommunicationArena::Lease>& fallback_lease) {
+    if (m_external_communication_arena != nullptr) {
+      if (m_external_communication_arena->activePhase() != phase) {
+        throw std::logic_error("PmSolver external gravity communication arena phase mismatch");
+      }
+      return m_external_communication_resource;
     }
-    return m_density_exchange.buffers;
+    if (m_standalone_communication_arena == nullptr) {
+      m_standalone_communication_arena = std::make_unique<GravityCommunicationArena>(
+          nullptr, "pm_solver.communication_arena");
+      m_standalone_communication_arena->configure(k_pm_routing_workspace_target_bytes);
+    }
+    fallback_lease.emplace(m_standalone_communication_arena->begin(phase));
+    return fallback_lease->resource();
   }
 
-  [[nodiscard]] PlaneInterpolationExchangeBuffers&
-  planeInterpolationExchangeBuffersForLayout(const parallel::PmSlabLayout& layout) {
-    if (m_plane_interpolation_exchange.world_size != layout.world_size || m_plane_interpolation_exchange.world_rank != layout.world_rank) {
-      m_plane_interpolation_exchange.world_size = layout.world_size;
-      m_plane_interpolation_exchange.world_rank = layout.world_rank;
-      auto& b = m_plane_interpolation_exchange.buffers;
-      const std::size_t ranks = static_cast<std::size_t>(layout.world_size);
-      b.send_counts.assign(ranks, 0);
-      b.send_displs.assign(ranks, 0);
-      b.recv_counts.assign(ranks, 0);
-      b.recv_displs.assign(ranks, 0);
-      b.send_counts_bytes.assign(ranks, 0);
-      b.send_displs_bytes.assign(ranks, 0);
-      b.recv_counts_bytes.assign(ranks, 0);
-      b.recv_displs_bytes.assign(ranks, 0);
-      b.send_response_counts_bytes.assign(ranks, 0);
-      b.send_response_displs_bytes.assign(ranks, 0);
-      b.recv_response_counts_bytes.assign(ranks, 0);
-      b.recv_response_displs_bytes.assign(ranks, 0);
-      b.cursor.assign(ranks, 0U);
+  void attachCommunicationArena(GravityCommunicationArena* arena) {
+    if (arena == nullptr || arena->activePhase() == GravityCommunicationArena::Phase::kIdle) {
+      throw std::invalid_argument("PmSolver requires an active external communication arena lease");
     }
-    return m_plane_interpolation_exchange.buffers;
+    // External production ownership and standalone fallback ownership are
+    // mutually exclusive.  Do not retain a full fallback after attachment.
+    m_standalone_communication_arena.reset();
+    m_external_communication_arena = arena;
+    // The resource is phase-valid only while the coordinator's lease lives.
+    switch (arena->activePhase()) {
+      case GravityCommunicationArena::Phase::kPmDensity:
+      case GravityCommunicationArena::Phase::kPmInterpolation:
+        break;
+      default:
+        throw std::invalid_argument("PmSolver external arena phase is not a PM routing phase");
+    }
+    m_external_communication_resource = arena->activeResource();
+  }
+
+  void detachCommunicationArena() noexcept {
+    m_external_communication_resource = nullptr;
+    m_external_communication_arena = nullptr;
+  }
+
+  void recordCommunicationHighWater(
+      GravityCommunicationArena::Phase phase,
+      std::uint64_t bytes,
+      std::optional<GravityCommunicationArena::Lease>& fallback_lease) {
+    if (phase == GravityCommunicationArena::Phase::kPmDensity) {
+      m_density_exchange_logical_high_water_bytes =
+          std::max(m_density_exchange_logical_high_water_bytes, bytes);
+    } else if (phase == GravityCommunicationArena::Phase::kPmInterpolation) {
+      m_plane_interpolation_logical_high_water_bytes =
+          std::max(m_plane_interpolation_logical_high_water_bytes, bytes);
+    } else {
+      throw std::logic_error("PmSolver attempted to record a non-PM communication phase");
+    }
+    if (m_external_communication_arena != nullptr) {
+      m_external_communication_arena->recordActiveLogicalHighWater(bytes);
+    } else if (fallback_lease.has_value()) {
+      fallback_lease->recordLogicalHighWater(bytes);
+    }
   }
 
   [[nodiscard]] IndexedTargetWorkspace& indexedTargetWorkspace() noexcept {
@@ -2558,47 +2615,46 @@ class PmSolver::Impl {
     }
 
     {
-      const auto& b = m_density_exchange.buffers;
-      std::uint64_t current = 0U;
-      std::uint64_t capacity = 0U;
-      accumulate(current, capacity, b.send_wire);
-      accumulate(current, capacity, b.recv_wire);
-      accumulate(current, capacity, b.send_counts);
-      accumulate(current, capacity, b.send_displs);
-      accumulate(current, capacity, b.recv_counts);
-      accumulate(current, capacity, b.recv_displs);
-      accumulate(current, capacity, b.send_counts_bytes);
-      accumulate(current, capacity, b.send_displs_bytes);
-      accumulate(current, capacity, b.recv_counts_bytes);
-      accumulate(current, capacity, b.recv_displs_bytes);
-      accumulate(current, capacity, b.cursor);
-      emit(core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
-           "pm_solver.density_exchange_workspace", current, capacity, b.workspace_high_water_bytes,
-           "bounded PM density communication workspace; logical bytes, retained capacity, and historical high-water are distinct");
-    }
-
-    {
-      const auto& b = m_plane_interpolation_exchange.buffers;
-      std::uint64_t current = 0U;
-      std::uint64_t capacity = 0U;
-      accumulate(current, capacity, b.send_wire);
-      accumulate(current, capacity, b.recv_wire);
-      accumulate(current, capacity, b.send_counts);
-      accumulate(current, capacity, b.send_displs);
-      accumulate(current, capacity, b.recv_counts);
-      accumulate(current, capacity, b.recv_displs);
-      accumulate(current, capacity, b.send_counts_bytes);
-      accumulate(current, capacity, b.send_displs_bytes);
-      accumulate(current, capacity, b.recv_counts_bytes);
-      accumulate(current, capacity, b.recv_displs_bytes);
-      accumulate(current, capacity, b.send_response_counts_bytes);
-      accumulate(current, capacity, b.send_response_displs_bytes);
-      accumulate(current, capacity, b.recv_response_counts_bytes);
-      accumulate(current, capacity, b.recv_response_displs_bytes);
-      accumulate(current, capacity, b.cursor);
-      emit(core::MemorySubsystem::kMpiBuffers, core::MemoryLifetime::kTransient,
-           "pm_solver.plane_interpolation_exchange_workspace", current, capacity, b.workspace_high_water_bytes,
-           "shared bounded plane-request PM force/potential workspace; no population-scale decoded copies");
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kMpiBuffers,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kCommunication,
+          .label = "pm_solver.density_exchange_logical_high_water",
+          .current_size_bytes = 0U,
+          .owned_capacity_bytes = 0U,
+          .high_water_bytes = m_density_exchange_logical_high_water_bytes,
+          .estimated_next_step_bytes = 0U,
+          .estimate_only = true,
+          .uncertainty_note = "logical non-owning PM density usage; physical storage is the attached TreePM communication arena or the standalone fallback arena",
+      });
+      builder.addEntry(core::MemoryEntry{
+          .subsystem = core::MemorySubsystem::kMpiBuffers,
+          .lifetime = core::MemoryLifetime::kTransient,
+          .memory_class = core::MemoryClass::kCommunication,
+          .label = "pm_solver.plane_interpolation_exchange_logical_high_water",
+          .current_size_bytes = 0U,
+          .owned_capacity_bytes = 0U,
+          .high_water_bytes = m_plane_interpolation_logical_high_water_bytes,
+          .estimated_next_step_bytes = 0U,
+          .estimate_only = true,
+          .uncertainty_note = "logical non-owning PM interpolation usage; request/response reuse the same attached physical arena",
+      });
+      if (m_standalone_communication_arena != nullptr &&
+          m_standalone_communication_arena->configured()) {
+        const std::uint64_t capacity =
+            m_standalone_communication_arena->capacityBytes();
+        builder.addEntry(core::MemoryEntry{
+            .subsystem = core::MemorySubsystem::kMpiBuffers,
+            .lifetime = core::MemoryLifetime::kTransient,
+            .memory_class = core::MemoryClass::kCommunication,
+            .label = "pm_solver.communication_arena_fallback",
+            .current_size_bytes = 0U,
+            .owned_capacity_bytes = capacity,
+            .high_water_bytes = capacity,
+            .estimated_next_step_bytes = capacity,
+            .uncertainty_note = "standalone PM-only bounded fallback owner; absent from externally arena-backed TreePM production",
+        });
+      }
     }
 
 #if COSMOSIM_ENABLE_CUDA
@@ -2642,16 +2698,11 @@ class PmSolver::Impl {
   std::optional<PlanKey> m_active_key;
   std::size_t m_plan_build_count = 0;
   std::uint64_t m_next_distributed_exchange_epoch = 1;
-  struct {
-    int world_size = 1;
-    int world_rank = 0;
-    DensityExchangeBuffers buffers;
-  } m_density_exchange{};
-  struct {
-    int world_size = 1;
-    int world_rank = 0;
-    PlaneInterpolationExchangeBuffers buffers;
-  } m_plane_interpolation_exchange{};
+  mutable GravityCommunicationArena* m_external_communication_arena = nullptr;
+  mutable std::pmr::memory_resource* m_external_communication_resource = nullptr;
+  mutable std::unique_ptr<GravityCommunicationArena> m_standalone_communication_arena;
+  mutable std::uint64_t m_density_exchange_logical_high_water_bytes = 0U;
+  mutable std::uint64_t m_plane_interpolation_logical_high_water_bytes = 0U;
   IndexedTargetWorkspace m_indexed_target_workspace{};
   IsolatedOpenWorkspace m_isolated_workspace{};
 #if COSMOSIM_ENABLE_CUDA
@@ -2860,45 +2911,89 @@ std::span<const double> PmGridStorage::force_z() const {
 }
 
 void PmGridStorage::clearForceHaloCache() {
-  m_force_halo_cache = ForceHaloCache{};
+  // Invalidation is intentionally capacity-preserving.  The six final force
+  // halo lanes are legitimate phase-retained state and are reused across PM
+  // refreshes; only validity/publication metadata is cleared here.
+  m_force_halo_cache.valid = false;
+  m_force_halo_cache.halo_depth_x = 0U;
+  m_force_halo_cache.left_peer_rank = -1;
+  m_force_halo_cache.right_peer_rank = -1;
+  m_force_halo_cache.exchange_sequence = 0U;
 }
 
-void PmGridStorage::setForceHaloCache(
-    const parallel::PmSlabHaloExchangeResult& force_x_halo,
-    const parallel::PmSlabHaloExchangeResult& force_y_halo,
-    const parallel::PmSlabHaloExchangeResult& force_z_halo,
+void PmGridStorage::beginForceHaloCacheRefresh(std::size_t halo_depth_x) {
+  m_force_halo_cache.valid = false;
+  m_force_halo_cache.halo_depth_x = 0U;
+  m_force_halo_cache.left_peer_rank = -1;
+  m_force_halo_cache.right_peer_rank = -1;
+  m_force_halo_cache.exchange_sequence = 0U;
+  const std::size_t plane_size = core::checkedSizeMultiply(
+      m_layout.global_ny, m_layout.global_nz,
+      "PM force halo cache plane size");
+  const std::size_t value_count = core::checkedSizeMultiply(
+      halo_depth_x, plane_size,
+      "PM force halo cache value count");
+  m_force_halo_cache.left_force_x.resize(value_count);
+  m_force_halo_cache.left_force_y.resize(value_count);
+  m_force_halo_cache.left_force_z.resize(value_count);
+  m_force_halo_cache.right_force_x.resize(value_count);
+  m_force_halo_cache.right_force_y.resize(value_count);
+  m_force_halo_cache.right_force_z.resize(value_count);
+}
+
+PmGridStorage::ForceHaloWriteView PmGridStorage::forceHaloWriteView(
+    std::size_t component) {
+  if (m_force_halo_cache.valid) {
+    throw std::logic_error("PM force halo cache cannot be mutated after publication");
+  }
+  switch (component) {
+    case 0U:
+      return ForceHaloWriteView{
+          std::span<double>(m_force_halo_cache.left_force_x),
+          std::span<double>(m_force_halo_cache.right_force_x)};
+    case 1U:
+      return ForceHaloWriteView{
+          std::span<double>(m_force_halo_cache.left_force_y),
+          std::span<double>(m_force_halo_cache.right_force_y)};
+    case 2U:
+      return ForceHaloWriteView{
+          std::span<double>(m_force_halo_cache.left_force_z),
+          std::span<double>(m_force_halo_cache.right_force_z)};
+    default:
+      throw std::out_of_range("PM force halo cache component must be 0, 1, or 2");
+  }
+}
+
+void PmGridStorage::commitForceHaloCacheRefresh(
+    std::size_t halo_depth_x,
+    int left_peer_rank,
+    int right_peer_rank,
     std::uint64_t exchange_sequence) {
-  const auto require_same_shape = [&](const parallel::PmSlabHaloExchangeResult& component, std::string_view label) {
-    if (component.halo_depth_x != force_x_halo.halo_depth_x ||
-        component.left_peer_rank != force_x_halo.left_peer_rank ||
-        component.right_peer_rank != force_x_halo.right_peer_rank ||
-        component.left_halo.size() != force_x_halo.left_halo.size() ||
-        component.right_halo.size() != force_x_halo.right_halo.size()) {
-      throw std::invalid_argument(std::string("PM force halo cache component shape mismatch for ") + std::string(label));
+  const std::size_t plane_size = core::checkedSizeMultiply(
+      m_layout.global_ny, m_layout.global_nz,
+      "PM force halo cache commit plane size");
+  const std::size_t expected_values = core::checkedSizeMultiply(
+      halo_depth_x, plane_size,
+      "PM force halo cache commit value count");
+  const auto require_extent = [&](const std::vector<double>& values) {
+    if (values.size() != expected_values) {
+      throw std::invalid_argument(
+          "PM force halo cache component extent changed during refresh");
     }
   };
-  require_same_shape(force_y_halo, "force_y");
-  require_same_shape(force_z_halo, "force_z");
-
-  const std::size_t plane_size = m_layout.global_ny * m_layout.global_nz;
-  if (force_x_halo.halo_depth_x == 0 || plane_size == 0) {
+  require_extent(m_force_halo_cache.left_force_x);
+  require_extent(m_force_halo_cache.left_force_y);
+  require_extent(m_force_halo_cache.left_force_z);
+  require_extent(m_force_halo_cache.right_force_x);
+  require_extent(m_force_halo_cache.right_force_y);
+  require_extent(m_force_halo_cache.right_force_z);
+  if (halo_depth_x == 0U || plane_size == 0U) {
     clearForceHaloCache();
     return;
   }
-  const std::size_t expected_values = force_x_halo.halo_depth_x * plane_size;
-  if (force_x_halo.left_halo.size() != expected_values || force_x_halo.right_halo.size() != expected_values) {
-    throw std::invalid_argument("PM force halo cache received a halo payload with inconsistent plane count");
-  }
-
-  m_force_halo_cache.left_force_x = force_x_halo.left_halo;
-  m_force_halo_cache.left_force_y = force_y_halo.left_halo;
-  m_force_halo_cache.left_force_z = force_z_halo.left_halo;
-  m_force_halo_cache.right_force_x = force_x_halo.right_halo;
-  m_force_halo_cache.right_force_y = force_y_halo.right_halo;
-  m_force_halo_cache.right_force_z = force_z_halo.right_halo;
-  m_force_halo_cache.halo_depth_x = force_x_halo.halo_depth_x;
-  m_force_halo_cache.left_peer_rank = force_x_halo.left_peer_rank;
-  m_force_halo_cache.right_peer_rank = force_x_halo.right_peer_rank;
+  m_force_halo_cache.halo_depth_x = halo_depth_x;
+  m_force_halo_cache.left_peer_rank = left_peer_rank;
+  m_force_halo_cache.right_peer_rank = right_peer_rank;
   m_force_halo_cache.exchange_sequence = exchange_sequence;
   m_force_halo_cache.valid = true;
 }
@@ -2985,12 +3080,28 @@ void PmGridStorage::appendMemoryReport(core::MemoryReportBuilder& builder) const
   add("pm_mesh.force_x", m_force_x);
   add("pm_mesh.force_y", m_force_y);
   add("pm_mesh.force_z", m_force_z);
-  add("pm_mesh.force_halo_left_x", m_force_halo_cache.left_force_x);
-  add("pm_mesh.force_halo_left_y", m_force_halo_cache.left_force_y);
-  add("pm_mesh.force_halo_left_z", m_force_halo_cache.left_force_z);
-  add("pm_mesh.force_halo_right_x", m_force_halo_cache.right_force_x);
-  add("pm_mesh.force_halo_right_y", m_force_halo_cache.right_force_y);
-  add("pm_mesh.force_halo_right_z", m_force_halo_cache.right_force_z);
+  const auto add_force_halo_cache = [&builder](
+      std::string label, const auto& container) {
+    const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kPmMesh,
+        .lifetime = core::MemoryLifetime::kPersistent,
+        .memory_class = core::MemoryClass::kPersistentCache,
+        .label = std::move(label),
+        .current_size_bytes = core::currentSizeBytesForContainer(container),
+        .owned_capacity_bytes = bytes,
+        .high_water_bytes = bytes,
+        .estimated_next_step_bytes = 0U,
+        .uncertainty_note =
+            "retained final force-halo cache; survives communication-arena reset until PM interpolation completes",
+    });
+  };
+  add_force_halo_cache("pm_mesh.force_halo_left_x", m_force_halo_cache.left_force_x);
+  add_force_halo_cache("pm_mesh.force_halo_left_y", m_force_halo_cache.left_force_y);
+  add_force_halo_cache("pm_mesh.force_halo_left_z", m_force_halo_cache.left_force_z);
+  add_force_halo_cache("pm_mesh.force_halo_right_x", m_force_halo_cache.right_force_x);
+  add_force_halo_cache("pm_mesh.force_halo_right_y", m_force_halo_cache.right_force_y);
+  add_force_halo_cache("pm_mesh.force_halo_right_z", m_force_halo_cache.right_force_z);
 }
 
 PmSolver::PmSolver(PmGridShape shape) : m_shape(shape), m_impl(std::make_unique<Impl>(shape)) {
@@ -3009,6 +3120,14 @@ const PmGridShape& PmSolver::shape() const {
 
 void PmSolver::appendMemoryReport(core::MemoryReportBuilder& builder) const {
   m_impl->appendOwnedMemoryReport(builder);
+}
+
+void PmSolver::attachCommunicationArena(GravityCommunicationArena* arena) const {
+  m_impl->attachCommunicationArena(arena);
+}
+
+void PmSolver::detachCommunicationArena() const noexcept {
+  m_impl->detachCommunicationArena();
 }
 
 void PmSolver::shutdownBackendResources() {
@@ -3232,6 +3351,8 @@ void PmSolver::assignDensity(
       validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::assignDensity");
     });
 
+    std::optional<GravityCommunicationArena::Lease> standalone_communication_lease;
+    std::optional<Impl::DensityExchangeBuffers> exchange_storage;
     Impl::DensityExchangeBuffers* exchange_ptr = nullptr;
     std::uint64_t routing_metadata_capacity = 0U;
     PmRoutingCapacityModel routing_capacity{};
@@ -3243,7 +3364,12 @@ void PmSolver::assignDensity(
         world_size,
         routed_mpi_wait_ms,
         [&]() {
-          exchange_ptr = &m_impl->densityExchangeBuffersForLayout(grid.slabLayout());
+          std::pmr::memory_resource* communication_resource = m_impl->communicationResource(
+              GravityCommunicationArena::Phase::kPmDensity,
+              standalone_communication_lease);
+          exchange_storage.emplace(
+              communication_resource, static_cast<std::size_t>(world_size));
+          exchange_ptr = &*exchange_storage;
           auto& prepared_exchange = *exchange_ptr;
           const auto add_routing_metadata = [&](const auto& values) {
             routing_metadata_capacity = checkedAddBytes(
@@ -3272,6 +3398,11 @@ void PmSolver::assignDensity(
           }
           routing_buffer_limit =
               static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          // The phase arena is monotonic/resettable. Reserve both bounded wire
+          // maxima once so later exact-size swaps/resizes never accumulate
+          // abandoned growth blocks inside the same logical lease.
+          prepared_exchange.send_wire.reserve(routing_buffer_limit);
+          prepared_exchange.recv_wire.reserve(routing_buffer_limit);
           particles_per_round = pmRoutingParticlesPerRound(
               routing_capacity.effective_per_peer_payload_bytes,
               k_pm_density_plane_wire_bytes);
@@ -3622,6 +3753,10 @@ void PmSolver::assignDensity(
       workspace_high_water = std::max(workspace_high_water, round_workspace_capacity);
       exchange.workspace_high_water_bytes = std::max(
           exchange.workspace_high_water_bytes, round_workspace_capacity);
+      m_impl->recordCommunicationHighWater(
+          GravityCommunicationArena::Phase::kPmDensity,
+          round_workspace_capacity,
+          standalone_communication_lease);
     }
 
     if (profile != nullptr) {
@@ -4633,6 +4768,8 @@ void PmSolver::interpolateForcesImpl(
       validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::interpolateForces");
     });
 
+    std::optional<GravityCommunicationArena::Lease> standalone_communication_lease;
+    std::optional<Impl::PlaneInterpolationExchangeBuffers> exchange_storage;
     Impl::PlaneInterpolationExchangeBuffers* exchange_ptr = nullptr;
     std::uint64_t routing_metadata_capacity = 0U;
     PmRoutingCapacityModel routing_capacity{};
@@ -4644,7 +4781,12 @@ void PmSolver::interpolateForcesImpl(
         world_size,
         routed_mpi_wait_ms,
         [&]() {
-          exchange_ptr = &m_impl->planeInterpolationExchangeBuffersForLayout(grid.slabLayout());
+          std::pmr::memory_resource* communication_resource = m_impl->communicationResource(
+              GravityCommunicationArena::Phase::kPmInterpolation,
+              standalone_communication_lease);
+          exchange_storage.emplace(
+              communication_resource, static_cast<std::size_t>(world_size));
+          exchange_ptr = &*exchange_storage;
           auto& prepared_exchange = *exchange_ptr;
           const auto add_routing_metadata = [&](const auto& values) {
             routing_metadata_capacity = checkedAddBytes(
@@ -4677,6 +4819,11 @@ void PmSolver::interpolateForcesImpl(
           }
           routing_buffer_limit =
               static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          // The phase arena is monotonic/resettable. Reserve both bounded wire
+          // maxima once so later exact-size swaps/resizes never accumulate
+          // abandoned growth blocks inside the same logical lease.
+          prepared_exchange.send_wire.reserve(routing_buffer_limit);
+          prepared_exchange.recv_wire.reserve(routing_buffer_limit);
           particles_per_round = pmRoutingParticlesPerRound(
               routing_capacity.effective_per_peer_payload_bytes,
               k_pm_plane_interpolation_request_wire_bytes);
@@ -5242,6 +5389,10 @@ void PmSolver::interpolateForcesImpl(
       workspace_high_water = std::max(workspace_high_water, workspace_capacity);
       exchange.workspace_high_water_bytes = std::max(
           exchange.workspace_high_water_bytes, workspace_capacity);
+      m_impl->recordCommunicationHighWater(
+          GravityCommunicationArena::Phase::kPmInterpolation,
+          workspace_capacity,
+          standalone_communication_lease);
     }
 
     if (profile != nullptr) {
@@ -5467,6 +5618,8 @@ void PmSolver::interpolatePotential(
       validatePmExchangeEpochConsensus(exchange_epoch, "PmSolver::interpolatePotential");
     });
 
+    std::optional<GravityCommunicationArena::Lease> standalone_communication_lease;
+    std::optional<Impl::PlaneInterpolationExchangeBuffers> exchange_storage;
     Impl::PlaneInterpolationExchangeBuffers* exchange_ptr = nullptr;
     std::uint64_t routing_metadata_capacity = 0U;
     PmRoutingCapacityModel routing_capacity{};
@@ -5478,7 +5631,12 @@ void PmSolver::interpolatePotential(
         world_size,
         routed_mpi_wait_ms,
         [&]() {
-          exchange_ptr = &m_impl->planeInterpolationExchangeBuffersForLayout(grid.slabLayout());
+          std::pmr::memory_resource* communication_resource = m_impl->communicationResource(
+              GravityCommunicationArena::Phase::kPmInterpolation,
+              standalone_communication_lease);
+          exchange_storage.emplace(
+              communication_resource, static_cast<std::size_t>(world_size));
+          exchange_ptr = &*exchange_storage;
           auto& prepared_exchange = *exchange_ptr;
           const auto add_routing_metadata = [&](const auto& values) {
             routing_metadata_capacity = checkedAddBytes(
@@ -5511,6 +5669,11 @@ void PmSolver::interpolatePotential(
           }
           routing_buffer_limit =
               static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          // The phase arena is monotonic/resettable. Reserve both bounded wire
+          // maxima once so later exact-size swaps/resizes never accumulate
+          // abandoned growth blocks inside the same logical lease.
+          prepared_exchange.send_wire.reserve(routing_buffer_limit);
+          prepared_exchange.recv_wire.reserve(routing_buffer_limit);
           particles_per_round = pmRoutingParticlesPerRound(
               routing_capacity.effective_per_peer_payload_bytes,
               k_pm_plane_interpolation_request_wire_bytes);
@@ -6059,6 +6222,10 @@ void PmSolver::interpolatePotential(
       workspace_high_water = std::max(workspace_high_water, workspace_capacity);
       exchange.workspace_high_water_bytes = std::max(
           exchange.workspace_high_water_bytes, workspace_capacity);
+      m_impl->recordCommunicationHighWater(
+          GravityCommunicationArena::Phase::kPmInterpolation,
+          workspace_capacity,
+          standalone_communication_lease);
     }
 
     if (profile != nullptr) {

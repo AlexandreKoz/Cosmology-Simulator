@@ -1247,4 +1247,274 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
 }
 
 
+PmSlabHaloExchangeStatus executeBlockingPmSlabHaloExchangeInto(
+    const MpiContext& mpi_context,
+    const PmSlabLayout& layout,
+    std::span<const double> local_scalar_field,
+    std::size_t halo_depth_x,
+    bool periodic_x,
+    std::span<double> left_halo_out,
+    std::span<double> right_halo_out,
+    std::pmr::memory_resource* communication_resource,
+    std::uint64_t exchange_sequence) {
+#if !defined(COSMOSIM_ENABLE_MPI) || !COSMOSIM_ENABLE_MPI
+  (void)exchange_sequence;
+#endif
+  if (communication_resource == nullptr) {
+    throw std::invalid_argument(
+        "PM slab halo arena exchange requires a non-null communication resource");
+  }
+  PmSlabHaloExchangeStatus result;
+  std::pmr::vector<double> send_left(communication_resource);
+  std::pmr::vector<double> send_right(communication_resource);
+  std::size_t halo_value_count = 0U;
+  std::uint64_t payload_bytes = 0U;
+  int left_peer = -1;
+  int right_peer = -1;
+  bool no_exchange = false;
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  int communicator_world_size = 1;
+  int communicator_world_rank = 0;
+  const bool communicator_mpi_active =
+      queryActiveMpiWorld(communicator_world_size, communicator_world_rank);
+#endif
+
+  std::exception_ptr local_preparation_failure;
+  try {
+    if (!layout.isValid()) {
+      throw std::invalid_argument("PM slab halo exchange requires a valid slab layout");
+    }
+    if (layout.world_size != mpi_context.worldSize() ||
+        layout.world_rank != mpi_context.worldRank()) {
+      throw std::invalid_argument(
+          "PM slab halo exchange layout world metadata must match MPI context");
+    }
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+    if (!communicator_mpi_active &&
+        (layout.world_size > 1 || mpi_context.isEnabled())) {
+      throw std::invalid_argument(
+          "PM slab halo exchange requires an active MPI_COMM_WORLD for an enabled or distributed context");
+    }
+    if (communicator_mpi_active &&
+        (layout.world_size != communicator_world_size ||
+         layout.world_rank != communicator_world_rank)) {
+      throw std::invalid_argument(
+          "PM slab halo exchange layout world metadata must match MPI_COMM_WORLD");
+    }
+#endif
+    if (layout.global_ny >
+        std::numeric_limits<std::size_t>::max() / layout.global_nz) {
+      throw std::overflow_error("PM slab halo exchange plane size overflows size_t");
+    }
+    const std::size_t plane_size = layout.global_ny * layout.global_nz;
+    if (layout.local_nx() >
+        std::numeric_limits<std::size_t>::max() / plane_size) {
+      throw std::overflow_error("PM slab halo exchange local field size overflows size_t");
+    }
+    const std::size_t expected_local_values = layout.local_nx() * plane_size;
+    if (local_scalar_field.size() != expected_local_values) {
+      throw std::invalid_argument(
+          "PM slab halo exchange field size does not match local slab cell count");
+    }
+    if (halo_depth_x == 0 || layout.world_size == 1 || layout.local_nx() == 0) {
+      no_exchange = true;
+    } else {
+      if (!mpi_context.isEnabled()) {
+        throw std::runtime_error(
+            "PM slab halo exchange requires MPI for distributed layouts");
+      }
+      std::size_t minimum_nonempty_slab_nx =
+          std::numeric_limits<std::size_t>::max();
+      for (int rank = 0; rank < layout.world_size; ++rank) {
+        const PmSlabRange owned =
+            pmOwnedXRangeForRank(layout.global_nx, layout.world_size, rank);
+        if (owned.extentX() > 0U) {
+          minimum_nonempty_slab_nx =
+              std::min(minimum_nonempty_slab_nx, owned.extentX());
+        }
+      }
+      if (minimum_nonempty_slab_nx ==
+          std::numeric_limits<std::size_t>::max()) {
+        throw std::logic_error("PM slab halo exchange layout has no non-empty owner");
+      }
+      const std::size_t depth =
+          std::min(halo_depth_x, minimum_nonempty_slab_nx);
+      if (depth > std::numeric_limits<std::size_t>::max() / plane_size) {
+        throw std::overflow_error("PM slab halo exchange payload size overflows size_t");
+      }
+      halo_value_count = depth * plane_size;
+      if (halo_value_count >
+          static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error(
+            "PM slab halo exchange payload count exceeds MPI int limit");
+      }
+      if (left_halo_out.size() < halo_value_count ||
+          right_halo_out.size() < halo_value_count) {
+        throw std::invalid_argument(
+            "PM slab halo exchange output cache spans are smaller than the halo payload");
+      }
+      if (halo_value_count >
+          std::numeric_limits<std::uint64_t>::max() / sizeof(double)) {
+        throw std::overflow_error(
+            "PM slab halo exchange byte diagnostics overflow uint64_t");
+      }
+      payload_bytes =
+          static_cast<std::uint64_t>(halo_value_count) * sizeof(double);
+      result.halo_depth_x = depth;
+      if (layout.owned_x.begin_x > 0) {
+        left_peer = pmOwnerRankForGlobalX(
+            layout.global_nx, layout.world_size, layout.owned_x.begin_x - 1U);
+      } else if (periodic_x) {
+        left_peer = pmOwnerRankForGlobalX(
+            layout.global_nx, layout.world_size, layout.global_nx - 1U);
+      }
+      if (layout.owned_x.end_x < layout.global_nx) {
+        right_peer = pmOwnerRankForGlobalX(
+            layout.global_nx, layout.world_size, layout.owned_x.end_x);
+      } else if (periodic_x) {
+        right_peer = pmOwnerRankForGlobalX(
+            layout.global_nx, layout.world_size, 0U);
+      }
+      result.left_peer_rank = left_peer;
+      result.right_peer_rank = right_peer;
+      send_left.resize(halo_value_count);
+      send_right.resize(halo_value_count);
+      const std::span<const double> left_source =
+          local_scalar_field.first(halo_value_count);
+      const std::span<const double> right_source =
+          local_scalar_field.last(halo_value_count);
+      std::copy(left_source.begin(), left_source.end(), send_left.begin());
+      std::copy(right_source.begin(), right_source.end(), send_right.begin());
+
+      const int local_rank = mpi_context.worldRank();
+      const auto is_remote_peer = [&](int peer) {
+        return peer >= 0 && peer != local_rank;
+      };
+      const std::uint64_t remote_side_count =
+          static_cast<std::uint64_t>(is_remote_peer(left_peer)) +
+          static_cast<std::uint64_t>(is_remote_peer(right_peer));
+      if (remote_side_count > 0 &&
+          payload_bytes >
+              std::numeric_limits<std::uint64_t>::max() / remote_side_count) {
+        throw std::overflow_error(
+            "PM slab halo exchange aggregate byte diagnostics overflow uint64_t");
+      }
+      result.sent_bytes = payload_bytes * remote_side_count;
+      result.received_bytes = payload_bytes * remote_side_count;
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (communicator_mpi_active && communicator_world_size > 1) {
+    const std::uint64_t local_failure_vote =
+        local_preparation_failure ? 1U : 0U;
+    std::uint64_t failure_count = 0U;
+    MPI_Allreduce(
+        &local_failure_vote, &failure_count, 1, MPI_UINT64_T, MPI_SUM,
+        MPI_COMM_WORLD);
+    if (failure_count != 0U) {
+      if (local_preparation_failure) {
+        std::rethrow_exception(local_preparation_failure);
+      }
+      throw std::runtime_error(
+          "PM slab halo exchange peer rejected protocol preparation");
+    }
+    const std::array<std::uint64_t, 7> local_protocol_identity{
+        static_cast<std::uint64_t>(layout.global_nx),
+        static_cast<std::uint64_t>(layout.global_ny),
+        static_cast<std::uint64_t>(layout.global_nz),
+        static_cast<std::uint64_t>(halo_depth_x), periodic_x ? 1U : 0U,
+        exchange_sequence, static_cast<std::uint64_t>(communicator_world_size),
+    };
+    std::array<std::uint64_t, 7> minimum_protocol_identity{};
+    std::array<std::uint64_t, 7> maximum_protocol_identity{};
+    MPI_Allreduce(
+        local_protocol_identity.data(), minimum_protocol_identity.data(),
+        static_cast<int>(local_protocol_identity.size()), MPI_UINT64_T,
+        MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(
+        local_protocol_identity.data(), maximum_protocol_identity.data(),
+        static_cast<int>(local_protocol_identity.size()), MPI_UINT64_T,
+        MPI_MAX, MPI_COMM_WORLD);
+    if (minimum_protocol_identity != maximum_protocol_identity) {
+      throw std::runtime_error(
+          "PM slab halo exchange ranks disagree on global shape, halo depth, boundary mode, or exchange sequence");
+    }
+  }
+#endif
+  if (local_preparation_failure) {
+    std::rethrow_exception(local_preparation_failure);
+  }
+  if (no_exchange) {
+    return result;
+  }
+
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  constexpr int k_pm_halo_tag_base = 8810;
+  constexpr int k_send_left_side = 0;
+  constexpr int k_send_right_side = 1;
+  const auto edge_index = [&](int peer) {
+    const int local = mpi_context.worldRank();
+    return (std::abs(local - peer) == 1) ? std::min(local, peer)
+                                         : (layout.world_size - 1);
+  };
+  const auto side_tag = [&](int peer, int side) {
+    return k_pm_halo_tag_base + edge_index(peer) * 2 + side;
+  };
+
+  const int local_rank = mpi_context.worldRank();
+  const auto is_remote_peer = [&](int peer) {
+    return peer >= 0 && peer != local_rank;
+  };
+  auto left_receive = left_halo_out.first(halo_value_count);
+  auto right_receive = right_halo_out.first(halo_value_count);
+  if (left_peer == local_rank) {
+    std::copy(send_right.begin(), send_right.end(), left_receive.begin());
+  }
+  if (right_peer == local_rank) {
+    std::copy(send_left.begin(), send_left.end(), right_receive.begin());
+  }
+
+  std::array<MPI_Request, 4> requests{};
+  int request_count = 0;
+  const int mpi_value_count = static_cast<int>(halo_value_count);
+  const auto post_receive = [&](int peer, std::span<double> receive,
+                                int sender_side) {
+    if (!is_remote_peer(peer)) {
+      return;
+    }
+    MPI_Irecv(
+        receive.data(), mpi_value_count, MPI_DOUBLE, peer,
+        ghostExchangeSequencedTag(
+            side_tag(peer, sender_side), local_rank, peer, exchange_sequence),
+        MPI_COMM_WORLD, &requests[static_cast<std::size_t>(request_count++)]);
+  };
+  const auto post_send = [&](int peer, std::span<const double> send,
+                             int sender_side) {
+    if (!is_remote_peer(peer)) {
+      return;
+    }
+    MPI_Isend(
+        const_cast<double*>(send.data()), mpi_value_count, MPI_DOUBLE, peer,
+        ghostExchangeSequencedTag(
+            side_tag(peer, sender_side), local_rank, peer, exchange_sequence),
+        MPI_COMM_WORLD, &requests[static_cast<std::size_t>(request_count++)]);
+  };
+
+  post_receive(left_peer, left_receive, k_send_right_side);
+  post_receive(right_peer, right_receive, k_send_left_side);
+  post_send(left_peer, send_left, k_send_left_side);
+  post_send(right_peer, send_right, k_send_right_side);
+  if (request_count > 0) {
+    MPI_Waitall(request_count, requests.data(), MPI_STATUSES_IGNORE);
+  }
+  return result;
+#else
+  throw std::runtime_error(
+      "PM slab halo exchange requires MPI support when MPI context is enabled");
+#endif
+}
+
 }  // namespace cosmosim::parallel

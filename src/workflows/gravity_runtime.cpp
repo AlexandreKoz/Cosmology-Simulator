@@ -117,7 +117,8 @@ gravity::TreePmCoordinator makeRuntimeAwareTreePmCoordinator(
       pm_grid_shape.nz,
       mpi_context.worldSize(),
       mpi_context.worldRank());
-  return gravity::TreePmCoordinator(pm_grid_shape, layout, mpi_context);
+  return gravity::TreePmCoordinator(
+      pm_grid_shape, layout, mpi_context, services.memory_governor);
 }
 
 
@@ -955,8 +956,16 @@ class GravityRuntimeImpl final : public GravityRuntime {
                 .backend_unknown_reserve_bytes = 0U,
                 .safety_margin_fraction = 0.0,
             });
+    // The production communication arena is a separately governed physical
+    // owner. Exclude it from the phase-resident reservation so the same bytes
+    // are not reserved twice by the MemoryGovernor.
+    if (governed_peak.communication_arena_bytes > governed_peak.known_peak_bytes) {
+      throw std::logic_error(
+          "gravity communication arena estimate exceeds the total governed peak");
+    }
     return incrementalMemoryBeyondRetained(
-        governed_peak.known_peak_bytes, gravity_baseline_before);
+        governed_peak.known_peak_bytes - governed_peak.communication_arena_bytes,
+        gravity_baseline_before);
   }
 
   void execute(GravityStageView& view) override {
@@ -979,11 +988,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
     const std::size_t particle_count = context.state.particles.size();
     const std::size_t cell_count = context.state.cells.size();
 
-    // Admit the conservative gravity high-water before any O(N) cache/vector
-    // growth in this phase. The reservation covers the incremental TreePM
-    // owned/phase/communication footprint over the currently retained gravity
-    // baseline. Every rank coordinates admission before later solver
-    // collectives, so a low-headroom rank cannot strand peers in TreePM.
+    // Admit the conservative non-arena gravity high-water before any O(N)
+    // cache/vector growth in this phase. The shared communication arena owns
+    // and commits its separate Communication reservation before first use; this
+    // phase reservation covers the remaining incremental TreePM footprint over
+    // the retained gravity baseline. Every rank coordinates admission before
+    // later solver collectives, so a low-headroom rank cannot strand peers.
     const std::uint64_t gravity_baseline_before =
         core::memoryReportBaselineOwnedBytes(memoryReport());
     std::uint64_t process_baseline_before = 0U;

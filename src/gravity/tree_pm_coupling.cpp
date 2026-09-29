@@ -11,19 +11,20 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <memory_resource>
 #include <numeric>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <type_traits>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/openmp_runtime.hpp"
+#include "cosmosim/gravity/gravity_memory.hpp"
 
 #if COSMOSIM_HAVE_OPENMP
 #include <omp.h>
@@ -793,13 +794,15 @@ void resizeCompactSidecars(std::vector<double>& first, std::vector<double>& seco
   return std::sqrt(sum);
 }
 
-void appendWireU32(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+template <typename ByteContainer>
+void appendWireU32(ByteContainer& bytes, std::uint32_t value) {
   for (unsigned shift = 0; shift < 32U; shift += 8U) {
     bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
   }
 }
 
-void appendWireU64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
+template <typename ByteContainer>
+void appendWireU64(ByteContainer& bytes, std::uint64_t value) {
   for (unsigned shift = 0; shift < 64U; shift += 8U) {
     bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
   }
@@ -827,7 +830,8 @@ void appendWireU64(std::vector<std::uint8_t>& bytes, std::uint64_t value) {
   return value;
 }
 
-void appendWireDouble(std::vector<std::uint8_t>& bytes, double value) {
+template <typename ByteContainer>
+void appendWireDouble(ByteContainer& bytes, double value) {
   appendWireU64(bytes, std::bit_cast<std::uint64_t>(value));
 }
 
@@ -1177,13 +1181,18 @@ static_assert(sizeof(ShortRangeTargetRequestPacket) == kTreePmShortRangeRequestW
 static_assert(sizeof(ShortRangeTargetResponsePacket) == kTreePmShortRangeResponseWireBytes,
     "ShortRangeTargetResponsePacket host layout must equal the response wire record width");
 
-[[nodiscard, maybe_unused]] std::vector<std::uint8_t> encodeShortRangeRequests(
-    std::span<const ShortRangeTargetRequestPacket> records) {
+template <typename ByteContainer>
+void encodeShortRangeRequests(
+    std::span<const ShortRangeTargetRequestPacket> records,
+    ByteContainer& bytes) {
   if (records.size() > std::numeric_limits<std::size_t>::max() / k_short_range_request_wire_bytes) {
     throw std::overflow_error("TreePM short-range request serialization size overflows size_t");
   }
-  std::vector<std::uint8_t> bytes;
-  bytes.reserve(records.size() * k_short_range_request_wire_bytes);
+  const std::size_t required = records.size() * k_short_range_request_wire_bytes;
+  bytes.clear();
+  if (bytes.capacity() < required) {
+    bytes.reserve(required);
+  }
   for (const ShortRangeTargetRequestPacket& record : records) {
     appendWireU32(bytes, record.wire_version);
     appendWireU32(bytes, static_cast<std::uint32_t>(record.origin_rank));
@@ -1201,16 +1210,20 @@ static_assert(sizeof(ShortRangeTargetResponsePacket) == kTreePmShortRangeRespons
     appendWireDouble(bytes, record.target_softening_epsilon_comoving);
     appendWireDouble(bytes, record.previous_acceleration_magnitude);
   }
-  return bytes;
 }
 
-[[nodiscard, maybe_unused]] std::vector<ShortRangeTargetRequestPacket> decodeShortRangeRequests(
-    std::span<const std::uint8_t> bytes) {
+template <typename RecordContainer>
+void decodeShortRangeRequests(
+    std::span<const std::uint8_t> bytes,
+    RecordContainer& records) {
   if (bytes.size() % k_short_range_request_wire_bytes != 0U) {
     throw std::runtime_error("TreePM short-range request wire payload is misaligned");
   }
-  std::vector<ShortRangeTargetRequestPacket> records;
-  records.reserve(bytes.size() / k_short_range_request_wire_bytes);
+  const std::size_t required = bytes.size() / k_short_range_request_wire_bytes;
+  records.clear();
+  if (records.capacity() < required) {
+    records.reserve(required);
+  }
   std::size_t offset = 0U;
   while (offset < bytes.size()) {
     ShortRangeTargetRequestPacket record;
@@ -1231,16 +1244,20 @@ static_assert(sizeof(ShortRangeTargetResponsePacket) == kTreePmShortRangeRespons
     record.previous_acceleration_magnitude = readWireDouble(bytes, offset);
     records.push_back(record);
   }
-  return records;
 }
 
-[[nodiscard, maybe_unused]] std::vector<std::uint8_t> encodeShortRangeResponses(
-    std::span<const ShortRangeTargetResponsePacket> records) {
+template <typename ByteContainer>
+void encodeShortRangeResponses(
+    std::span<const ShortRangeTargetResponsePacket> records,
+    ByteContainer& bytes) {
   if (records.size() > std::numeric_limits<std::size_t>::max() / k_short_range_response_wire_bytes) {
     throw std::overflow_error("TreePM short-range response serialization size overflows size_t");
   }
-  std::vector<std::uint8_t> bytes;
-  bytes.reserve(records.size() * k_short_range_response_wire_bytes);
+  const std::size_t required = records.size() * k_short_range_response_wire_bytes;
+  bytes.clear();
+  if (bytes.capacity() < required) {
+    bytes.reserve(required);
+  }
   for (const ShortRangeTargetResponsePacket& record : records) {
     appendWireU32(bytes, record.wire_version);
     appendWireU32(bytes, static_cast<std::uint32_t>(record.target_owner_rank));
@@ -1256,16 +1273,20 @@ static_assert(sizeof(ShortRangeTargetResponsePacket) == kTreePmShortRangeRespons
     appendWireDouble(bytes, record.accel_y_comoving);
     appendWireDouble(bytes, record.accel_z_comoving);
   }
-  return bytes;
 }
 
-[[nodiscard, maybe_unused]] std::vector<ShortRangeTargetResponsePacket> decodeShortRangeResponses(
-    std::span<const std::uint8_t> bytes) {
+template <typename RecordContainer>
+void decodeShortRangeResponses(
+    std::span<const std::uint8_t> bytes,
+    RecordContainer& records) {
   if (bytes.size() % k_short_range_response_wire_bytes != 0U) {
     throw std::runtime_error("TreePM short-range response wire payload is misaligned");
   }
-  std::vector<ShortRangeTargetResponsePacket> records;
-  records.reserve(bytes.size() / k_short_range_response_wire_bytes);
+  const std::size_t required = bytes.size() / k_short_range_response_wire_bytes;
+  records.clear();
+  if (records.capacity() < required) {
+    records.reserve(required);
+  }
   std::size_t offset = 0U;
   while (offset < bytes.size()) {
     ShortRangeTargetResponsePacket record;
@@ -1284,7 +1305,6 @@ static_assert(sizeof(ShortRangeTargetResponsePacket) == kTreePmShortRangeRespons
     record.accel_z_comoving = readWireDouble(bytes, offset);
     records.push_back(record);
   }
-  return records;
 }
 
 struct SourceDomainBoundsPacket {
@@ -1746,6 +1766,7 @@ TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape)
       m_grid(pm_shape),
       m_pm_solver(pm_shape),
       m_tree_solver(),
+      m_communication_arena(nullptr),
       m_let_domain_hierarchy_cache(std::make_unique<LetDomainHierarchyCacheOpaque>()),
       m_sparse_peer_graph_cache(std::make_unique<SparsePeerGraphCacheOpaque>()) {}
 
@@ -1755,12 +1776,14 @@ TreePmCoordinator::TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayou
 TreePmCoordinator::TreePmCoordinator(
     PmGridShape pm_shape,
     parallel::PmSlabLayout pm_layout,
-    parallel::MpiContext mpi_context)
+    parallel::MpiContext mpi_context,
+    core::MemoryGovernor* memory_governor)
     : m_shape(pm_shape),
       m_mpi_context(std::move(mpi_context)),
       m_grid(pm_shape, std::move(pm_layout)),
       m_pm_solver(pm_shape),
       m_tree_solver(),
+      m_communication_arena(memory_governor),
       m_let_domain_hierarchy_cache(std::make_unique<LetDomainHierarchyCacheOpaque>()),
       m_sparse_peer_graph_cache(std::make_unique<SparsePeerGraphCacheOpaque>()) {}
 
@@ -1832,39 +1855,72 @@ core::MemoryReport TreePmCoordinator::memoryReport() const {
    add_tree_scratch("treepm.let_domain_cache.top_level_leaves", m_let_domain_cache.top_level_domain_leaves);
 
    const auto add_mpi = [&builder](std::string label, const auto& container) {
+     const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
+     builder.addEntry(core::MemoryEntry{
+         .subsystem = core::MemorySubsystem::kMpiBuffers,
+         .lifetime = core::MemoryLifetime::kTransient,
+         .label = std::move(label),
+         .current_size_bytes = core::currentSizeBytesForContainer(container),
+         .owned_capacity_bytes = bytes,
+         .high_water_bytes = bytes,
+         .estimated_next_step_bytes = 0U,
+         .uncertainty_note = "small retained communication-topology metadata"});
+   };
 
-    const std::uint64_t bytes = core::ownedCapacityBytesForContainer(container);
-    builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kMpiBuffers,
-                                       .lifetime = core::MemoryLifetime::kTransient,
-                                       .label = std::move(label),
-                                       .current_size_bytes = core::currentSizeBytesForContainer(container),
-                                       .owned_capacity_bytes = bytes,
-                                       .high_water_bytes = bytes,
-                                       .estimated_next_step_bytes = 0U,
-                                       .uncertainty_note = "next-step requirement not predicted from retained capacity"});
-  };
-  add_mpi("treepm.exchange.send_counts", m_tree_exchange_workspace.send_counts);
-  add_mpi("treepm.exchange.recv_counts", m_tree_exchange_workspace.recv_counts);
-  add_mpi("treepm.exchange.send_displs", m_tree_exchange_workspace.send_displs);
-  add_mpi("treepm.exchange.recv_displs", m_tree_exchange_workspace.recv_displs);
-  add_mpi("treepm.exchange.response_send_counts", m_tree_exchange_workspace.response_send_counts);
-  add_mpi("treepm.exchange.response_recv_counts", m_tree_exchange_workspace.response_recv_counts);
-  add_mpi("treepm.exchange.response_send_displs", m_tree_exchange_workspace.response_send_displs);
-  add_mpi("treepm.exchange.response_recv_displs", m_tree_exchange_workspace.response_recv_displs);
-  add_mpi("treepm.exchange.send_payload", m_tree_exchange_workspace.send_payload);
-  add_mpi("treepm.exchange.recv_payload", m_tree_exchange_workspace.recv_payload);
-  add_mpi("treepm.exchange.response_send_payload", m_tree_exchange_workspace.response_send_payload);
-  add_mpi("treepm.exchange.response_recv_payload", m_tree_exchange_workspace.response_recv_payload);
-  add_mpi("treepm.exchange.remote_batch_ax", m_tree_exchange_workspace.remote_batch_ax);
-  add_mpi("treepm.exchange.remote_batch_ay", m_tree_exchange_workspace.remote_batch_ay);
-  add_mpi("treepm.exchange.remote_batch_az", m_tree_exchange_workspace.remote_batch_az);
-   add_mpi("treepm.exchange.expected_response_count", m_tree_exchange_workspace.expected_response_count);
-   add_mpi("treepm.exchange.received_response_count", m_tree_exchange_workspace.received_response_count);
-   if (m_sparse_peer_graph_cache != nullptr) {
-     add_mpi("treepm.let_domain_cache.requested_peers", m_sparse_peer_graph_cache->requested_outgoing_peers);
+   if (m_communication_arena.configured()) {
+     builder.addEntry(core::MemoryEntry{
+         .subsystem = core::MemorySubsystem::kMpiBuffers,
+         .lifetime = core::MemoryLifetime::kTransient,
+         .memory_class = core::MemoryClass::kCommunication,
+         .label = "treepm.communication_arena",
+         .current_size_bytes = 0U,
+         .owned_capacity_bytes = m_communication_arena.capacityBytes(),
+         .high_water_bytes = m_communication_arena.capacityBytes(),
+         .estimated_next_step_bytes = m_communication_arena.capacityBytes(),
+         .governed_commitment = m_communication_arena.governed(),
+         .uncertainty_note =
+             "one governed physical backing allocation reused sequentially by PM density, halo staging, PM interpolation, and Tree exchange"});
    }
-   add_mpi("treepm.pm_halo_diagnostic.left_halo", m_last_pm_slab_halo_exchange.left_halo);
-   add_mpi("treepm.pm_halo_diagnostic.right_halo", m_last_pm_slab_halo_exchange.right_halo);
+
+   const auto add_logical_phase = [&builder](
+       std::string label, std::uint64_t high_water_bytes) {
+     builder.addEntry(core::MemoryEntry{
+         .subsystem = core::MemorySubsystem::kMpiBuffers,
+         .lifetime = core::MemoryLifetime::kTransient,
+         .memory_class = core::MemoryClass::kCommunication,
+         .label = std::move(label),
+         .current_size_bytes = 0U,
+         .owned_capacity_bytes = 0U,
+         .high_water_bytes = high_water_bytes,
+         .estimated_next_step_bytes = 0U,
+         .estimate_only = true,
+         .uncertainty_note =
+             "logical non-owning arena phase high-water; do not sum as physical capacity"});
+   };
+   add_logical_phase(
+       "treepm.communication.pm_density_logical_high_water",
+       m_communication_arena.logicalHighWater(
+           GravityCommunicationArena::Phase::kPmDensity));
+   add_logical_phase(
+       "treepm.communication.pm_halo_logical_high_water",
+       m_communication_arena.logicalHighWater(
+           GravityCommunicationArena::Phase::kPmHalo));
+   add_logical_phase(
+       "treepm.communication.pm_interpolation_logical_high_water",
+       m_communication_arena.logicalHighWater(
+           GravityCommunicationArena::Phase::kPmInterpolation));
+   add_logical_phase(
+       "treepm.communication.tree_exchange_logical_high_water",
+       std::max(
+           m_tree_exchange_logical_high_water_bytes,
+           m_communication_arena.logicalHighWater(
+               GravityCommunicationArena::Phase::kTreeExchange)));
+
+   if (m_sparse_peer_graph_cache != nullptr) {
+     add_mpi(
+         "treepm.let_domain_cache.requested_peers",
+         m_sparse_peer_graph_cache->requested_outgoing_peers);
+   }
 
    {
 
@@ -2159,20 +2215,77 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         "TreePM long-range reuse requested without a compatible PM field");
   }
 
+  // Configure the one production communication backing allocation before any
+  // distributed gravity protocol can borrow it. The capacity is the maximum
+  // source-derived live set of the sequential PM-density, halo-staging,
+  // interpolation, and short-range Tree exchange phases.
+  if (tree_pm_entry_world_size > 1) {
+    std::exception_ptr arena_configuration_failure;
+    try {
+      const GravityCommunicationArenaMemoryEstimate arena_estimate =
+          estimateGravityCommunicationArenaMemory(
+              GravityCommunicationArenaMemoryInput{
+                  .pm_shape = m_shape,
+                  .pm_layout = m_grid.slabLayout(),
+                  .pm_exchange_batch_bytes = pm_options.routing_exchange_batch_bytes,
+                  .tree_exchange_batch_bytes = options.tree_exchange_batch_bytes,
+              });
+      m_communication_arena.configure(arena_estimate.required_capacity_bytes);
+    } catch (...) {
+      arena_configuration_failure = std::current_exception();
+    }
+    coordinate_tree_pm_failure(
+        arena_configuration_failure, "gravity communication-arena admission");
+  }
+
+  const auto run_pm_communication_phase = [&](
+      GravityCommunicationArena::Phase phase, const auto& operation) {
+    if (tree_pm_entry_world_size <= 1) {
+      operation();
+      return;
+    }
+
+    std::optional<GravityCommunicationArena::Lease> arena_lease;
+    std::exception_ptr lease_failure;
+    try {
+      arena_lease.emplace(m_communication_arena.begin(phase));
+      m_pm_solver.attachCommunicationArena(&m_communication_arena);
+    } catch (...) {
+      m_pm_solver.detachCommunicationArena();
+      lease_failure = std::current_exception();
+    }
+    coordinate_tree_pm_failure(lease_failure, "PM communication-arena lease");
+
+    std::exception_ptr operation_failure;
+    try {
+      operation();
+    } catch (...) {
+      operation_failure = std::current_exception();
+    }
+    // PmSolver's arena-backed containers have been destroyed on return from
+    // operation(); no MPI request or decoder may retain their storage now.
+    m_pm_solver.detachCommunicationArena();
+    coordinate_tree_pm_failure(operation_failure, "PM communication phase");
+    arena_lease->release();
+  };
+
   // Inclusive PM-phase wall clock: long-range refresh (when requested),
   // compact-target preparation, force interpolation, and optional zoom
   // correction through the point control transfers to the tree residual.
   // Subphase PmProfileEvent fields overlap and must not replace this value.
   const auto pm_phase_start = std::chrono::steady_clock::now();
   if (perform_long_range_refresh) {
-    m_pm_solver.assignDensity(
-        m_grid,
-        pos_x_comoving,
-        pos_y_comoving,
-        pos_z_comoving,
-        mass_code,
-        pm_options,
-        profile != nullptr ? &profile->pm_profile : nullptr);
+    run_pm_communication_phase(
+        GravityCommunicationArena::Phase::kPmDensity, [&] {
+          m_pm_solver.assignDensity(
+              m_grid,
+              pos_x_comoving,
+              pos_y_comoving,
+              pos_z_comoving,
+              mass_code,
+              pm_options,
+              profile != nullptr ? &profile->pm_profile : nullptr);
+        });
     m_last_pm_slab_halo_exchange = {};
     m_grid.clearForceHaloCache();
     if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
@@ -2183,38 +2296,86 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     }
     if (!m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
       const std::uint64_t exchange_sequence = ++m_pm_halo_exchange_sequence;
-      const parallel::PmSlabHaloExchangeResult force_x_halo = parallel::executeBlockingPmSlabHaloExchange(
-          m_mpi_context,
-          m_grid.slabLayout(),
-          m_grid.force_x(),
-          /*halo_depth_x=*/1,
-          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
-          exchange_sequence * 3U + 0U);
-      const parallel::PmSlabHaloExchangeResult force_y_halo = parallel::executeBlockingPmSlabHaloExchange(
-          m_mpi_context,
-          m_grid.slabLayout(),
-          m_grid.force_y(),
-          /*halo_depth_x=*/1,
-          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
-          exchange_sequence * 3U + 1U);
-      const parallel::PmSlabHaloExchangeResult force_z_halo = parallel::executeBlockingPmSlabHaloExchange(
-          m_mpi_context,
-          m_grid.slabLayout(),
-          m_grid.force_z(),
-          /*halo_depth_x=*/1,
-          pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
-          exchange_sequence * 3U + 2U);
-      std::exception_ptr halo_cache_commit_failure;
+      std::exception_ptr halo_cache_prepare_failure;
       try {
-        m_grid.setForceHaloCache(force_x_halo, force_y_halo, force_z_halo, exchange_sequence);
-        m_last_pm_slab_halo_exchange = force_x_halo;
-        m_last_pm_slab_halo_exchange.sent_bytes += force_y_halo.sent_bytes + force_z_halo.sent_bytes;
-        m_last_pm_slab_halo_exchange.received_bytes += force_y_halo.received_bytes + force_z_halo.received_bytes;
-        if (profile != nullptr) {
-          profile->pm_profile.bytes_moved +=
-              m_last_pm_slab_halo_exchange.sent_bytes + m_last_pm_slab_halo_exchange.received_bytes;
+        m_grid.beginForceHaloCacheRefresh(/*halo_depth_x=*/1U);
+      } catch (...) {
+        m_grid.clearForceHaloCache();
+        halo_cache_prepare_failure = std::current_exception();
+      }
+      coordinate_tree_pm_failure(
+          halo_cache_prepare_failure, "PM halo-cache preparation");
+
+      std::array<parallel::PmSlabHaloExchangeStatus, 3> halo_status{};
+      const std::array<std::span<const double>, 3> force_components{
+          m_grid.force_x(), m_grid.force_y(), m_grid.force_z()};
+      std::exception_ptr halo_exchange_failure;
+      try {
+        for (std::size_t component = 0; component < force_components.size(); ++component) {
+          // Each component completes its MPI transfers before this lease is
+          // reset, so X/Y/Z reuse the same physical staging pages instead of
+          // retaining three complete temporary result objects.
+          auto halo_lease =
+              m_communication_arena.begin(GravityCommunicationArena::Phase::kPmHalo);
+          const PmGridStorage::ForceHaloWriteView write_view =
+              m_grid.forceHaloWriteView(component);
+          halo_status[component] = parallel::executeBlockingPmSlabHaloExchangeInto(
+              m_mpi_context,
+              m_grid.slabLayout(),
+              force_components[component],
+              /*halo_depth_x=*/1U,
+              pm_options.boundary_condition == PmBoundaryCondition::kPeriodic,
+              write_view.left,
+              write_view.right,
+              halo_lease.resource(),
+              exchange_sequence * 3U + static_cast<std::uint64_t>(component));
+          const std::uint64_t staging_bytes = static_cast<std::uint64_t>(
+              core::checkedSizeMultiply(
+                  2U,
+                  core::checkedSizeMultiply(
+                      write_view.left.size(), sizeof(double),
+                      "TreePM PM halo staging lane bytes"),
+                  "TreePM PM halo staging logical high-water"));
+          halo_lease.recordLogicalHighWater(staging_bytes);
+          // executeBlocking...Into has returned from all MPI operations and
+          // direct receive writes before the lease is released here.
+          halo_lease.release();
         }
       } catch (...) {
+        m_grid.clearForceHaloCache();
+        halo_exchange_failure = std::current_exception();
+      }
+      coordinate_tree_pm_failure(halo_exchange_failure, "PM halo exchange");
+
+      std::exception_ptr halo_cache_commit_failure;
+      try {
+        const auto& first = halo_status.front();
+        for (const auto& status : halo_status) {
+          if (status.halo_depth_x != first.halo_depth_x ||
+              status.left_peer_rank != first.left_peer_rank ||
+              status.right_peer_rank != first.right_peer_rank) {
+            throw std::runtime_error(
+                "TreePM PM halo components disagree on shape or peer metadata");
+          }
+        }
+        m_grid.commitForceHaloCacheRefresh(
+            first.halo_depth_x, first.left_peer_rank, first.right_peer_rank, exchange_sequence);
+        m_last_pm_slab_halo_exchange = {};
+        m_last_pm_slab_halo_exchange.halo_depth_x = first.halo_depth_x;
+        m_last_pm_slab_halo_exchange.left_peer_rank = first.left_peer_rank;
+        m_last_pm_slab_halo_exchange.right_peer_rank = first.right_peer_rank;
+        m_last_pm_slab_halo_exchange.exchange_sequence = exchange_sequence;
+        for (const auto& status : halo_status) {
+          m_last_pm_slab_halo_exchange.sent_bytes += status.sent_bytes;
+          m_last_pm_slab_halo_exchange.received_bytes += status.received_bytes;
+        }
+        if (profile != nullptr) {
+          profile->pm_profile.bytes_moved +=
+              m_last_pm_slab_halo_exchange.sent_bytes +
+              m_last_pm_slab_halo_exchange.received_bytes;
+        }
+      } catch (...) {
+        m_grid.clearForceHaloCache();
         halo_cache_commit_failure = std::current_exception();
       }
       coordinate_tree_pm_failure(
@@ -2323,29 +2484,32 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         : pos_z_comoving[accumulator.active_particle_index[active_i]];
   };
 
-  m_pm_solver.interpolateForces(
-      m_grid,
-      PmSolver::PmForceTargetView{
-          .active_particle_index = accumulator.active_particle_index,
-          .pos_x_comoving = has_explicit_target_positions
-              ? accumulator.target_pos_x_comoving : pos_x_comoving,
-          .pos_y_comoving = has_explicit_target_positions
-              ? accumulator.target_pos_y_comoving : pos_y_comoving,
-          .pos_z_comoving = has_explicit_target_positions
-              ? accumulator.target_pos_z_comoving : pos_z_comoving,
-          .accel_x_comoving = accumulator.accel_x_comoving,
-          .accel_y_comoving = accumulator.accel_y_comoving,
-          .accel_z_comoving = accumulator.accel_z_comoving,
-          .coordinate_layout = has_explicit_target_positions
-              ? PmSolver::PmForceCoordinateLayout::kCompactActive
-              : PmSolver::PmForceCoordinateLayout::kIndexedSource,
-          .output_layout = PmSolver::PmForceOutputLayout::kCompactActive,
-          .coordinate_source_index = has_explicit_target_positions
-              ? std::span<const TreeLocalIndex>{}
-              : accumulator.active_particle_index,
-      },
-      pm_options,
-      profile != nullptr ? &profile->pm_profile : nullptr);
+  run_pm_communication_phase(
+      GravityCommunicationArena::Phase::kPmInterpolation, [&] {
+    m_pm_solver.interpolateForces(
+        m_grid,
+        PmSolver::PmForceTargetView{
+            .active_particle_index = accumulator.active_particle_index,
+            .pos_x_comoving = has_explicit_target_positions
+                ? accumulator.target_pos_x_comoving : pos_x_comoving,
+            .pos_y_comoving = has_explicit_target_positions
+                ? accumulator.target_pos_y_comoving : pos_y_comoving,
+            .pos_z_comoving = has_explicit_target_positions
+                ? accumulator.target_pos_z_comoving : pos_z_comoving,
+            .accel_x_comoving = accumulator.accel_x_comoving,
+            .accel_y_comoving = accumulator.accel_y_comoving,
+            .accel_z_comoving = accumulator.accel_z_comoving,
+            .coordinate_layout = has_explicit_target_positions
+                ? PmSolver::PmForceCoordinateLayout::kCompactActive
+                : PmSolver::PmForceCoordinateLayout::kIndexedSource,
+            .output_layout = PmSolver::PmForceOutputLayout::kCompactActive,
+            .coordinate_source_index = has_explicit_target_positions
+                ? std::span<const TreeLocalIndex>{}
+                : accumulator.active_particle_index,
+        },
+        pm_options,
+        profile != nullptr ? &profile->pm_profile : nullptr);
+      });
   const double pm_force_l2_global = l2NormFromComponents(
       accumulator.accel_x_comoving,
       accumulator.accel_y_comoving,
@@ -3366,17 +3530,6 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       }
       exchange_sequence = m_tree_exchange_sequence + 1U;
 
-      if (m_tree_exchange_workspace.world_size != mpi_world_size) {
-        m_tree_exchange_workspace.send_counts.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.recv_counts.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.send_displs.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.recv_displs.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.response_send_counts.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.response_recv_counts.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.response_send_displs.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.response_recv_displs.assign(static_cast<std::size_t>(mpi_world_size), 0);
-        m_tree_exchange_workspace.world_size = mpi_world_size;
-      }
     } catch (...) {
       exchange_preflight_failure = std::current_exception();
     }
@@ -3405,23 +3558,105 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     }
     m_tree_exchange_sequence = exchange_sequence;
 
-    auto& send_counts = m_tree_exchange_workspace.send_counts;
-    auto& recv_counts = m_tree_exchange_workspace.recv_counts;
-    auto& send_displs = m_tree_exchange_workspace.send_displs;
-    auto& recv_displs = m_tree_exchange_workspace.recv_displs;
-    auto& response_send_counts = m_tree_exchange_workspace.response_send_counts;
-    auto& response_recv_counts = m_tree_exchange_workspace.response_recv_counts;
-    auto& response_send_displs = m_tree_exchange_workspace.response_send_displs;
-    auto& response_recv_displs = m_tree_exchange_workspace.response_recv_displs;
-    auto& send_payload = m_tree_exchange_workspace.send_payload;
-    auto& recv_payload = m_tree_exchange_workspace.recv_payload;
-    auto& response_send_payload = m_tree_exchange_workspace.response_send_payload;
-    auto& response_recv_payload = m_tree_exchange_workspace.response_recv_payload;
-    auto& remote_batch_ax = m_tree_exchange_workspace.remote_batch_ax;
-    auto& remote_batch_ay = m_tree_exchange_workspace.remote_batch_ay;
-    auto& remote_batch_az = m_tree_exchange_workspace.remote_batch_az;
-    auto& expected_response_count = m_tree_exchange_workspace.expected_response_count;
-    auto& received_response_count = m_tree_exchange_workspace.received_response_count;
+    // PM communication is complete at this point. Borrow the same physical
+    // backing allocation for the complete bounded short-range request/response
+    // live set. All PMR containers below have null-upstream arena storage: any
+    // capacity mistake fails rather than escaping to the ordinary heap.
+    auto tree_communication_lease =
+        m_communication_arena.begin(GravityCommunicationArena::Phase::kTreeExchange);
+    std::pmr::memory_resource* tree_resource = tree_communication_lease.resource();
+    const TreePmExchangeMemoryEstimate tree_exchange_capacity =
+        estimateTreePmExchangeMemory(TreePmExchangeMemoryInput{
+            .rank_count = static_cast<std::uint32_t>(mpi_world_size),
+            .tree_exchange_batch_bytes = options.tree_exchange_batch_bytes,
+        });
+    const std::size_t reserved_batch_targets = core::checkedIntegralNarrow<std::size_t>(
+        tree_exchange_capacity.batch_targets_per_peer,
+        "TreePM arena reserved batch target count");
+    // The complete-graph preflight is the hard physical arena contract. A
+    // sparser runtime graph may permit a larger classic-MPI round, but it may
+    // not grow beyond the capacity already admitted for this physical owner.
+    max_requests_per_peer = std::min(max_requests_per_peer, reserved_batch_targets);
+    const auto reserve_bytes = [](auto& container, std::uint64_t bytes,
+                                  std::string_view context) {
+      container.reserve(core::checkedIntegralNarrow<std::size_t>(bytes, context));
+    };
+
+    std::pmr::vector<int> send_counts(tree_resource);
+    std::pmr::vector<int> recv_counts(tree_resource);
+    std::pmr::vector<int> send_displs(tree_resource);
+    std::pmr::vector<int> recv_displs(tree_resource);
+    std::pmr::vector<int> response_send_counts(tree_resource);
+    std::pmr::vector<int> response_recv_counts(tree_resource);
+    std::pmr::vector<int> response_send_displs(tree_resource);
+    std::pmr::vector<int> response_recv_displs(tree_resource);
+    for (auto* metadata : {&send_counts, &recv_counts, &send_displs, &recv_displs,
+                           &response_send_counts, &response_recv_counts,
+                           &response_send_displs, &response_recv_displs}) {
+      metadata->resize(static_cast<std::size_t>(mpi_world_size), 0);
+    }
+
+    std::pmr::vector<std::uint8_t> send_payload(tree_resource);
+    std::pmr::vector<std::uint8_t> recv_payload(tree_resource);
+    std::pmr::vector<std::uint8_t> response_send_payload(tree_resource);
+    std::pmr::vector<std::uint8_t> response_recv_payload(tree_resource);
+    reserve_bytes(send_payload, tree_exchange_capacity.wire_send_bytes,
+                  "TreePM arena request send capacity");
+    reserve_bytes(recv_payload, tree_exchange_capacity.wire_recv_bytes,
+                  "TreePM arena request receive capacity");
+    reserve_bytes(response_send_payload, tree_exchange_capacity.wire_response_send_bytes,
+                  "TreePM arena response send capacity");
+    reserve_bytes(response_recv_payload, tree_exchange_capacity.wire_response_recv_bytes,
+                  "TreePM arena response receive capacity");
+
+    std::pmr::vector<double> remote_batch_ax(tree_resource);
+    std::pmr::vector<double> remote_batch_ay(tree_resource);
+    std::pmr::vector<double> remote_batch_az(tree_resource);
+    std::pmr::vector<std::uint32_t> expected_response_count(tree_resource);
+    std::pmr::vector<std::uint32_t> received_response_count(tree_resource);
+    remote_batch_ax.reserve(reserved_batch_targets);
+    remote_batch_ay.reserve(reserved_batch_targets);
+    remote_batch_az.reserve(reserved_batch_targets);
+    expected_response_count.reserve(reserved_batch_targets);
+    received_response_count.reserve(reserved_batch_targets);
+
+    // Reused one-peer codec/validation buffers. They replace per-peer heap
+    // temporaries and keep duplicate detection exact without a node-based hash
+    // allocation: identities are sorted in scratch solely for validation.
+    std::pmr::vector<std::uint8_t> request_codec_bytes(tree_resource);
+    std::pmr::vector<std::uint8_t> response_codec_bytes(tree_resource);
+    std::pmr::vector<ShortRangeTargetRequestPacket> decoded_requests(tree_resource);
+    std::pmr::vector<ShortRangeTargetResponsePacket> decoded_responses(tree_resource);
+    std::pmr::vector<ShortRangeTargetResponsePacket> peer_responses(tree_resource);
+    std::pmr::vector<std::uint64_t> peer_target_identity_scratch(tree_resource);
+    reserve_bytes(request_codec_bytes, tree_exchange_capacity.wire_request_bytes_per_peer,
+                  "TreePM arena request codec capacity");
+    reserve_bytes(response_codec_bytes, tree_exchange_capacity.wire_response_bytes_per_peer,
+                  "TreePM arena response codec capacity");
+    decoded_requests.reserve(reserved_batch_targets);
+    decoded_responses.reserve(reserved_batch_targets);
+    peer_responses.reserve(reserved_batch_targets);
+    peer_target_identity_scratch.reserve(reserved_batch_targets);
+
+    std::pmr::vector<std::uint8_t> communicated_with_peer(tree_resource);
+    communicated_with_peer.resize(static_cast<std::size_t>(mpi_world_size), 0U);
+    std::pmr::vector<int> requested_outgoing_peers(tree_resource);
+    requested_outgoing_peers.reserve(static_cast<std::size_t>(mpi_world_size));
+
+    std::pmr::vector<int> neighbor_request_send_counts(tree_resource);
+    std::pmr::vector<int> neighbor_request_recv_counts(tree_resource);
+    std::pmr::vector<int> neighbor_request_send_displs(tree_resource);
+    std::pmr::vector<int> neighbor_request_recv_displs(tree_resource);
+    std::pmr::vector<int> neighbor_response_send_counts(tree_resource);
+    std::pmr::vector<int> neighbor_response_recv_counts(tree_resource);
+    std::pmr::vector<int> neighbor_response_send_displs(tree_resource);
+    std::pmr::vector<int> neighbor_response_recv_displs(tree_resource);
+    for (auto* metadata : {&neighbor_request_send_counts, &neighbor_request_recv_counts,
+                           &neighbor_request_send_displs, &neighbor_request_recv_displs,
+                           &neighbor_response_send_counts, &neighbor_response_recv_counts,
+                           &neighbor_response_send_displs, &neighbor_response_recv_displs}) {
+      metadata->reserve(static_cast<std::size_t>(mpi_world_size));
+    }
 
     // Prefer the authoritative decomposition-domain leaves installed by the
     // workflow when they are fresh for this source generation and cover every
@@ -3539,11 +3774,27 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     }
 
     std::vector<std::vector<parallel::TreePseudoParticlePacket>> peer_hierarchy_by_rank;
-    std::vector<std::vector<ShortRangeTargetRequestPacket>> requests_by_peer;
-    std::vector<std::vector<std::uint8_t>> response_expected_by_peer;
-    std::vector<std::vector<std::uint8_t>> response_seen_by_peer;
-    std::vector<std::uint8_t> communicated_with_peer;
-    std::vector<int> requested_outgoing_peers;
+    // Outer descriptors are O(rank_count); all population/batch capacity lives
+    // in the shared PMR arena.
+    std::vector<std::pmr::vector<ShortRangeTargetRequestPacket>> requests_by_peer;
+    std::vector<std::pmr::vector<std::uint8_t>> response_expected_by_peer;
+    std::vector<std::pmr::vector<std::uint8_t>> response_seen_by_peer;
+    requests_by_peer.reserve(static_cast<std::size_t>(mpi_world_size));
+    response_expected_by_peer.reserve(static_cast<std::size_t>(mpi_world_size));
+    response_seen_by_peer.reserve(static_cast<std::size_t>(mpi_world_size));
+    for (int peer = 0; peer < mpi_world_size; ++peer) {
+      requests_by_peer.emplace_back(
+          std::pmr::polymorphic_allocator<ShortRangeTargetRequestPacket>(tree_resource));
+      response_expected_by_peer.emplace_back(
+          std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
+      response_seen_by_peer.emplace_back(
+          std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
+      if (peer != mpi_world_rank) {
+        requests_by_peer.back().reserve(reserved_batch_targets);
+      }
+      response_expected_by_peer.back().reserve(reserved_batch_targets);
+      response_seen_by_peer.back().reserve(reserved_batch_targets);
+    }
 
     // The domain hierarchy is a decomposition object, not a tree-build object.
     // Reuse the already-built BVH whenever the authoritative global domain
@@ -3590,7 +3841,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       // decomposition geometry may expose several leaves for one owner; empty
       // source ranks legitimately expose none. The fallback path contributes
       // one derived tree-root leaf and is tracked as lower-capability geometry.
-      std::vector<std::uint8_t> peer_needed(static_cast<std::size_t>(mpi_world_size), 0U);
+      std::pmr::vector<std::uint8_t> peer_needed(
+          static_cast<std::size_t>(mpi_world_size), 0U,
+          std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
       for (std::size_t active_i = 0; active_i < accumulator.active_particle_index.size(); ++active_i) {
         const std::vector<int> owners = top_level_domain_hierarchy->ownersWithinCutoff(
             target_x(active_i),
@@ -3625,10 +3878,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               [mpi_world_rank](const parallel::TreePseudoParticlePacket& packet) {
                 return packet.descriptor.source_rank != mpi_world_rank;
               }));
-      requests_by_peer.resize(static_cast<std::size_t>(mpi_world_size));
-      response_expected_by_peer.resize(static_cast<std::size_t>(mpi_world_size));
-      response_seen_by_peer.resize(static_cast<std::size_t>(mpi_world_size));
-      communicated_with_peer.assign(static_cast<std::size_t>(mpi_world_size), 0U);
+      std::fill(communicated_with_peer.begin(), communicated_with_peer.end(), 0U);
     } catch (...) {
       peer_domain_failure = std::current_exception();
     }
@@ -3646,7 +3896,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         graph_cache.valid &&
         graph_cache.decomposition_epoch == options.decomposition_epoch &&
         graph_cache.world_size == mpi_world_size &&
-        graph_cache.requested_outgoing_peers == requested_outgoing_peers;
+        graph_cache.requested_outgoing_peers.size() == requested_outgoing_peers.size() &&
+        std::equal(
+            graph_cache.requested_outgoing_peers.begin(),
+            graph_cache.requested_outgoing_peers.end(),
+            requested_outgoing_peers.begin());
     int local_graph_cache_match_int = local_graph_cache_match ? 1 : 0;
     int all_graph_cache_match = 0;
     requireTreePmMpiSuccess(
@@ -3666,7 +3920,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       graph_cache.valid = true;
       graph_cache.decomposition_epoch = options.decomposition_epoch;
       graph_cache.world_size = mpi_world_size;
-      graph_cache.requested_outgoing_peers = requested_outgoing_peers;
+      graph_cache.requested_outgoing_peers.assign(
+          requested_outgoing_peers.begin(), requested_outgoing_peers.end());
     } else {
       ++m_last_residual_stats.graph_cache_hit_count;
     }
@@ -3857,12 +4112,14 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         if (peer == mpi_world_rank || requests_by_peer[static_cast<std::size_t>(peer)].empty()) {
           continue;
         }
-        const auto request_bytes = encodeShortRangeRequests(std::span<const ShortRangeTargetRequestPacket>(
-            requests_by_peer[static_cast<std::size_t>(peer)].data(),
-            requests_by_peer[static_cast<std::size_t>(peer)].size()));
+        encodeShortRangeRequests(
+            std::span<const ShortRangeTargetRequestPacket>(
+                requests_by_peer[static_cast<std::size_t>(peer)].data(),
+                requests_by_peer[static_cast<std::size_t>(peer)].size()),
+            request_codec_bytes);
         std::copy(
-            request_bytes.begin(),
-            request_bytes.end(),
+            request_codec_bytes.begin(),
+            request_codec_bytes.end(),
             send_payload.begin() + send_displs[static_cast<std::size_t>(peer)]);
         }
       } catch (...) {
@@ -3874,8 +4131,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       // Exchange request counts only across the locality-derived graph. The
       // graph is symmetric so source-only ranks can receive requests from
       // target-only ranks without communicator-wide all-to-all participation.
-      std::vector<int> neighbor_request_send_counts(sparse_peer_graph->outgoing_peers.size(), 0);
-      std::vector<int> neighbor_request_recv_counts(sparse_peer_graph->incoming_peers.size(), 0);
+      neighbor_request_send_counts.assign(sparse_peer_graph->outgoing_peers.size(), 0);
+      neighbor_request_recv_counts.assign(sparse_peer_graph->incoming_peers.size(), 0);
       for (std::size_t i = 0; i < sparse_peer_graph->outgoing_peers.size(); ++i) {
         neighbor_request_send_counts[i] =
             send_counts[static_cast<std::size_t>(sparse_peer_graph->outgoing_peers[i])];
@@ -3925,8 +4182,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             recv_counts, recv_displs, "TreePM short-range request receive layout");
         recv_payload.resize(static_cast<std::size_t>(total_recv_bytes), 0U);
 
-        std::vector<int> neighbor_request_send_displs(sparse_peer_graph->outgoing_peers.size(), 0);
-        std::vector<int> neighbor_request_recv_displs(sparse_peer_graph->incoming_peers.size(), 0);
+        neighbor_request_send_displs.assign(sparse_peer_graph->outgoing_peers.size(), 0);
+        neighbor_request_recv_displs.assign(sparse_peer_graph->incoming_peers.size(), 0);
         for (std::size_t i = 0; i < sparse_peer_graph->outgoing_peers.size(); ++i) {
           neighbor_request_send_displs[i] =
               send_displs[static_cast<std::size_t>(sparse_peer_graph->outgoing_peers[i])];
@@ -4185,45 +4442,45 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         // response structure preparation (metadata only; no accelerations).
         // Throwing validation stays on the main thread before OpenMP compute.
         const auto decode_validation_start = std::chrono::steady_clock::now();
-        const std::vector<ShortRangeTargetRequestPacket> peer_requests =
-            decodeShortRangeRequests(peer_request_bytes);
-        std::vector<ShortRangeTargetResponsePacket> peer_responses;
-        peer_responses.reserve(peer_requests.size());
-        {
-          std::unordered_set<std::uint64_t> peer_target_identities;
-          peer_target_identities.reserve(peer_requests.size());
-          for (const ShortRangeTargetRequestPacket& request : peer_requests) {
-            if (request.wire_version != k_short_range_wire_version || request.origin_rank != peer ||
-                request.destination_rank != mpi_world_rank || request.exchange_sequence != exchange_sequence ||
-                request.decomposition_epoch != options.decomposition_epoch.value || request.force_epoch != options.force_epoch.sequence ||
-                request.batch_token != batch_token || request.request_id >= max_requests_per_peer ||
-                request.target_identity != static_cast<std::uint64_t>(request.batch_token) + request.request_id ||
-                (request.flags & ~k_short_range_flag_previous_acceleration) != 0U) {
-              throw std::runtime_error("TreePM short-range request protocol identity mismatch");
-            }
-            if (!peer_target_identities.insert(request.target_identity).second) {
-              throw std::runtime_error("TreePM short-range request contains a duplicate target identity");
-            }
-            if (!std::isfinite(request.target_x_comoving) || !std::isfinite(request.target_y_comoving) ||
-                !std::isfinite(request.target_z_comoving) ||
-                !std::isfinite(request.target_softening_epsilon_comoving) ||
-                request.target_softening_epsilon_comoving < 0.0 ||
-                !std::isfinite(request.previous_acceleration_magnitude)) {
-              throw std::runtime_error("TreePM short-range request contains invalid numeric data");
-            }
-            peer_responses.push_back(ShortRangeTargetResponsePacket{
-                .wire_version = k_short_range_wire_version,
-                .target_owner_rank = request.origin_rank,
-                .source_rank = mpi_world_rank,
-                .flags = request.flags,
-                .batch_token = request.batch_token,
-                .request_id = request.request_id,
-                .exchange_sequence = request.exchange_sequence,
-                .decomposition_epoch = request.decomposition_epoch,
-                .force_epoch = request.force_epoch,
-                .target_identity = request.target_identity,
-            });
+        decodeShortRangeRequests(peer_request_bytes, decoded_requests);
+        peer_responses.clear();
+        peer_target_identity_scratch.clear();
+        for (const ShortRangeTargetRequestPacket& request : decoded_requests) {
+          if (request.wire_version != k_short_range_wire_version || request.origin_rank != peer ||
+              request.destination_rank != mpi_world_rank || request.exchange_sequence != exchange_sequence ||
+              request.decomposition_epoch != options.decomposition_epoch.value || request.force_epoch != options.force_epoch.sequence ||
+              request.batch_token != batch_token || request.request_id >= max_requests_per_peer ||
+              request.target_identity != static_cast<std::uint64_t>(request.batch_token) + request.request_id ||
+              (request.flags & ~k_short_range_flag_previous_acceleration) != 0U) {
+            throw std::runtime_error("TreePM short-range request protocol identity mismatch");
           }
+          if (!std::isfinite(request.target_x_comoving) || !std::isfinite(request.target_y_comoving) ||
+              !std::isfinite(request.target_z_comoving) ||
+              !std::isfinite(request.target_softening_epsilon_comoving) ||
+              request.target_softening_epsilon_comoving < 0.0 ||
+              !std::isfinite(request.previous_acceleration_magnitude)) {
+            throw std::runtime_error("TreePM short-range request contains invalid numeric data");
+          }
+          peer_target_identity_scratch.push_back(request.target_identity);
+          peer_responses.push_back(ShortRangeTargetResponsePacket{
+              .wire_version = k_short_range_wire_version,
+              .target_owner_rank = request.origin_rank,
+              .source_rank = mpi_world_rank,
+              .flags = request.flags,
+              .batch_token = request.batch_token,
+              .request_id = request.request_id,
+              .exchange_sequence = request.exchange_sequence,
+              .decomposition_epoch = request.decomposition_epoch,
+              .force_epoch = request.force_epoch,
+              .target_identity = request.target_identity,
+          });
+        }
+        std::sort(peer_target_identity_scratch.begin(), peer_target_identity_scratch.end());
+        if (std::adjacent_find(
+                peer_target_identity_scratch.begin(),
+                peer_target_identity_scratch.end()) != peer_target_identity_scratch.end()) {
+          throw std::runtime_error(
+              "TreePM short-range request contains a duplicate target identity");
         }
         incoming_decode_validation_ms_batch += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - decode_validation_start).count();
@@ -4236,7 +4493,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         // write only peer_responses[*].accel_{x,y,z}_comoving.
         const auto incoming_compute_start = std::chrono::steady_clock::now();
         {
-          const std::size_t incoming_count = peer_requests.size();
+          const std::size_t incoming_count = decoded_requests.size();
           const std::size_t incoming_block_count =
               (incoming_count + k_residual_block_size - 1U) / k_residual_block_size;
           std::fill(
@@ -4269,7 +4526,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                    peer_slot < block_end;
                    ++peer_slot) {
                 const ShortRangeTargetRequestPacket& request =
-                    peer_requests[peer_slot];
+                    decoded_requests[peer_slot];
                 const auto remote_accel = evaluateTargetAgainstLocalTree(
                     counters,
                     stack,
@@ -4316,15 +4573,16 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         // C. Response byte encoding, size check, and direct pack into the
         // response send payload.
         const auto encode_pack_start = std::chrono::steady_clock::now();
-        const auto encoded_responses =
-            encodeShortRangeResponses(
-                std::span<const ShortRangeTargetResponsePacket>(peer_responses.data(), peer_responses.size()));
-        if (encoded_responses.size() != static_cast<std::size_t>(response_send_counts[static_cast<std::size_t>(peer)])) {
+        encodeShortRangeResponses(
+            std::span<const ShortRangeTargetResponsePacket>(
+                peer_responses.data(), peer_responses.size()),
+            response_codec_bytes);
+        if (response_codec_bytes.size() != static_cast<std::size_t>(response_send_counts[static_cast<std::size_t>(peer)])) {
           throw std::runtime_error("TreePM short-range response payload size mismatch");
         }
         std::copy(
-            encoded_responses.begin(),
-            encoded_responses.end(),
+            response_codec_bytes.begin(),
+            response_codec_bytes.end(),
             response_send_payload.begin() + response_send_displs[static_cast<std::size_t>(peer)]);
         incoming_encode_pack_ms_batch += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - encode_pack_start).count();
@@ -4347,10 +4605,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       // consensus span; now incoming-target compute only.
       m_last_residual_stats.let_remote_traversal_ms += incoming_compute_ms_batch;
 
-      std::vector<int> neighbor_response_send_counts(sparse_peer_graph->outgoing_peers.size(), 0);
-      std::vector<int> neighbor_response_send_displs(sparse_peer_graph->outgoing_peers.size(), 0);
-      std::vector<int> neighbor_response_recv_counts(sparse_peer_graph->incoming_peers.size(), 0);
-      std::vector<int> neighbor_response_recv_displs(sparse_peer_graph->incoming_peers.size(), 0);
+      neighbor_response_send_counts.assign(sparse_peer_graph->outgoing_peers.size(), 0);
+      neighbor_response_send_displs.assign(sparse_peer_graph->outgoing_peers.size(), 0);
+      neighbor_response_recv_counts.assign(sparse_peer_graph->incoming_peers.size(), 0);
+      neighbor_response_recv_displs.assign(sparse_peer_graph->incoming_peers.size(), 0);
       for (std::size_t i = 0; i < sparse_peer_graph->outgoing_peers.size(); ++i) {
         const int peer = sparse_peer_graph->outgoing_peers[i];
         neighbor_response_send_counts[i] = response_send_counts[static_cast<std::size_t>(peer)];
@@ -4414,29 +4672,23 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           static_cast<std::uint64_t>(recv_payload.capacity()) +
           static_cast<std::uint64_t>(response_send_payload.capacity()) +
           static_cast<std::uint64_t>(response_recv_payload.capacity());
-      // Known live set beyond the four wire buffers. Retained CHUÍ-owned
-      // storage is read from actual vector capacity (host sizeof for packets;
-      // wire/host identity is static_assert-enforced), so a previously larger
-      // batch's retained capacity is not under-reported by the current
-      // batch_size. Transient codec bytes are modeled from batch_size as a
-      // conservative upper envelope of per-target encode/decode workspace
-      // that coexists with the wire buffers during prepare/validate, not as
-      // an exact observed simultaneous peak. Allocator overhead for the
-      // duplicate-identity unordered_set is excluded and remains uncertain.
+      // Known arena-backed live set beyond the four wire buffers. Capacities
+      // are read from the actual PMR vectors; the one-peer codec/decoded
+      // buffers and neighbor metadata are retained for reuse within this lease
+      // and therefore count simultaneously. Small outer vector descriptors for
+      // per-peer PMR lanes remain O(rank_count) ordinary control metadata and
+      // do not own their population-scale payload.
       std::uint64_t let_structured_request_bytes = 0U;
-      for (const std::vector<ShortRangeTargetRequestPacket>& peer_requests : requests_by_peer) {
+      for (const auto& peer_requests : requests_by_peer) {
         let_structured_request_bytes +=
             static_cast<std::uint64_t>(peer_requests.capacity()) *
             static_cast<std::uint64_t>(sizeof(ShortRangeTargetRequestPacket));
       }
-      std::uint64_t let_response_mask_bytes =
-          static_cast<std::uint64_t>(
-              response_expected_by_peer.capacity() + response_seen_by_peer.capacity()) *
-          static_cast<std::uint64_t>(sizeof(std::vector<std::uint8_t>));
-      for (const std::vector<std::uint8_t>& mask : response_expected_by_peer) {
+      std::uint64_t let_response_mask_bytes = 0U;
+      for (const auto& mask : response_expected_by_peer) {
         let_response_mask_bytes += static_cast<std::uint64_t>(mask.capacity());
       }
-      for (const std::vector<std::uint8_t>& mask : response_seen_by_peer) {
+      for (const auto& mask : response_seen_by_peer) {
         let_response_mask_bytes += static_cast<std::uint64_t>(mask.capacity());
       }
       const std::uint64_t let_response_count_bytes =
@@ -4453,11 +4705,29 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               send_counts.capacity() + recv_counts.capacity() +
               send_displs.capacity() + recv_displs.capacity() +
               response_send_counts.capacity() + response_recv_counts.capacity() +
-              response_send_displs.capacity() + response_recv_displs.capacity()) *
-          static_cast<std::uint64_t>(sizeof(int));
+              response_send_displs.capacity() + response_recv_displs.capacity() +
+              neighbor_request_send_counts.capacity() +
+              neighbor_request_recv_counts.capacity() +
+              neighbor_request_send_displs.capacity() +
+              neighbor_request_recv_displs.capacity() +
+              neighbor_response_send_counts.capacity() +
+              neighbor_response_recv_counts.capacity() +
+              neighbor_response_send_displs.capacity() +
+              neighbor_response_recv_displs.capacity() +
+              requested_outgoing_peers.capacity()) *
+              static_cast<std::uint64_t>(sizeof(int)) +
+          static_cast<std::uint64_t>(communicated_with_peer.capacity());
       const std::uint64_t let_transient_codec_bytes =
-          static_cast<std::uint64_t>(batch_size) *
-          (2U * (k_short_range_request_wire_bytes + k_short_range_response_wire_bytes) + 24U);
+          static_cast<std::uint64_t>(request_codec_bytes.capacity()) +
+          static_cast<std::uint64_t>(response_codec_bytes.capacity()) +
+          static_cast<std::uint64_t>(decoded_requests.capacity()) *
+              static_cast<std::uint64_t>(sizeof(ShortRangeTargetRequestPacket)) +
+          static_cast<std::uint64_t>(decoded_responses.capacity()) *
+              static_cast<std::uint64_t>(sizeof(ShortRangeTargetResponsePacket)) +
+          static_cast<std::uint64_t>(peer_responses.capacity()) *
+              static_cast<std::uint64_t>(sizeof(ShortRangeTargetResponsePacket)) +
+          static_cast<std::uint64_t>(peer_target_identity_scratch.capacity()) *
+              static_cast<std::uint64_t>(sizeof(std::uint64_t));
       std::uint64_t let_known_workspace_bytes = let_wire_buffer_bytes;
       let_known_workspace_bytes += let_structured_request_bytes;
       let_known_workspace_bytes += let_response_mask_bytes;
@@ -4465,6 +4735,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       let_known_workspace_bytes += let_remote_accumulator_bytes;
       let_known_workspace_bytes += let_rank_metadata_bytes;
       let_known_workspace_bytes += let_transient_codec_bytes;
+      tree_communication_lease.recordLogicalHighWater(let_known_workspace_bytes);
+      m_tree_exchange_logical_high_water_bytes = std::max(
+          m_tree_exchange_logical_high_water_bytes, let_known_workspace_bytes);
       m_last_residual_stats.let_wire_buffer_high_water_bytes =
           std::max(m_last_residual_stats.let_wire_buffer_high_water_bytes, let_wire_buffer_bytes);
       // Compatibility alias: wire-buffer high-water only.
@@ -4498,9 +4771,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         const std::span<const std::uint8_t> peer_response_bytes(
             response_recv_payload.data() + response_recv_displs[static_cast<std::size_t>(peer)],
             static_cast<std::size_t>(expected_bytes));
-        const std::vector<ShortRangeTargetResponsePacket> responses =
-            decodeShortRangeResponses(peer_response_bytes);
-        for (const ShortRangeTargetResponsePacket& response : responses) {
+        decodeShortRangeResponses(peer_response_bytes, decoded_responses);
+        for (const ShortRangeTargetResponsePacket& response : decoded_responses) {
           const std::uint32_t expected_flags =
               response.request_id < batch_size &&
                   !accumulator.previous_acceleration_magnitude_code.empty() &&

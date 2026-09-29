@@ -7,6 +7,7 @@
 #include <span>
 #include <string>
 #include <vector>
+#include <memory_resource>
 
 #include "cosmosim/core/checked_arithmetic.hpp"
 
@@ -405,6 +406,29 @@ struct PmSlabHaloExchangeResult {
     std::span<const double> local_scalar_field,
     std::size_t halo_depth_x,
     bool periodic_x,
+    std::uint64_t exchange_sequence = 0);
+
+struct PmSlabHaloExchangeStatus {
+  std::uint64_t sent_bytes = 0;
+  std::uint64_t received_bytes = 0;
+  std::size_t halo_depth_x = 0;
+  int left_peer_rank = -1;
+  int right_peer_rank = -1;
+};
+
+// Arena-backed staging variant used by TreePM production. Receive payloads
+// land directly in the caller-owned persistent halo cache; only the two send
+// staging buffers borrow communication_resource. All MPI requests complete
+// before this function returns, so the resource may be reset afterwards.
+[[nodiscard]] PmSlabHaloExchangeStatus executeBlockingPmSlabHaloExchangeInto(
+    const MpiContext& mpi_context,
+    const PmSlabLayout& layout,
+    std::span<const double> local_scalar_field,
+    std::size_t halo_depth_x,
+    bool periodic_x,
+    std::span<double> left_halo_out,
+    std::span<double> right_halo_out,
+    std::pmr::memory_resource* communication_resource,
     std::uint64_t exchange_sequence = 0);
 
 struct PmSlabLayout {

@@ -11,6 +11,7 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/gravity/gravity_communication_arena.hpp"
 #include "cosmosim/core/execution_policy.hpp"
 #include "cosmosim/gravity/tree_index.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
@@ -165,6 +166,7 @@ inline constexpr std::uint64_t k_pm_routing_workspace_target_bytes =
 // All known CHUI-owned routing buffers/cursors are still accounted explicitly.
 inline constexpr std::uint64_t k_pm_routing_workspace_headroom_bytes =
     64ULL * 1024ULL;
+inline constexpr std::size_t k_pm_routing_max_wire_record_bytes = 96U;
 inline constexpr std::uint64_t k_pm_routing_modeled_workspace_limit_bytes =
     k_pm_routing_workspace_target_bytes - k_pm_routing_workspace_headroom_bytes;
 static_assert(k_pm_routing_workspace_headroom_bytes < k_pm_routing_workspace_target_bytes);
@@ -298,11 +300,21 @@ class PmGridStorage {
   [[nodiscard]] std::span<double> force_z();
   [[nodiscard]] std::span<const double> force_z() const;
 
+  struct ForceHaloWriteView {
+    std::span<double> left;
+    std::span<double> right;
+  };
+
   void clearForceHaloCache();
-  void setForceHaloCache(
-      const parallel::PmSlabHaloExchangeResult& force_x_halo,
-      const parallel::PmSlabHaloExchangeResult& force_y_halo,
-      const parallel::PmSlabHaloExchangeResult& force_z_halo,
+  // Transactional distributed refresh: allocate/retain the six final cache
+  // lanes up front, keep valid=false while X/Y/Z are filled, and publish only
+  // after every component exchange succeeds and reports identical metadata.
+  void beginForceHaloCacheRefresh(std::size_t halo_depth_x);
+  [[nodiscard]] ForceHaloWriteView forceHaloWriteView(std::size_t component);
+  void commitForceHaloCacheRefresh(
+      std::size_t halo_depth_x,
+      int left_peer_rank,
+      int right_peer_rank,
       std::uint64_t exchange_sequence);
   [[nodiscard]] bool hasForceHaloCache() const noexcept;
   [[nodiscard]] bool tryLoadForceFromHalo(
@@ -486,6 +498,14 @@ class PmSolver {
   [[nodiscard]] std::size_t planBuildCount() const;
 
  private:
+  friend class TreePmCoordinator;
+
+  // TreePmCoordinator attaches its currently active shared communication
+  // lease only for the lexical duration of one PM communication call.
+  // Standalone PM calls use a lazily allocated bounded internal arena.
+  void attachCommunicationArena(GravityCommunicationArena* arena) const;
+  void detachCommunicationArena() const noexcept;
+
   void solvePoissonPeriodicImpl(
       PmGridStorage& grid,
       const PmSolveOptions& options,

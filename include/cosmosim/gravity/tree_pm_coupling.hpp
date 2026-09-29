@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/gravity/gravity_communication_arena.hpp"
 #include "cosmosim/gravity/gravity_state_identity.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
@@ -262,7 +263,11 @@ class TreePmCoordinator {
  public:
   explicit TreePmCoordinator(PmGridShape pm_shape);
   TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout);
-  TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout, parallel::MpiContext mpi_context);
+  TreePmCoordinator(
+      PmGridShape pm_shape,
+      parallel::PmSlabLayout pm_layout,
+      parallel::MpiContext mpi_context,
+      core::MemoryGovernor* memory_governor = nullptr);
   ~TreePmCoordinator();
 
   [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const noexcept;
@@ -412,26 +417,13 @@ class TreePmCoordinator {
   std::vector<double> m_active_zoom_corr_ay_comoving;
   std::vector<double> m_active_zoom_corr_az_comoving;
   std::array<std::uint64_t, 3> m_zoom_corr_high_water_bytes{};
-  struct TreeExchangeWorkspace {
-    int world_size = 1;
-    std::vector<int> send_counts;
-    std::vector<int> recv_counts;
-    std::vector<int> send_displs;
-    std::vector<int> recv_displs;
-    std::vector<int> response_send_counts;
-    std::vector<int> response_recv_counts;
-    std::vector<int> response_send_displs;
-    std::vector<int> response_recv_displs;
-    std::vector<std::uint8_t> send_payload;
-    std::vector<std::uint8_t> recv_payload;
-    std::vector<std::uint8_t> response_send_payload;
-    std::vector<std::uint8_t> response_recv_payload;
-    std::vector<double> remote_batch_ax;
-    std::vector<double> remote_batch_ay;
-    std::vector<double> remote_batch_az;
-    std::vector<std::uint32_t> expected_response_count;
-    std::vector<std::uint32_t> received_response_count;
-  } m_tree_exchange_workspace;
+  // One physical rank-local backing allocation reused by the mutually
+  // exclusive PM density, halo, PM interpolation, and short-range Tree
+  // communication phases. Logical protocol storage is phase-local and
+  // arena-backed; persistent topology/cache state remains outside it.
+  GravityCommunicationArena m_communication_arena;
+  std::uint64_t m_tree_exchange_logical_high_water_bytes = 0U;
+
   // Contiguous OpenMP residual DFS slots: worker_count * (1 + 7 * max_depth)
   // TreeLocalIndex entries. Retained between residual evaluations so the
   // MemoryGovernor sees one stable high-water instead of per-call growth.
