@@ -51,6 +51,13 @@ std::uint64_t OwnershipValidationWorkspace::ownedCapacityBytes() const {
 
 void SimulationState::resizeParticles(std::size_t count) {
   (void)checkedLocalCount(count, kMaxLocalParticleCount, "particle", "SimulationState::resizeParticles");
+  if (hasHomogeneousDmoMetadata()) {
+    if (count != particles.size()) {
+      throw std::logic_error(
+          "SimulationState::resizeParticles requires explicit governed metadata materialization before changing a compact-DMO population");
+    }
+    return;
+  }
   particles.resize(count);
   particle_sidecar.resize(count);
   bumpParticleIndexGeneration();
@@ -90,6 +97,24 @@ bool SimulationState::validateOwnershipInvariantsImpl(
   if (particles.size() != particle_sidecar.size()) {
     return false;
   }
+  if (hasHomogeneousDmoMetadata()) {
+    if (!particles.time_bin.empty() || !particle_sidecar.species_tag.empty() ||
+        !particle_sidecar.particle_flags.empty() || !particle_sidecar.owning_rank.empty() ||
+        !particle_sidecar.last_drift_time_code.empty() || !particle_sidecar.last_drift_scale_factor.empty()) {
+      return false;
+    }
+    if (species.count_by_species[particleSpeciesIndex(ParticleSpecies::kDarkMatter)] != particles.size()) return false;
+    for (std::size_t i = 0; i < k_particle_species_count; ++i) {
+      if (i != particleSpeciesIndex(ParticleSpecies::kDarkMatter) && species.count_by_species[i] != 0U) return false;
+    }
+  } else {
+    const std::size_t n = particles.size();
+    if (particles.time_bin.size() != n || particle_sidecar.species_tag.size() != n ||
+        particle_sidecar.particle_flags.size() != n || particle_sidecar.owning_rank.size() != n ||
+        particle_sidecar.last_drift_time_code.size() != n || particle_sidecar.last_drift_scale_factor.size() != n) {
+      return false;
+    }
+  }
 
   scratch.resize(particles.size(), cells.size());
   if (!(use_bounded_id_scratch
@@ -106,7 +131,7 @@ bool SimulationState::validateOwnershipInvariantsImpl(
     return false;
   }
 
-  if (!species.isConsistentWith(particle_sidecar)) {
+  if (!hasHomogeneousDmoMetadata() && !species.isConsistentWith(particle_sidecar)) {
     return false;
   }
 
@@ -154,7 +179,7 @@ bool SimulationState::validateOwnershipInvariantsImpl(
     if (index >= particles.size()) {
       return false;
     }
-    if (particle_sidecar.species_tag[index] != static_cast<std::uint32_t>(ParticleSpecies::kStar)) {
+    if (particleSpeciesTag(index) != static_cast<std::uint32_t>(ParticleSpecies::kStar)) {
       return false;
     }
     if (++star_rows_by_particle[index] != 1) {
@@ -171,7 +196,7 @@ bool SimulationState::validateOwnershipInvariantsImpl(
         black_holes.host_cell_index[i] >= cells.size()) {
       return false;
     }
-    if (particle_sidecar.species_tag[index] != static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) {
+    if (particleSpeciesTag(index) != static_cast<std::uint32_t>(ParticleSpecies::kBlackHole)) {
       return false;
     }
     if (++bh_rows_by_particle[index] != 1) {
@@ -191,7 +216,7 @@ bool SimulationState::validateOwnershipInvariantsImpl(
     if (tracers.mass_fraction_of_host[i] < 0.0 || tracers.last_host_mass_code[i] < 0.0) {
       return false;
     }
-    if (particle_sidecar.species_tag[index] != static_cast<std::uint32_t>(ParticleSpecies::kTracer)) {
+    if (particleSpeciesTag(index) != static_cast<std::uint32_t>(ParticleSpecies::kTracer)) {
       return false;
     }
     if (++tracer_rows_by_particle[index] != 1) {
@@ -200,7 +225,7 @@ bool SimulationState::validateOwnershipInvariantsImpl(
   }
 
   for (std::size_t particle_index = 0; particle_index < particles.size(); ++particle_index) {
-    const auto species_tag = particle_sidecar.species_tag[particle_index];
+    const auto species_tag = particleSpeciesTag(particle_index);
     const bool has_star_row = star_rows_by_particle[particle_index] == 1;
     const bool has_bh_row = bh_rows_by_particle[particle_index] == 1;
     const bool has_tracer_row = tracer_rows_by_particle[particle_index] == 1;

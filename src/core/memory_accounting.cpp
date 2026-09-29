@@ -488,6 +488,24 @@ MemoryReport collectSimulationMemoryReport(const SimulationState& state, const T
   accountPatchSoa(builder, state.patches);
   accountAmrIdentityAndSynchronization(builder, state);
   accountModulePayloads(builder, state.sidecars);
+  // Representation policy is scalar authority. Population-scale compact DMO
+  // metadata is accounted only when its backing vectors actually exist above.
+  constexpr std::uint64_t particle_metadata_policy_scalar_bytes =
+      sizeof(ParticleMetadataRepresentation) + sizeof(std::uint32_t) * 3U +
+      sizeof(std::uint64_t) + sizeof(bool) + sizeof(double) * 2U;
+  builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kSidecars,
+      .lifetime = MemoryLifetime::kPersistent,
+      .memory_class = MemoryClass::kCanonicalPersistent,
+      .label = "particle_metadata.representation_policy_scalars",
+      .current_size_bytes = particle_metadata_policy_scalar_bytes,
+      .owned_capacity_bytes = particle_metadata_policy_scalar_bytes,
+      .high_water_bytes = particle_metadata_policy_scalar_bytes,
+      .estimated_next_step_bytes = particle_metadata_policy_scalar_bytes,
+      .estimate_only = false,
+      .uncertainty_note = state.hasHomogeneousDmoMetadata()
+          ? "homogeneous DMO logical metadata is scalar/implicit; only materialized exception vectors are charged separately"
+          : "generic particle metadata representation policy scalars; dense lanes are charged separately"});
 
   builder.addEntry(MemoryEntry{.subsystem = MemorySubsystem::kTree,
                                .lifetime = MemoryLifetime::kUnknown,
@@ -541,7 +559,9 @@ MemoryReport collectSchedulerMemoryReport(
         .estimate_only = false,
         .governed_commitment = false,
         .uncertainty_note =
-            "hierarchical scheduler logical bytes, retained capacity, and retained-capacity high-water"});
+            scheduler.representation() == SchedulerRepresentation::kUniformRungZero
+                ? "uniform rung-zero scheduler: one uint32 identity active-index lane plus scalar authority; absent generic lanes are not charged"
+                : "generic hierarchical scheduler logical bytes, retained capacity, and retained-capacity high-water"});
   };
   add_scheduler("scheduler.particle_owned_state", particle_scheduler);
   add_scheduler("scheduler.gas_cell_owned_state", gas_cell_scheduler);

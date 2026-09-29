@@ -1018,7 +1018,7 @@ void writeScienceSnapshotHdf5(
   count_by_type[0] = static_cast<std::uint64_t>(state.cells.size());
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
     const std::size_t type_index =
-        mapSpeciesTagToPartType(state.particle_sidecar.species_tag[i]);
+        mapSpeciesTagToPartType(state.particleSpeciesTag(i));
     if (type_index != 0U) {
       ++count_by_type[type_index];
     }
@@ -1548,7 +1548,7 @@ void writeScienceSnapshotHdf5(
     } else {
       std::size_t output_offset = 0U;
       for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-        if (mapSpeciesTagToPartType(state.particle_sidecar.species_tag[particle_index]) != type_index) {
+        if (mapSpeciesTagToPartType(state.particleSpeciesTag(particle_index)) != type_index) {
           continue;
         }
         particle_indices.push_back(core::checkedLocalParticleRow(particle_index, "snapshot particle row"));
@@ -1791,7 +1791,7 @@ void verifySingleFileScienceSnapshotPartitionHdf5(
       rows.clear();
     };
     for (std::size_t row = 0; row < state.particles.size(); ++row) {
-      if (mapSpeciesTagToPartType(state.particle_sidecar.species_tag[row]) != type_index) continue;
+      if (mapSpeciesTagToPartType(state.particleSpeciesTag(row)) != type_index) continue;
       rows.push_back(core::checkedLocalParticleRow(row, "collective snapshot readback particle row"));
       if (rows.size() == k_verify_chunk) flush();
     }

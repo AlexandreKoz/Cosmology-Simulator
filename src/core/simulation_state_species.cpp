@@ -3,6 +3,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -300,6 +301,8 @@ bool SpeciesContainer::isConsistentWith(const ParticleSidecar& sidecar) const no
 }
 
 void ParticleSpeciesIndex::rebuild(const ParticleSidecar& sidecar) {
+  representation = Representation::kMaterialized;
+  identity_count = 0;
   for (auto& indices : global_index_by_species) {
     indices.clear();
   }
@@ -318,15 +321,38 @@ void ParticleSpeciesIndex::rebuild(const ParticleSidecar& sidecar) {
   }
 }
 
+
+void ParticleSpeciesIndex::setHomogeneousDmoIdentity(std::uint32_t particle_count) {
+  for (auto& indices : global_index_by_species) {
+    AlignedVector<std::uint32_t>{}.swap(indices);
+  }
+  AlignedVector<std::uint32_t>{}.swap(local_index_by_global);
+  representation = Representation::kHomogeneousDmoIdentity;
+  identity_count = particle_count;
+}
+
 std::size_t ParticleSpeciesIndex::count(ParticleSpecies species) const {
+  if (representation == Representation::kHomogeneousDmoIdentity) {
+    return species == ParticleSpecies::kDarkMatter ? identity_count : 0U;
+  }
   return global_index_by_species[particleSpeciesIndex(species)].size();
 }
 
 std::span<const std::uint32_t> ParticleSpeciesIndex::globalIndices(ParticleSpecies species) const {
+  if (representation == Representation::kHomogeneousDmoIdentity) {
+    if (species == ParticleSpecies::kDarkMatter && identity_count != 0U) {
+      throw std::logic_error("ParticleSpeciesIndex.globalIndices: homogeneous DMO identity is implicit; iterate [0,count) instead of materializing an identity vector");
+    }
+    return {};
+  }
   return global_index_by_species[particleSpeciesIndex(species)];
 }
 
 std::uint32_t ParticleSpeciesIndex::localIndex(std::uint32_t global_index) const {
+  if (representation == Representation::kHomogeneousDmoIdentity) {
+    if (global_index >= identity_count) throw std::out_of_range("ParticleSpeciesIndex.localIndex: global index out of range");
+    return global_index;
+  }
   if (global_index >= local_index_by_global.size()) {
     throw std::out_of_range("ParticleSpeciesIndex.localIndex: global index out of range");
   }
@@ -334,6 +360,12 @@ std::uint32_t ParticleSpeciesIndex::localIndex(std::uint32_t global_index) const
 }
 
 std::uint32_t ParticleSpeciesIndex::globalIndex(ParticleSpecies species, std::uint32_t local_index) const {
+  if (representation == Representation::kHomogeneousDmoIdentity) {
+    if (species != ParticleSpecies::kDarkMatter || local_index >= identity_count) {
+      throw std::out_of_range("ParticleSpeciesIndex.globalIndex: local index out of range");
+    }
+    return local_index;
+  }
   const auto& species_indices = global_index_by_species[particleSpeciesIndex(species)];
   if (local_index >= species_indices.size()) {
     throw std::out_of_range("ParticleSpeciesIndex.globalIndex: local index out of range");
@@ -341,7 +373,119 @@ std::uint32_t ParticleSpeciesIndex::globalIndex(ParticleSpecies species, std::ui
   return species_indices[local_index];
 }
 
+
+bool SimulationState::compactHomogeneousDmoMetadata(std::uint32_t local_rank) {
+  const std::size_t count = particles.size();
+  if (cells.size() != 0U || star_particles.size() != 0U || black_holes.size() != 0U || tracers.size() != 0U ||
+      particle_sidecar.species_tag.size() != count || particle_sidecar.particle_flags.size() != count ||
+      particle_sidecar.owning_rank.size() != count || particles.time_bin.size() != count ||
+      particle_sidecar.last_drift_time_code.size() != count || particle_sidecar.last_drift_scale_factor.size() != count) {
+    return false;
+  }
+  const std::uint32_t dm = static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter);
+  if (count == 0U) {
+    m_uniform_species_tag = dm;
+    m_uniform_particle_flags = 0U;
+    m_uniform_owning_rank = local_rank;
+    m_uniform_sfc_key = 0U;
+    m_sfc_key_is_uniform = true;
+    m_common_last_drift_time_code = 0.0;
+    m_common_last_drift_scale_factor = 1.0;
+  } else {
+    m_uniform_particle_flags = particle_sidecar.particle_flags[0];
+    m_common_last_drift_time_code = particle_sidecar.last_drift_time_code[0];
+    m_common_last_drift_scale_factor = particle_sidecar.last_drift_scale_factor[0];
+    m_uniform_sfc_key = particle_sidecar.sfc_key.empty() ? 0U : particle_sidecar.sfc_key[0];
+    m_sfc_key_is_uniform = particle_sidecar.sfc_key.empty() ||
+        std::all_of(particle_sidecar.sfc_key.begin(), particle_sidecar.sfc_key.end(), [&](std::uint64_t key) { return key == m_uniform_sfc_key; });
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    if (particle_sidecar.species_tag[i] != dm || particle_sidecar.owning_rank[i] != local_rank ||
+        particle_sidecar.particle_flags[i] != m_uniform_particle_flags || particles.time_bin[i] != 0U ||
+        particle_sidecar.last_drift_time_code[i] != m_common_last_drift_time_code ||
+        particle_sidecar.last_drift_scale_factor[i] != m_common_last_drift_scale_factor) {
+      return false;
+    }
+  }
+  m_particle_metadata_representation = ParticleMetadataRepresentation::kHomogeneousDmo;
+  m_uniform_species_tag = dm;
+  m_uniform_owning_rank = local_rank;
+  AlignedVector<std::uint8_t>{}.swap(particles.time_bin);
+  AlignedVector<std::uint32_t>{}.swap(particle_sidecar.species_tag);
+  AlignedVector<std::uint32_t>{}.swap(particle_sidecar.particle_flags);
+  AlignedVector<std::uint32_t>{}.swap(particle_sidecar.owning_rank);
+  AlignedVector<double>{}.swap(particle_sidecar.last_drift_time_code);
+  AlignedVector<double>{}.swap(particle_sidecar.last_drift_scale_factor);
+  if (m_sfc_key_is_uniform) {
+    AlignedVector<std::uint64_t>{}.swap(particle_sidecar.sfc_key);
+  }
+  particle_species_index.setHomogeneousDmoIdentity(checkedIntegralNarrow<std::uint32_t>(count, "compactHomogeneousDmoMetadata particle count"));
+  species.count_by_species.fill(0U);
+  species.count_by_species[particleSpeciesIndex(ParticleSpecies::kDarkMatter)] = count;
+  return true;
+}
+
+void SimulationState::materializeParticleMetadata() {
+  if (!hasHomogeneousDmoMetadata()) return;
+  const std::size_t count = particles.size();
+  particles.time_bin.assign(count, 0U);
+  particle_sidecar.species_tag.assign(count, m_uniform_species_tag);
+  particle_sidecar.particle_flags.assign(count, m_uniform_particle_flags);
+  particle_sidecar.owning_rank.assign(count, m_uniform_owning_rank);
+  particle_sidecar.last_drift_time_code.assign(count, m_common_last_drift_time_code);
+  particle_sidecar.last_drift_scale_factor.assign(count, m_common_last_drift_scale_factor);
+  if (particle_sidecar.sfc_key.empty()) particle_sidecar.sfc_key.assign(count, m_uniform_sfc_key);
+  m_particle_metadata_representation = ParticleMetadataRepresentation::kMaterializedGeneric;
+  particle_species_index.rebuild(particle_sidecar);
+}
+
+std::uint32_t SimulationState::particleSpeciesTag(std::size_t particle_index) const {
+  if (particle_index >= particles.size()) throw std::out_of_range("particleSpeciesTag: particle index out of range");
+  return hasHomogeneousDmoMetadata() ? m_uniform_species_tag : particle_sidecar.species_tag[particle_index];
+}
+std::uint32_t SimulationState::particleFlags(std::size_t particle_index) const {
+  if (particle_index >= particles.size()) throw std::out_of_range("particleFlags: particle index out of range");
+  return hasHomogeneousDmoMetadata() ? m_uniform_particle_flags : particle_sidecar.particle_flags[particle_index];
+}
+std::uint32_t SimulationState::particleOwningRank(std::size_t particle_index) const {
+  if (particle_index >= particles.size()) throw std::out_of_range("particleOwningRank: particle index out of range");
+  return hasHomogeneousDmoMetadata() ? m_uniform_owning_rank : particle_sidecar.owning_rank[particle_index];
+}
+std::uint64_t SimulationState::particleSfcKey(std::size_t particle_index) const {
+  if (particle_index >= particles.size()) throw std::out_of_range("particleSfcKey: particle index out of range");
+  if (hasHomogeneousDmoMetadata() && m_sfc_key_is_uniform) return m_uniform_sfc_key;
+  return particle_sidecar.sfc_key[particle_index];
+}
+double SimulationState::particleLastDriftTimeCode(std::size_t particle_index) const {
+  if (particle_index >= particles.size()) throw std::out_of_range("particleLastDriftTimeCode: particle index out of range");
+  return hasHomogeneousDmoMetadata() ? m_common_last_drift_time_code : particle_sidecar.last_drift_time_code[particle_index];
+}
+double SimulationState::particleLastDriftScaleFactor(std::size_t particle_index) const {
+  if (particle_index >= particles.size()) throw std::out_of_range("particleLastDriftScaleFactor: particle index out of range");
+  return hasHomogeneousDmoMetadata() ? m_common_last_drift_scale_factor : particle_sidecar.last_drift_scale_factor[particle_index];
+}
+std::uint8_t SimulationState::particleTimeBin(std::size_t particle_index) const {
+  if (particle_index >= particles.size()) throw std::out_of_range("particleTimeBin: particle index out of range");
+  return hasHomogeneousDmoMetadata() ? 0U : particles.time_bin[particle_index];
+}
+void SimulationState::updateAllParticleDriftEpoch(double time_code, double scale_factor) {
+  if (!std::isfinite(time_code) || !std::isfinite(scale_factor) || scale_factor <= 0.0) {
+    throw std::invalid_argument("updateAllParticleDriftEpoch: invalid drift epoch");
+  }
+  if (hasHomogeneousDmoMetadata()) {
+    m_common_last_drift_time_code = time_code;
+    m_common_last_drift_scale_factor = scale_factor;
+    return;
+  }
+  std::fill(particle_sidecar.last_drift_time_code.begin(), particle_sidecar.last_drift_time_code.end(), time_code);
+  std::fill(particle_sidecar.last_drift_scale_factor.begin(), particle_sidecar.last_drift_scale_factor.end(), scale_factor);
+}
+
 void SimulationState::rebuildSpeciesIndex() {
+  if (hasHomogeneousDmoMetadata()) {
+    particle_species_index.setHomogeneousDmoIdentity(checkedIntegralNarrow<std::uint32_t>(particles.size(), "rebuildSpeciesIndex DMO identity"));
+    return;
+  }
   particle_species_index.rebuild(particle_sidecar);
   const auto gas_count = particle_species_index.count(ParticleSpecies::kGas);
   const bool identity_uninitialized = gas_cells.gas_cell_id.empty() ||

@@ -169,7 +169,7 @@ void fnv1aMix(std::uint64_t& hash, std::uint64_t value) { fnv1aMix(hash, &value,
   fnv1aMix(hash, static_cast<std::uint64_t>(0x7061727469636c65ULL));  // "particle" domain tag.
   fnv1aMix(hash, state.particle_sidecar.particle_id[particle_row]);
   fnv1aMix(hash, static_cast<std::uint64_t>(
-      state.particle_sidecar.species_tag[particle_row]));
+      state.particleSpeciesTag(particle_row)));
   fnv1aMix(hash, state.particles.position_x_comoving[particle_row]);
   fnv1aMix(hash, state.particles.position_y_comoving[particle_row]);
   fnv1aMix(hash, state.particles.position_z_comoving[particle_row]);
@@ -638,6 +638,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     std::max(mpi_context.worldRank(), 0)),
             });
     traceRuntimePhase("runtime_composition_complete");
+    if (!state.hasHomogeneousDmoMetadata() && state.cells.size() == 0U) {
+      (void)state.compactHomogeneousDmoMetadata(static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0)));
+    }
     console_reporter.emitRuntimePhase(
         "runtime_composition_ready", "solver/runtime modules frozen and instantiated");
     if (restoring_from_restart) {
@@ -881,7 +884,7 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     std::vector<std::uint64_t> final_local_owned_particle_ids;
     final_local_owned_particle_ids.reserve(state.particles.size());
     for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-      if (state.particle_sidecar.owning_rank[particle_index] ==
+      if (state.particleOwningRank(particle_index) ==
           static_cast<std::uint32_t>(mpi_context.worldRank())) {
         final_local_owned_particle_ids.push_back(
             state.particle_sidecar.particle_id[particle_index]);

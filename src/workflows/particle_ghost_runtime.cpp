@@ -41,7 +41,8 @@ namespace {
     throw std::invalid_argument(
         "particle ghost demand scan requires component-consistent gravity/kinematic particle lanes");
   }
-  if (state.particle_sidecar.owning_rank.size() != particle_count ||
+  if ((!state.hasHomogeneousDmoMetadata() &&
+       state.particle_sidecar.owning_rank.size() != particle_count) ||
       state.particle_sidecar.particle_id.size() != particle_count) {
     throw std::invalid_argument(
         "particle ghost demand scan requires ownership and particle-ID sidecars aligned with particle state");
@@ -49,7 +50,7 @@ namespace {
 
   bool local_has_ghost_demand = false;
   for (std::size_t particle_index = 0; particle_index < particle_count; ++particle_index) {
-    const std::uint32_t owner_rank = state.particle_sidecar.owning_rank[particle_index];
+    const std::uint32_t owner_rank = state.particleOwningRank(particle_index);
     if (owner_rank >= static_cast<std::uint32_t>(world_size)) {
       throw std::invalid_argument("particle ghost demand scan found owning_rank outside the MPI world");
     }
@@ -66,7 +67,7 @@ namespace {
   std::vector<parallel::LocalGhostDescriptor> descriptors;
   descriptors.reserve(state.particles.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-    const int owner_rank = static_cast<int>(state.particle_sidecar.owning_rank[particle_index]);
+    const int owner_rank = static_cast<int>(state.particleOwningRank(particle_index));
     descriptors.push_back(parallel::LocalGhostDescriptor{
         .residency = (owner_rank == world_rank) ? parallel::LocalIndexResidency::kOwned
                                                 : parallel::LocalIndexResidency::kGhost,

@@ -85,7 +85,7 @@ namespace cosmosim::workflows::internal {
   std::size_t expected_non_gas_particle_count = 0U;
   for (std::size_t i = 0; i < expected.particles.size(); ++i) {
     const auto species = static_cast<core::ParticleSpecies>(
-        expected.particle_sidecar.species_tag[i]);
+        expected.particleSpeciesTag(i));
     if (species != core::ParticleSpecies::kGas) {
       ++expected_non_gas_particle_count;
     }
@@ -128,7 +128,7 @@ namespace cosmosim::workflows::internal {
 
   for (std::size_t expected_i = 0; expected_i < expected.particles.size(); ++expected_i) {
     const auto species = static_cast<core::ParticleSpecies>(
-        expected.particle_sidecar.species_tag[expected_i]);
+        expected.particleSpeciesTag(expected_i));
     if (species == core::ParticleSpecies::kGas) {
       continue;
     }
@@ -139,8 +139,8 @@ namespace cosmosim::workflows::internal {
       return fail("snapshot is missing particle_id=" + std::to_string(particle_id));
     }
     const std::size_t restored_i = restored_it->second;
-    if (restored.state.particle_sidecar.species_tag[restored_i] !=
-        expected.particle_sidecar.species_tag[expected_i]) {
+    if (restored.state.particleSpeciesTag(restored_i) !=
+        expected.particleSpeciesTag(expected_i)) {
       return fail("snapshot species mismatch for particle_id=" +
                   std::to_string(particle_id));
     }
@@ -244,7 +244,7 @@ namespace cosmosim::workflows::internal {
     }
     const std::size_t restored_particle_index = restored_particle_it->second;
     if (static_cast<core::ParticleSpecies>(
-            restored.state.particle_sidecar.species_tag[restored_particle_index]) !=
+            restored.state.particleSpeciesTag(restored_particle_index)) !=
         core::ParticleSpecies::kGas) {
       return fail("snapshot gas proxy has the wrong species");
     }

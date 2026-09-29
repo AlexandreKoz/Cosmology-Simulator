@@ -51,10 +51,10 @@ AuthoritativeGravitySourceRows selectAuthoritativeGravitySourceRows(
   const std::uint32_t gas_species_tag =
       static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
   for (std::size_t particle_row = 0; particle_row < state.particles.size(); ++particle_row) {
-    if (state.particle_sidecar.species_tag[particle_row] == gas_species_tag) {
+    if (state.particleSpeciesTag(particle_row) == gas_species_tag) {
       continue;
     }
-    if (state.particle_sidecar.owning_rank[particle_row] != world_rank) {
+    if (state.particleOwningRank(particle_row) != world_rank) {
       continue;
     }
     if (particle_row > std::numeric_limits<std::uint32_t>::max()) {
@@ -181,7 +181,7 @@ std::uint32_t gasCellOwnerRankForLocalRow(
         std::string(caller) +
         ": gas-cell parent row is outside owning-rank metadata");
   }
-  return state.particle_sidecar.owning_rank[parent_it->second];
+  return state.particleOwningRank(parent_it->second);
 }
 
 void synchronizeParentParticleCompatibilityMirrors(

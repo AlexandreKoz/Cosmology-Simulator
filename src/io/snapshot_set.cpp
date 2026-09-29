@@ -781,14 +781,14 @@ void appendState(core::SimulationState& out, const core::SimulationState& in, st
     out.particles.velocity_y_peculiar[d] = in.particles.velocity_y_peculiar[i];
     out.particles.velocity_z_peculiar[d] = in.particles.velocity_z_peculiar[i];
     out.particles.mass_code[d] = in.particles.mass_code[i];
-    out.particles.time_bin[d] = in.particles.time_bin[i];
+    out.particles.time_bin[d] = in.particleTimeBin(i);
     out.particle_sidecar.particle_id[d] = in.particle_sidecar.particle_id[i];
-    out.particle_sidecar.sfc_key[d] = in.particle_sidecar.sfc_key[i];
-    out.particle_sidecar.species_tag[d] = in.particle_sidecar.species_tag[i];
-    out.particle_sidecar.particle_flags[d] = in.particle_sidecar.particle_flags[i];
+    out.particle_sidecar.sfc_key[d] = in.particleSfcKey(i);
+    out.particle_sidecar.species_tag[d] = in.particleSpeciesTag(i);
+    out.particle_sidecar.particle_flags[d] = in.particleFlags(i);
     out.particle_sidecar.owning_rank[d] = owner_rank;
-    out.particle_sidecar.last_drift_time_code[d] = in.particle_sidecar.last_drift_time_code[i];
-    out.particle_sidecar.last_drift_scale_factor[d] = in.particle_sidecar.last_drift_scale_factor[i];
+    out.particle_sidecar.last_drift_time_code[d] = in.particleLastDriftTimeCode(i);
+    out.particle_sidecar.last_drift_scale_factor[d] = in.particleLastDriftScaleFactor(i);
   }
   if (!in.particle_sidecar.gravity_softening_comoving.empty()) {
     if (out.particle_sidecar.gravity_softening_comoving.empty()) out.particle_sidecar.gravity_softening_comoving.resize(out.particles.size(), 0.0);

@@ -23,6 +23,12 @@ namespace cosmosim::core {
 
 class HierarchicalTimeBinScheduler;
 
+enum class ParticleMetadataRepresentation : std::uint8_t {
+  kMaterializedGeneric = 0,
+  kHomogeneousDmo = 1,
+};
+
+
 struct ParticleSoa {
   // Authoritative owner for persistent gravity-hot particle truth in SimulationState.
   // Ownership lanes: position_*_comoving, velocity_*_peculiar, mass_code.
@@ -356,11 +362,15 @@ struct SpeciesContainer {
 };
 
 struct ParticleSpeciesIndex {
-  // Explicit species-local to global particle index mapping.
+  enum class Representation : std::uint8_t { kMaterialized = 0, kHomogeneousDmoIdentity = 1 };
+  // Explicit species-local to global particle index mapping for generic states.
   std::array<AlignedVector<std::uint32_t>, k_particle_species_count> global_index_by_species;
   AlignedVector<std::uint32_t> local_index_by_global;
+  Representation representation = Representation::kMaterialized;
+  std::uint32_t identity_count = 0;
 
   void rebuild(const ParticleSidecar& sidecar);
+  void setHomogeneousDmoIdentity(std::uint32_t particle_count);
   [[nodiscard]] std::size_t count(ParticleSpecies species) const;
   [[nodiscard]] std::span<const std::uint32_t> globalIndices(ParticleSpecies species) const;
   [[nodiscard]] std::uint32_t localIndex(std::uint32_t global_index) const;
@@ -894,6 +904,18 @@ class SimulationState {
   [[nodiscard]] bool validateUniqueParticleIds(OwnershipValidationWorkspace& scratch) const;
   [[nodiscard]] bool validatePersistentParticleIds() const;
   void rebuildSpeciesIndex();
+  [[nodiscard]] ParticleMetadataRepresentation particleMetadataRepresentation() const noexcept { return m_particle_metadata_representation; }
+  [[nodiscard]] bool hasHomogeneousDmoMetadata() const noexcept { return m_particle_metadata_representation == ParticleMetadataRepresentation::kHomogeneousDmo; }
+  [[nodiscard]] bool compactHomogeneousDmoMetadata(std::uint32_t local_rank);
+  void materializeParticleMetadata();
+  [[nodiscard]] std::uint32_t particleSpeciesTag(std::size_t particle_index) const;
+  [[nodiscard]] std::uint32_t particleFlags(std::size_t particle_index) const;
+  [[nodiscard]] std::uint32_t particleOwningRank(std::size_t particle_index) const;
+  [[nodiscard]] std::uint64_t particleSfcKey(std::size_t particle_index) const;
+  [[nodiscard]] double particleLastDriftTimeCode(std::size_t particle_index) const;
+  [[nodiscard]] double particleLastDriftScaleFactor(std::size_t particle_index) const;
+  [[nodiscard]] std::uint8_t particleTimeBin(std::size_t particle_index) const;
+  void updateAllParticleDriftEpoch(double time_code, double scale_factor);
   void refreshGasCellIdentityFromParticleOrder();
   [[nodiscard]] bool gasCellIdentityMatchesParticleOrder() const;
   // Legacy/bootstrap imports only: these construct the authoritative map from
@@ -962,6 +984,14 @@ class SimulationState {
   [[nodiscard]] std::vector<ParticleMigrationRecord> packParticleMigrationRecordsCore(
       std::span<const std::uint32_t> local_indices) const;
 
+  ParticleMetadataRepresentation m_particle_metadata_representation = ParticleMetadataRepresentation::kMaterializedGeneric;
+  std::uint32_t m_uniform_species_tag = static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter);
+  std::uint32_t m_uniform_particle_flags = 0U;
+  std::uint32_t m_uniform_owning_rank = 0U;
+  std::uint64_t m_uniform_sfc_key = 0U;
+  bool m_sfc_key_is_uniform = false;
+  double m_common_last_drift_time_code = 0.0;
+  double m_common_last_drift_scale_factor = 1.0;
   std::uint64_t m_particle_index_generation = 0;
   std::uint64_t m_cell_index_generation = 0;
   std::uint64_t m_gravity_source_generation = 1;

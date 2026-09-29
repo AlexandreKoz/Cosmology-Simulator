@@ -125,6 +125,9 @@ struct RuntimeDecompositionSourceView {
   std::span<const double> particle_z_comoving{};
   std::span<const std::uint32_t> particle_species_tag{};
   std::span<const std::uint32_t> particle_owning_rank{};
+  bool particle_metadata_uniform = false;
+  std::uint32_t uniform_particle_species_tag = 0U;
+  std::uint32_t uniform_particle_owning_rank = 0U;
   std::span<const std::uint8_t> active_particle_mask{};
   std::span<const std::uint64_t> patch_ids{};
   std::span<const std::int32_t> patch_levels{};
@@ -147,6 +150,24 @@ struct RuntimeDecompositionSourceView {
   std::uint32_t black_hole_species_tag = 3U;
   std::uint64_t gas_transient_memory_bytes_per_cell = 0U;
   std::uint64_t source_scratch_bytes = 0U;
+
+  [[nodiscard]] std::uint32_t particleSpeciesTag(std::size_t index) const {
+    if (index >= particle_count) {
+      throw std::out_of_range("runtime decomposition particle species index out of range");
+    }
+    if (particle_metadata_uniform) return uniform_particle_species_tag;
+    return particle_species_tag[index];
+  }
+
+  [[nodiscard]] std::uint32_t particleOwningRank(std::size_t index) const {
+    if (index >= particle_count) {
+      throw std::out_of_range("runtime decomposition particle owner index out of range");
+    }
+    if (particle_metadata_uniform) return uniform_particle_owning_rank;
+    return particle_owning_rank.empty()
+        ? static_cast<std::uint32_t>(world_rank)
+        : particle_owning_rank[index];
+  }
 
   [[nodiscard]] std::size_t localEntityCount() const noexcept {
     return particle_count + compact_patch_indices.size();

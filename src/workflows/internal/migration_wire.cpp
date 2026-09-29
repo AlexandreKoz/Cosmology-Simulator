@@ -816,7 +816,7 @@ std::size_t estimateParticleMigrationWireUpperBoundBytes(
     throw std::out_of_range("particle migration wire estimate local index out of range");
   }
   core::ParticleMigrationRecord representative;
-  representative.species_tag = state.particle_sidecar.species_tag[local_particle_index];
+  representative.species_tag = state.particleSpeciesTag(local_particle_index);
   representative.has_scheduler_fields = true;
   representative.has_gravity_softening_value = !state.particle_sidecar.gravity_softening_comoving.empty();
   representative.has_gravity_softening_override =

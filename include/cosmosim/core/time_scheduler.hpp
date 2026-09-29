@@ -144,6 +144,7 @@ struct TimeStepParticleCriteriaView {
   std::span<const double> velocity_y_peculiar;
   std::span<const double> velocity_z_peculiar;
   std::span<const std::uint32_t> species_tag;
+  bool homogeneous_dmo_species = false;
   std::span<const double> gravity_softening_comoving;
   std::span<const double> accel_x_comoving;
   std::span<const double> accel_y_comoving;
@@ -209,6 +210,14 @@ class TimeStepCriteriaRegistry {
   TimeStepCriteriaHooks m_hooks;
 };
 
+// Physical representation policy. The logical scheduler authority is unchanged:
+// max_bin==0 may store the homogeneous rung-zero state implicitly while the
+// generic representation retains the full hierarchical machinery.
+enum class SchedulerRepresentation : std::uint8_t {
+  kGenericHierarchical = 0,
+  kUniformRungZero = 1,
+};
+
 // Integer timeline scheduler with power-of-two bins and compact active set extraction.
 class RetainedCapacityTransaction;
 
@@ -242,6 +251,11 @@ class HierarchicalTimeBinScheduler {
   [[nodiscard]] std::uint64_t currentTick() const noexcept;
   [[nodiscard]] std::uint8_t maxBin() const noexcept;
   [[nodiscard]] std::uint32_t elementCount() const noexcept;
+  [[nodiscard]] SchedulerRepresentation representation() const noexcept { return m_representation; }
+  [[nodiscard]] std::uint8_t binIndex(std::uint32_t element_index) const;
+  [[nodiscard]] std::uint64_t nextActivationTick(std::uint32_t element_index) const;
+  [[nodiscard]] bool isElementActive(std::uint32_t element_index) const;
+  [[nodiscard]] std::uint8_t pendingBinIndex(std::uint32_t element_index) const;
 
   [[nodiscard]] bool isBinActiveAtTick(std::uint8_t bin_index, std::uint64_t tick) const;
   [[nodiscard]] std::uint64_t binPeriodTicks(std::uint8_t bin_index) const;
@@ -275,7 +289,10 @@ class HierarchicalTimeBinScheduler {
   void refreshOwnedCapacityHighWater();
 
   std::uint64_t m_current_tick = 0;
+  std::uint32_t m_element_count = 0;
   std::uint8_t m_max_bin = 0;
+  SchedulerRepresentation m_representation = SchedulerRepresentation::kGenericHierarchical;
+  std::uint8_t m_uniform_pending_bin_index = k_unset_pending_bin;
   TimeBinHotMetadata m_hot;
   std::vector<std::vector<std::uint32_t>> m_elements_by_bin;
   std::vector<std::size_t> m_position_in_bin;

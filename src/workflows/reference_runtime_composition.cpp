@@ -60,17 +60,16 @@ class DriftRuntime final {
     const std::uint32_t world_rank =
         static_cast<std::uint32_t>(m_services.mpi_context.worldRank());
     for (const std::uint32_t particle_index : context.active_set.particle_indices) {
-      if (particle_index >= context.state.particles.size() ||
-          particle_index >= context.state.particle_sidecar.owning_rank.size()) {
+      if (particle_index >= context.state.particles.size()) {
         throw std::out_of_range("drift task active particle index out of range");
       }
-      if (context.state.particle_sidecar.owning_rank[particle_index] != world_rank) {
+      if (context.state.particleOwningRank(particle_index) != world_rank) {
         continue;
       }
       // Gas-tagged generic particles are compatibility/lineage mirrors. The
       // authoritative Eulerian/AMR gas geometry lives in CellSoa and must not
       // acquire a second, independently drifted physical trajectory.
-      if (context.state.particle_sidecar.species_tag[particle_index] ==
+      if (context.state.particleSpeciesTag(particle_index) ==
           static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
         continue;
       }

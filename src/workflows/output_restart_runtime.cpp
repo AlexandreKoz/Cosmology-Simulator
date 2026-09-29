@@ -239,7 +239,7 @@ namespace {
   std::array<std::uint64_t, 6> counts{};
   counts[0] = static_cast<std::uint64_t>(state.cells.size());
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    const auto species = static_cast<core::ParticleSpecies>(state.particle_sidecar.species_tag[i]);
+    const auto species = static_cast<core::ParticleSpecies>(state.particleSpeciesTag(i));
     switch (species) {
       case core::ParticleSpecies::kGas:
         break;  // PartType0 authority is CellSoa, not a duplicate gas-particle row.
@@ -1120,7 +1120,7 @@ void validateRestartResumeTopologyOrThrowImpl(
         std::to_string(restart.state.particle_sidecar.owning_rank.size()));
   }
   for (std::size_t row = 0; row < restart.state.particle_sidecar.owning_rank.size(); ++row) {
-    const int observed_owner = static_cast<int>(restart.state.particle_sidecar.owning_rank[row]);
+    const int observed_owner = static_cast<int>(restart.state.particleOwningRank(row));
     const int restart_owner = restart.distributed_gravity_state.owning_rank_by_item[row];
     if (observed_owner != restart_owner) {
       throw std::runtime_error(

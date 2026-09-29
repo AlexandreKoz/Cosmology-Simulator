@@ -1120,9 +1120,7 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromSource(
   records.reserve(source.localEntityCount());
   const auto append_record = [&](std::size_t local_index, DecompositionEntityKind kind) {
     const int owner = kind == DecompositionEntityKind::kParticle
-        ? (source.particle_owning_rank.empty()
-               ? source.world_rank
-               : static_cast<int>(source.particle_owning_rank[local_index]))
+        ? (static_cast<int>(source.particleOwningRank(local_index)))
         : static_cast<int>(source.patch_owning_rank[local_index]);
     if (owner != owner_rank) {
       return;
@@ -1483,10 +1481,11 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
       source.particle_x_comoving.size() != source.particle_count ||
       source.particle_y_comoving.size() != source.particle_count ||
       source.particle_z_comoving.size() != source.particle_count ||
-      source.particle_species_tag.size() != source.particle_count) {
+      (!source.particle_metadata_uniform &&
+       source.particle_species_tag.size() != source.particle_count)) {
     throw std::invalid_argument("runtime decomposition source particle spans are inconsistent");
   }
-  if (!source.particle_owning_rank.empty() &&
+  if (!source.particle_metadata_uniform && !source.particle_owning_rank.empty() &&
       source.particle_owning_rank.size() != source.particle_count) {
     throw std::invalid_argument("runtime decomposition source particle ownership span is inconsistent");
   }
@@ -1534,7 +1533,8 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
       }
     }
   }
-  for (const std::uint32_t species_tag : source.particle_species_tag) {
+  for (std::size_t particle = 0; particle < source.particle_count; ++particle) {
+    const std::uint32_t species_tag = source.particleSpeciesTag(particle);
     if (species_tag >= source.particle_memory_bytes_by_species.size()) {
       throw std::invalid_argument("runtime decomposition source species tag exceeds memory table");
     }
@@ -1602,7 +1602,7 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
     const RuntimeDecompositionSourceView& source,
     std::size_t particle_index,
     RuntimeSourceComponentScratch&) {
-  const std::uint32_t species_tag = source.particle_species_tag[particle_index];
+  const std::uint32_t species_tag = source.particleSpeciesTag(particle_index);
   if (species_tag != source.gas_species_tag) {
     return 0.0;
   }
@@ -1626,7 +1626,7 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
     const RuntimeDecompositionSourceView& source,
     std::size_t particle_index,
     RuntimeSourceComponentScratch& scratch) {
-  const std::uint32_t species_tag = source.particle_species_tag[particle_index];
+  const std::uint32_t species_tag = source.particleSpeciesTag(particle_index);
   const std::uint64_t memory_bytes =
       source.particle_memory_bytes_by_species[species_tag];
   const bool active =
@@ -1841,7 +1841,7 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
     RuntimeSourceComponentScratch& scratch) {
   const bool particle = kind == DecompositionEntityKind::kParticle;
   const std::uint32_t species_tag = particle
-      ? source.particle_species_tag[local_index]
+      ? source.particleSpeciesTag(local_index)
       : 0U;
   const DecompositionWorkComponents base = particle
       ? baseComponentsForSourceParticle(source, local_index, scratch)
@@ -1849,9 +1849,7 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
   const DecompositionWorkComponents components = applySourceMeasuredFeedback(
       base, measurements, coefficients, normalization);
   const int owner = particle
-      ? (source.particle_owning_rank.empty()
-             ? source.world_rank
-             : static_cast<int>(source.particle_owning_rank[local_index]))
+      ? (static_cast<int>(source.particleOwningRank(local_index)))
       : static_cast<int>(source.patch_owning_rank[local_index]);
   if (owner < 0) {
     throw std::invalid_argument("runtime decomposition source owner is negative");
@@ -3589,9 +3587,9 @@ RuntimeRebalancePlan buildCompactDistributedRuntimeRebalancePlan(
      if (source.world_rank >= decomposition_config.world_size) {
        throw std::invalid_argument("runtime decomposition source world_rank is outside world size");
      }
-     if (!source.particle_owning_rank.empty()) {
-
-      for (const std::uint32_t owner : source.particle_owning_rank) {
+     if (source.particle_metadata_uniform || !source.particle_owning_rank.empty()) {
+      for (std::size_t particle = 0; particle < source.particle_count; ++particle) {
+        const std::uint32_t owner = source.particleOwningRank(particle);
         if (static_cast<std::uint64_t>(owner) >=
             static_cast<std::uint64_t>(decomposition_config.world_size)) {
           throw std::invalid_argument("runtime decomposition source particle owner is outside world size");

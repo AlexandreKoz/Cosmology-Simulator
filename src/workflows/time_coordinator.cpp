@@ -378,6 +378,7 @@ struct LocalGasCellCflMetadata {
           .velocity_y_peculiar = state.particles.velocity_y_peculiar,
           .velocity_z_peculiar = state.particles.velocity_z_peculiar,
           .species_tag = state.particle_sidecar.species_tag,
+          .homogeneous_dmo_species = state.hasHomogeneousDmoMetadata(),
           .gravity_softening_comoving = state.particle_sidecar.gravity_softening_comoving,
           .accel_x_comoving = particle_accel_x,
           .accel_y_comoving = particle_accel_y,
@@ -436,7 +437,8 @@ enum class SchedulerElementFamily {
   const std::size_t cell_count = view.gas_cells.cell_mass_code.size();
   if (view.particles.velocity_y_peculiar.size() != particle_count ||
       view.particles.velocity_z_peculiar.size() != particle_count ||
-      view.particles.species_tag.size() != particle_count) {
+      (!view.particles.homogeneous_dmo_species && view.particles.species_tag.size() != particle_count) ||
+      (view.particles.homogeneous_dmo_species && !view.particles.species_tag.empty())) {
     throw std::invalid_argument("particle timestep criteria view has mismatched extents");
   }
   if (view.gas_cells.density_code.size() != cell_count ||
@@ -589,7 +591,8 @@ enum class SchedulerElementFamily {
     }
   }
   const auto black_hole_dt_for_particle = [&](std::uint32_t particle_index) -> std::optional<double> {
-    if (!config.physics.enable_black_hole_agn || particle_index >= view.particles.species_tag.size() ||
+    if (!config.physics.enable_black_hole_agn || view.particles.homogeneous_dmo_species ||
+        particle_index >= view.particles.species_tag.size() ||
         view.particles.species_tag[particle_index] != static_cast<std::uint32_t>(core::ParticleSpecies::kBlackHole)) {
       return std::nullopt;
     }
@@ -710,10 +713,13 @@ enum class SchedulerElementFamily {
     const double ay = (particle_index < view.particles.accel_y_comoving.size()) ? view.particles.accel_y_comoving[particle_index] : 0.0;
     const double az = (particle_index < view.particles.accel_z_comoving.size()) ? view.particles.accel_z_comoving[particle_index] : 0.0;
     const double amag = std::sqrt(ax * ax + ay * ay + az * az);
+    const std::size_t particle_species = view.particles.homogeneous_dmo_species
+        ? static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)
+        : static_cast<std::size_t>(view.particles.species_tag[particle_index]);
     const double eps = !view.particles.gravity_softening_comoving.empty()
         ? view.particles.gravity_softening_comoving[particle_index]
-        : ((static_cast<std::size_t>(view.particles.species_tag[particle_index]) < species_softening.epsilon_comoving_by_species.size())
-              ? species_softening.epsilon_comoving_by_species[static_cast<std::size_t>(view.particles.species_tag[particle_index])]
+        : ((particle_species < species_softening.epsilon_comoving_by_species.size())
+              ? species_softening.epsilon_comoving_by_species[particle_species]
               : global_softening);
     const double gravity_dt = core::computeComovingGravityTimeStep(
         {.softening_length_comoving_code = std::max(eps, 1.0e-12),

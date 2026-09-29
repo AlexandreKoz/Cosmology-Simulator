@@ -628,7 +628,6 @@ ParticleReorderMap buildParticleReorderMapByScheduler(
     throw std::invalid_argument(
         "buildParticleReorderMapByScheduler: scheduler element count must match particle count");
   }
-  const auto& hot = scheduler.hotMetadata();
   ParticleReorderMap reorder_map;
   reorder_map.new_to_old_index.resize(state.particles.size());
   std::iota(reorder_map.new_to_old_index.begin(), reorder_map.new_to_old_index.end(), 0U);
@@ -636,7 +635,7 @@ ParticleReorderMap buildParticleReorderMapByScheduler(
       reorder_map.new_to_old_index.begin(),
       reorder_map.new_to_old_index.end(),
       [&](std::uint32_t lhs, std::uint32_t rhs) {
-        return std::tuple{hot.bin_index[lhs], lhs} < std::tuple{hot.bin_index[rhs], rhs};
+        return std::tuple{scheduler.binIndex(lhs), lhs} < std::tuple{scheduler.binIndex(rhs), rhs};
       });
   reorder_map.old_to_new_index.resize(state.particles.size());
   for (std::size_t new_index = 0; new_index < reorder_map.new_to_old_index.size(); ++new_index) {
@@ -1171,7 +1170,12 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
         throw std::runtime_error("PM sync reused a long-range field before the integrator marked one valid");
       }
     }
-    if (stage == IntegrationStage::kDrift &&
+    if (stage == IntegrationStage::kDrift && state.hasHomogeneousDmoMetadata()) {
+      if (active_set.particle_indices.size() != state.particles.size()) {
+        throw std::runtime_error("compact homogeneous DMO drift requires the all-active rung-zero population");
+      }
+      state.updateAllParticleDriftEpoch(timeline_step.time_end_code, timeline_step.scale_factor_end);
+    } else if (stage == IntegrationStage::kDrift &&
         state.particle_sidecar.last_drift_time_code.size() == state.particles.size() &&
         state.particle_sidecar.last_drift_scale_factor.size() == state.particles.size()) {
       for (const std::uint32_t particle_index : active_set.particle_indices) {
@@ -1185,6 +1189,9 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
       throw std::runtime_error("particle drift-time sidecar is partially sized before drift epoch update");
     }
     if (stage == IntegrationStage::kSourceTerms && state.particles.size() > particle_count_before_stage) {
+      if (state.hasHomogeneousDmoMetadata()) {
+        throw std::runtime_error("particle creation committed while metadata remained homogeneous DMO; materialize before species mutation");
+      }
       if (state.particle_sidecar.last_drift_time_code.size() != state.particles.size() ||
           state.particle_sidecar.last_drift_scale_factor.size() != state.particles.size()) {
         throw std::runtime_error("particle drift-time sidecar is not sized after source-term mutation");
@@ -1254,6 +1261,7 @@ void StepOrchestrator::executeSchedulerSubstep(
 }
 
 HierarchicalTimeBinScheduler::HierarchicalTimeBinScheduler(std::uint8_t max_bin) : m_max_bin(max_bin) {
+  m_representation = max_bin == 0U ? SchedulerRepresentation::kUniformRungZero : SchedulerRepresentation::kGenericHierarchical;
   if (max_bin > k_max_representable_bin) {
     throw std::invalid_argument(
         "HierarchicalTimeBinScheduler: max_bin exceeds the 64-bit tick representation limit");
@@ -1265,44 +1273,76 @@ void HierarchicalTimeBinScheduler::reset(
     std::uint8_t initial_bin,
     std::uint64_t start_tick) {
   m_current_tick = start_tick;
-
-  const std::uint8_t clamped_bin = clampBin(initial_bin);
-  m_hot.bin_index.assign(element_count, clamped_bin);
-  m_hot.next_activation_tick.assign(element_count, m_current_tick);
-  m_hot.active_flag.assign(element_count, 0);
-  m_hot.pending_bin_index.assign(element_count, k_unset_pending_bin);
-  m_candidate_bin_index.assign(element_count, k_unset_pending_bin);
-  m_candidate_source.assign(element_count, TimeStepCandidateSource::kUserClamp);
+  m_element_count = element_count;
+  m_representation = m_max_bin == 0U
+      ? SchedulerRepresentation::kUniformRungZero
+      : SchedulerRepresentation::kGenericHierarchical;
+  m_uniform_pending_bin_index = k_unset_pending_bin;
   m_last_reconciliation = {};
   m_substep_open = false;
-
-  m_position_in_bin.resize(element_count, 0);
-  m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
-  for (auto& bin_members : m_elements_by_bin) {
-    bin_members.reserve(element_count / (m_max_bin + 1U) + 1U);
-  }
-
-  for (std::uint32_t element = 0; element < element_count; ++element) {
-    m_position_in_bin[element] = m_elements_by_bin[clamped_bin].size();
-    m_elements_by_bin[clamped_bin].push_back(element);
-  }
-
   m_active_elements.clear();
+  m_active_sort_scratch.clear();
+  m_hot = {};
+  m_elements_by_bin.clear();
+  m_position_in_bin.clear();
+  m_candidate_bin_index.clear();
+  m_candidate_source.clear();
   m_diagnostics = {};
   m_diagnostics.occupancy_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
   m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
-  m_diagnostics.occupancy_by_bin[clamped_bin] = element_count;
+
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    if (initial_bin != 0U) {
+      throw std::invalid_argument("uniform rung-zero scheduler requires initial_bin == 0");
+    }
+    m_active_elements.resize(element_count);
+    std::iota(m_active_elements.begin(), m_active_elements.end(), 0U);
+    m_diagnostics.occupancy_by_bin[0] = element_count;
+    // Permanently release any generic capacity when transitioning to uniform mode.
+    TimeBinHotMetadata{}.bin_index.swap(m_hot.bin_index);
+    TimeBinHotMetadata{}.next_activation_tick.swap(m_hot.next_activation_tick);
+    TimeBinHotMetadata{}.active_flag.swap(m_hot.active_flag);
+    TimeBinHotMetadata{}.pending_bin_index.swap(m_hot.pending_bin_index);
+    std::vector<std::vector<std::uint32_t>>{}.swap(m_elements_by_bin);
+    std::vector<std::size_t>{}.swap(m_position_in_bin);
+    std::vector<std::uint32_t>{}.swap(m_active_sort_scratch);
+    std::vector<std::uint8_t>{}.swap(m_candidate_bin_index);
+    std::vector<TimeStepCandidateSource>{}.swap(m_candidate_source);
+  } else {
+    const std::uint8_t clamped_bin = clampBin(initial_bin);
+    m_hot.bin_index.assign(element_count, clamped_bin);
+    m_hot.next_activation_tick.assign(element_count, m_current_tick);
+    m_hot.active_flag.assign(element_count, 0);
+    m_hot.pending_bin_index.assign(element_count, k_unset_pending_bin);
+    m_candidate_bin_index.assign(element_count, k_unset_pending_bin);
+    m_candidate_source.assign(element_count, TimeStepCandidateSource::kUserClamp);
+    m_position_in_bin.resize(element_count, 0);
+    m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
+    for (std::uint32_t element = 0; element < element_count; ++element) {
+      m_position_in_bin[element] = m_elements_by_bin[clamped_bin].size();
+      m_elements_by_bin[clamped_bin].push_back(element);
+    }
+    m_diagnostics.occupancy_by_bin[clamped_bin] = element_count;
+  }
   refreshOwnedCapacityHighWater();
 }
+
 
 void HierarchicalTimeBinScheduler::planAppendCapacity(
     RetainedCapacityTransaction& plan,
     std::uint32_t new_element_count, std::uint8_t initial_bin) {
   if (new_element_count == 0U) return;
-  const std::size_t target = checkedSizeAdd(m_hot.size(), new_element_count,
+  const std::size_t target = checkedSizeAdd(m_element_count, new_element_count,
       "scheduler population capacity target");
   (void)checkedIntegralNarrow<std::uint32_t>(target,
       "scheduler population capacity index range");
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    if (initial_bin != 0U) {
+      throw std::invalid_argument("uniform rung-zero append requires initial_bin == 0");
+    }
+    plan.add(m_active_elements, target);
+    return;
+  }
   plan.add(m_hot.bin_index, target);
   plan.add(m_hot.next_activation_tick, target);
   plan.add(m_hot.active_flag, target);
@@ -1318,21 +1358,32 @@ void HierarchicalTimeBinScheduler::planAppendCapacity(
       "scheduler bin population capacity target"));
 }
 
+
 void HierarchicalTimeBinScheduler::appendElements(
     std::uint32_t new_element_count,
     std::uint8_t initial_bin,
     std::uint64_t first_activation_tick) {
-  if (new_element_count == 0U) {
+  if (new_element_count == 0U) return;
+  const std::uint32_t old_count = m_element_count;
+  if (new_element_count > std::numeric_limits<std::uint32_t>::max() - old_count) {
+    throw std::overflow_error("HierarchicalTimeBinScheduler::appendElements element count overflow");
+  }
+  const std::uint32_t total_count = old_count + new_element_count;
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    if (initial_bin != 0U || first_activation_tick != m_current_tick) {
+      throw std::invalid_argument(
+          "uniform rung-zero append requires bin 0 and activation at current scheduler tick");
+    }
+    m_active_elements.resize(total_count);
+    for (std::uint32_t element = old_count; element < total_count; ++element) {
+      m_active_elements[element] = element;
+    }
+    m_element_count = total_count;
+    m_diagnostics.occupancy_by_bin[0] = total_count;
+    refreshOwnedCapacityHighWater();
     return;
   }
   const std::uint8_t clamped_bin = clampBin(initial_bin);
-  const std::uint32_t old_count = checkedIntegralNarrow<std::uint32_t>(
-      m_hot.size(), "HierarchicalTimeBinScheduler::appendElements existing element count");
-  const std::uint32_t total_count = old_count + new_element_count;
-  if (total_count < old_count) {
-    throw std::overflow_error("HierarchicalTimeBinScheduler::appendElements element count overflow");
-  }
-
   m_hot.bin_index.resize(total_count, clamped_bin);
   m_hot.next_activation_tick.resize(total_count, first_activation_tick);
   m_hot.active_flag.resize(total_count, 0);
@@ -1340,32 +1391,29 @@ void HierarchicalTimeBinScheduler::appendElements(
   m_position_in_bin.resize(total_count, 0);
   m_candidate_bin_index.resize(total_count, k_unset_pending_bin);
   m_candidate_source.resize(total_count, TimeStepCandidateSource::kUserClamp);
-
-  if (m_elements_by_bin.empty()) {
-    m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
-  }
   for (std::uint32_t element = old_count; element < total_count; ++element) {
     auto& members = m_elements_by_bin[clamped_bin];
     m_position_in_bin[element] = members.size();
     members.push_back(element);
   }
-  if (m_diagnostics.occupancy_by_bin.size() != static_cast<std::size_t>(m_max_bin) + 1U) {
-    m_diagnostics.occupancy_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
-    m_diagnostics.active_count_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, 0U);
-  }
+  m_element_count = total_count;
   m_diagnostics.occupancy_by_bin[clamped_bin] += new_element_count;
   refreshOwnedCapacityHighWater();
   validateInternalState("HierarchicalTimeBinScheduler::appendElements");
 }
 
+
 void HierarchicalTimeBinScheduler::setElementBin(
     std::uint32_t element_index,
     std::uint8_t bin_index,
     std::uint64_t current_tick) {
-  if (element_index >= m_hot.size()) {
-    throw std::out_of_range("element_index out of range");
+  if (element_index >= m_element_count) throw std::out_of_range("element_index out of range");
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    if (bin_index != 0U || current_tick != m_current_tick) {
+      throw std::invalid_argument("uniform rung-zero scheduler cannot commit a nonzero/asynchronous bin");
+    }
+    return;
   }
-
   const std::uint8_t clamped_bin = clampBin(bin_index);
   const std::uint8_t old_bin = m_hot.bin_index[element_index];
   if (old_bin == clamped_bin) {
@@ -1374,16 +1422,15 @@ void HierarchicalTimeBinScheduler::setElementBin(
         (current_tick % period_ticks == 0) ? current_tick : ((current_tick / period_ticks) * period_ticks + period_ticks);
     return;
   }
-
   eraseFromBin(element_index, old_bin);
   insertIntoBin(element_index, clamped_bin);
-
   m_hot.bin_index[element_index] = clamped_bin;
   const std::uint64_t period_ticks = binPeriodTicks(clamped_bin);
   m_hot.next_activation_tick[element_index] =
       (current_tick % period_ticks == 0) ? current_tick : ((current_tick / period_ticks) * period_ticks + period_ticks);
   refreshOwnedCapacityHighWater();
 }
+
 
 void HierarchicalTimeBinScheduler::submitCandidateTimeStep(
     std::uint32_t element_index,
@@ -1406,8 +1453,19 @@ void HierarchicalTimeBinScheduler::submitCandidateBin(
     std::uint8_t target_bin,
     TimeStepCandidateSource source,
     std::string_view label) {
-  if (element_index >= m_hot.size()) {
+  if (element_index >= m_element_count) {
     throw std::out_of_range("element_index out of range");
+  }
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    (void)label;
+    ++m_last_reconciliation.submitted_candidates;
+    ++m_last_reconciliation.elements_with_candidates;
+    const auto source_index = timestepSourceIndex(source);
+    if (source_index < m_last_reconciliation.limiting_candidates_by_source.size()) {
+      ++m_last_reconciliation.limiting_candidates_by_source[source_index];
+      m_last_reconciliation.dominant_limiting_source = source;
+    }
+    return;
   }
   if (m_candidate_bin_index.size() != m_hot.size()) {
     m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
@@ -1427,6 +1485,14 @@ void HierarchicalTimeBinScheduler::submitCandidateBin(
 }
 
 TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTransitions() {
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    TimeStepReconciliationResult result = m_last_reconciliation;
+    // Rung zero has no representable transition. Candidate diagnostics remain
+    // aggregate-only; no transition request is committed or stored per element.
+    result.committed_transition_requests = 0U;
+    m_last_reconciliation = {};
+    return result;
+  }
   if (m_candidate_bin_index.size() != m_hot.size()) {
     m_candidate_bin_index.assign(m_hot.size(), k_unset_pending_bin);
     m_candidate_source.assign(m_hot.size(), TimeStepCandidateSource::kUserClamp);
@@ -1462,10 +1528,11 @@ TimeStepReconciliationResult HierarchicalTimeBinScheduler::reconcileCandidateTra
 void HierarchicalTimeBinScheduler::requestBinTransition(
     std::uint32_t element_index,
     std::uint8_t target_bin) {
-  if (element_index >= m_hot.size()) {
+  if (element_index >= m_element_count) {
     throw std::out_of_range("element_index out of range");
   }
   validateTransitionRequest(element_index, target_bin, "HierarchicalTimeBinScheduler::requestBinTransition");
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) return;
   m_hot.pending_bin_index[element_index] = clampBin(target_bin);
 }
 
@@ -1477,9 +1544,26 @@ std::uint64_t HierarchicalTimeBinScheduler::currentTick() const noexcept { retur
 
 std::uint8_t HierarchicalTimeBinScheduler::maxBin() const noexcept { return m_max_bin; }
 
-std::uint32_t HierarchicalTimeBinScheduler::elementCount() const noexcept {
-  return checkedIntegralNarrow<std::uint32_t>(
-      m_hot.size(), "HierarchicalTimeBinScheduler::elementCount");
+std::uint32_t HierarchicalTimeBinScheduler::elementCount() const noexcept { return m_element_count; }
+
+std::uint8_t HierarchicalTimeBinScheduler::binIndex(std::uint32_t element_index) const {
+  if (element_index >= m_element_count) throw std::out_of_range("scheduler element index out of range");
+  return m_representation == SchedulerRepresentation::kUniformRungZero ? 0U : m_hot.bin_index[element_index];
+}
+
+std::uint64_t HierarchicalTimeBinScheduler::nextActivationTick(std::uint32_t element_index) const {
+  if (element_index >= m_element_count) throw std::out_of_range("scheduler element index out of range");
+  return m_representation == SchedulerRepresentation::kUniformRungZero ? m_current_tick : m_hot.next_activation_tick[element_index];
+}
+
+bool HierarchicalTimeBinScheduler::isElementActive(std::uint32_t element_index) const {
+  if (element_index >= m_element_count) throw std::out_of_range("scheduler element index out of range");
+  return m_representation == SchedulerRepresentation::kUniformRungZero ? m_substep_open : m_hot.active_flag[element_index] != 0U;
+}
+
+std::uint8_t HierarchicalTimeBinScheduler::pendingBinIndex(std::uint32_t element_index) const {
+  if (element_index >= m_element_count) throw std::out_of_range("scheduler element index out of range");
+  return m_representation == SchedulerRepresentation::kUniformRungZero ? m_uniform_pending_bin_index : m_hot.pending_bin_index[element_index];
 }
 
 bool HierarchicalTimeBinScheduler::isBinActiveAtTick(std::uint8_t bin_index, std::uint64_t tick) const {
@@ -1501,7 +1585,14 @@ std::span<const std::uint32_t> HierarchicalTimeBinScheduler::beginSubstep() {
 #ifndef NDEBUG
   validateInternalState("HierarchicalTimeBinScheduler::beginSubstep");
 #endif
-  rebuildActiveSet();
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    m_diagnostics.active_elements = m_element_count;
+    m_diagnostics.active_fraction = m_element_count == 0U ? 0.0 : 1.0;
+    m_diagnostics.active_count_by_bin[0] = m_element_count;
+    m_diagnostics.occupancy_by_bin[0] = m_element_count;
+  } else {
+    rebuildActiveSet();
+  }
   refreshOwnedCapacityHighWater();
   m_substep_open = true;
 #ifndef NDEBUG
@@ -1522,6 +1613,13 @@ void HierarchicalTimeBinScheduler::endSubstep() {
         "global integer time cannot advance monotonically without overflowing",
         "HierarchicalTimeBinScheduler::endSubstep",
         m_current_tick));
+  }
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    (void)reconcileCandidateTransitions();
+    ++m_current_tick;
+    m_substep_open = false;
+    refreshOwnedCapacityHighWater();
+    return;
   }
   for (const std::uint32_t element : m_active_elements) {
     const std::uint64_t period_ticks = binPeriodTicks(m_hot.bin_index[element]);
@@ -1652,10 +1750,17 @@ TimeBinPersistentState HierarchicalTimeBinScheduler::exportPersistentState() con
   TimeBinPersistentState persistent_state;
   persistent_state.current_tick = m_current_tick;
   persistent_state.max_bin = m_max_bin;
-  persistent_state.bin_index = m_hot.bin_index;
-  persistent_state.next_activation_tick = m_hot.next_activation_tick;
-  persistent_state.active_flag = m_hot.active_flag;
-  persistent_state.pending_bin_index = m_hot.pending_bin_index;
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    persistent_state.bin_index.assign(m_element_count, 0U);
+    persistent_state.next_activation_tick.assign(m_element_count, m_current_tick);
+    persistent_state.active_flag.assign(m_element_count, m_substep_open ? 1U : 0U);
+    persistent_state.pending_bin_index.assign(m_element_count, m_uniform_pending_bin_index);
+  } else {
+    persistent_state.bin_index = m_hot.bin_index;
+    persistent_state.next_activation_tick = m_hot.next_activation_tick;
+    persistent_state.active_flag = m_hot.active_flag;
+    persistent_state.pending_bin_index = m_hot.pending_bin_index;
+  }
   return persistent_state;
 }
 
@@ -1687,8 +1792,46 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
     }
   }
 
+  const std::uint8_t uniform_pending_bin = persistent_state.pending_bin_index.empty()
+      ? k_unset_pending_bin
+      : persistent_state.pending_bin_index.front();
+  const bool uniform_rung_zero = persistent_state.max_bin == 0U &&
+      (uniform_pending_bin == k_unset_pending_bin || uniform_pending_bin == 0U) &&
+      std::all_of(persistent_state.bin_index.begin(), persistent_state.bin_index.end(), [](std::uint8_t v) { return v == 0U; }) &&
+      std::all_of(persistent_state.next_activation_tick.begin(), persistent_state.next_activation_tick.end(),
+                  [&](std::uint64_t tick) { return tick == persistent_state.current_tick; }) &&
+      std::all_of(persistent_state.active_flag.begin(), persistent_state.active_flag.end(), [](std::uint8_t v) { return v == 0U; }) &&
+      std::all_of(persistent_state.pending_bin_index.begin(), persistent_state.pending_bin_index.end(),
+                  [&](std::uint8_t v) { return v == uniform_pending_bin; });
+  if (uniform_rung_zero) {
+    m_max_bin = 0U;
+    m_representation = SchedulerRepresentation::kUniformRungZero;
+    m_uniform_pending_bin_index = uniform_pending_bin;
+    m_current_tick = persistent_state.current_tick;
+    m_element_count = checkedIntegralNarrow<std::uint32_t>(persistent_state.bin_index.size(), "uniform scheduler import element count");
+    m_hot = {};
+    m_elements_by_bin.clear(); std::vector<std::vector<std::uint32_t>>{}.swap(m_elements_by_bin);
+    m_position_in_bin.clear(); std::vector<std::size_t>{}.swap(m_position_in_bin);
+    m_active_sort_scratch.clear(); std::vector<std::uint32_t>{}.swap(m_active_sort_scratch);
+    m_candidate_bin_index.clear(); std::vector<std::uint8_t>{}.swap(m_candidate_bin_index);
+    m_candidate_source.clear(); std::vector<TimeStepCandidateSource>{}.swap(m_candidate_source);
+    m_active_elements.resize(m_element_count);
+    std::iota(m_active_elements.begin(), m_active_elements.end(), 0U);
+    m_substep_open = false;
+    m_last_reconciliation = {};
+    m_diagnostics = {};
+    m_diagnostics.occupancy_by_bin.assign(1U, m_element_count);
+    m_diagnostics.active_count_by_bin.assign(1U, 0U);
+    refreshOwnedCapacityHighWater();
+    validateInternalState("HierarchicalTimeBinScheduler::importPersistentState.uniform");
+    return;
+  }
+
   m_current_tick = persistent_state.current_tick;
   m_max_bin = persistent_state.max_bin;
+  m_representation = SchedulerRepresentation::kGenericHierarchical;
+  m_uniform_pending_bin_index = k_unset_pending_bin;
+  m_element_count = checkedIntegralNarrow<std::uint32_t>(persistent_state.bin_index.size(), "scheduler import element count");
   m_hot.bin_index = persistent_state.bin_index;
   m_hot.next_activation_tick = persistent_state.next_activation_tick;
   m_hot.active_flag = persistent_state.active_flag;
@@ -1723,6 +1866,26 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
 }
 
 void HierarchicalTimeBinScheduler::validateInternalState(std::string_view source_label) const {
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    if (m_max_bin != 0U || m_active_elements.size() != m_element_count ||
+        !m_hot.bin_index.empty() || !m_hot.next_activation_tick.empty() ||
+        !m_hot.active_flag.empty() || !m_hot.pending_bin_index.empty() ||
+        !m_elements_by_bin.empty() || !m_position_in_bin.empty() ||
+        !m_active_sort_scratch.empty() || !m_candidate_bin_index.empty() || !m_candidate_source.empty()) {
+      throw std::runtime_error(schedulerContextMessage(
+          "uniform rung-zero physical representation invariant violated", source_label, m_current_tick));
+    }
+    for (std::uint32_t i = 0; i < m_element_count; ++i) {
+      if (m_active_elements[i] != i) {
+        throw std::runtime_error(schedulerContextMessage(
+            "uniform rung-zero active identity lane is not canonical", source_label, m_current_tick));
+      }
+    }
+    return;
+  }
+  if (m_hot.size() != m_element_count) {
+    throw std::runtime_error(schedulerContextMessage("generic scheduler element count mismatch", source_label, m_current_tick));
+  }
   if (m_hot.bin_index.size() != m_hot.next_activation_tick.size() ||
       m_hot.bin_index.size() != m_hot.active_flag.size() ||
       m_hot.bin_index.size() != m_hot.pending_bin_index.size()) {
@@ -1803,8 +1966,11 @@ void HierarchicalTimeBinScheduler::validateTransitionRequest(
     std::uint32_t element_index,
     std::uint8_t target_bin,
     std::string_view source_label) const {
-  if (element_index >= m_hot.size()) {
+  if (element_index >= m_element_count) {
     throw std::out_of_range("element_index out of range");
+  }
+  if (m_representation == SchedulerRepresentation::kUniformRungZero && target_bin != 0U) {
+    throw std::invalid_argument("uniform rung-zero scheduler rejects nonzero transition");
   }
   (void)target_bin;
   (void)source_label;
@@ -2005,11 +2171,9 @@ std::vector<TimeBinSchedulerIdentityRecord> exportParticleSchedulerIdentityRecor
     const HierarchicalTimeBinScheduler& scheduler,
     const SimulationState& state,
     std::span<const std::uint32_t> particle_indices) {
-  const auto persistent = scheduler.exportPersistentState();
-  validatePersistentStateShapeForRemap(
-      persistent,
-      state.particles.size(),
-      "exportParticleSchedulerIdentityRecords");
+  if (scheduler.elementCount() != state.particles.size()) {
+    throw std::invalid_argument("exportParticleSchedulerIdentityRecords: scheduler size mismatch");
+  }
   std::vector<TimeBinSchedulerIdentityRecord> records;
   records.reserve(particle_indices.size());
   for (const std::uint32_t particle_index : particle_indices) {
@@ -2018,9 +2182,9 @@ std::vector<TimeBinSchedulerIdentityRecord> exportParticleSchedulerIdentityRecor
     }
     records.push_back(TimeBinSchedulerIdentityRecord{
         .element_id = state.particle_sidecar.particle_id[particle_index],
-        .bin_index = persistent.bin_index[particle_index],
-        .next_activation_tick = persistent.next_activation_tick[particle_index],
-        .pending_bin_index = persistent.pending_bin_index[particle_index],
+        .bin_index = scheduler.binIndex(particle_index),
+        .next_activation_tick = scheduler.nextActivationTick(particle_index),
+        .pending_bin_index = scheduler.pendingBinIndex(particle_index),
     });
   }
   return records;
@@ -2035,11 +2199,9 @@ void attachSchedulerFieldsToParticleMigrationRecords(
     throw std::invalid_argument(
         "attachSchedulerFieldsToParticleMigrationRecords: particle_indices and records sizes must match");
   }
-  const auto persistent = scheduler.exportPersistentState();
-  validatePersistentStateShapeForRemap(
-      persistent,
-      state.particles.size(),
-      "attachSchedulerFieldsToParticleMigrationRecords");
+  if (scheduler.elementCount() != state.particles.size()) {
+    throw std::invalid_argument("attachSchedulerFieldsToParticleMigrationRecords: scheduler size mismatch");
+  }
   for (std::size_t i = 0; i < particle_indices.size(); ++i) {
     const std::uint32_t particle_index = particle_indices[i];
     if (particle_index >= state.particles.size()) {
@@ -2233,11 +2395,9 @@ std::vector<TimeBinSchedulerIdentityRecord> exportGasCellSchedulerIdentityRecord
     const SimulationState& state,
     std::span<const std::uint32_t> cell_indices) {
   state.requireGasCellIdentityMapCoversDenseRows("exportGasCellSchedulerIdentityRecords");
-  const TimeBinPersistentState persistent = scheduler.exportPersistentState();
-  validatePersistentStateShapeForRemap(
-      persistent,
-      state.cells.size(),
-      "exportGasCellSchedulerIdentityRecords");
+  if (scheduler.elementCount() != state.cells.size()) {
+    throw std::invalid_argument("exportGasCellSchedulerIdentityRecords: scheduler size mismatch");
+  }
   std::vector<TimeBinSchedulerIdentityRecord> records;
   records.reserve(cell_indices.size());
   for (const std::uint32_t cell_row : cell_indices) {
@@ -2250,9 +2410,9 @@ std::vector<TimeBinSchedulerIdentityRecord> exportGasCellSchedulerIdentityRecord
     }
     records.push_back(TimeBinSchedulerIdentityRecord{
         .element_id = *gas_cell_id,
-        .bin_index = persistent.bin_index[cell_row],
-        .next_activation_tick = persistent.next_activation_tick[cell_row],
-        .pending_bin_index = persistent.pending_bin_index[cell_row],
+        .bin_index = scheduler.binIndex(cell_row),
+        .next_activation_tick = scheduler.nextActivationTick(cell_row),
+        .pending_bin_index = scheduler.pendingBinIndex(cell_row),
     });
   }
   return records;
@@ -2282,13 +2442,11 @@ void syncGasCellTimeBinMirrorsFromGasCellScheduler(
     return;
   }
   state.requireGasCellIdentityMapCoversDenseRows("syncGasCellTimeBinMirrorsFromGasCellScheduler");
-  const TimeBinPersistentState persistent = scheduler.exportPersistentState();
-  validatePersistentStateShapeForRemap(
-      persistent,
-      state.cells.size(),
-      "syncGasCellTimeBinMirrorsFromGasCellScheduler");
+  if (scheduler.elementCount() != state.cells.size()) {
+    throw std::invalid_argument("syncGasCellTimeBinMirrorsFromGasCellScheduler: scheduler size mismatch");
+  }
   for (std::size_t cell_row = 0; cell_row < state.cells.size(); ++cell_row) {
-    state.cells.time_bin[cell_row] = persistent.bin_index[cell_row];
+    state.cells.time_bin[cell_row] = scheduler.binIndex(checkedLocalCellRow(cell_row, "sync gas scheduler row"));
   }
 }
 
@@ -2299,8 +2457,7 @@ void syncGasCellTimeBinMirrorsFromParticleScheduler(
     return;
   }
   state.requireGasCellIdentityMapCoversDenseRows("syncGasCellTimeBinMirrorsFromParticleScheduler");
-  const auto persistent = scheduler.exportPersistentState();
-  if (persistent.bin_index.size() < state.particles.size()) {
+  if (scheduler.elementCount() < state.particles.size()) {
     throw std::invalid_argument("syncGasCellTimeBinMirrorsFromParticleScheduler: scheduler lacks particle bin entries");
   }
   for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
@@ -2318,7 +2475,7 @@ void syncGasCellTimeBinMirrorsFromParticleScheduler(
     const std::uint32_t particle_index = checkedLocalParticleRow(
         static_cast<std::size_t>(particle_distance),
         "syncGasCellTimeBinMirrorsFromParticleScheduler parent row");
-    state.cells.time_bin[cell_index] = persistent.bin_index[particle_index];
+    state.cells.time_bin[cell_index] = scheduler.binIndex(particle_index);
   }
 }
 
@@ -2326,13 +2483,13 @@ void syncTimeBinMirrorsFromScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
     SimulationState& state,
     TimeBinMirrorDomain domain) {
-  const auto persistent = scheduler.exportPersistentState();
   auto sync_particles = [&]() {
-    if (persistent.bin_index.size() < state.particles.size()) {
+    if (state.hasHomogeneousDmoMetadata()) return;
+    if (scheduler.elementCount() < state.particles.size()) {
       throw std::invalid_argument("syncTimeBinMirrorsFromScheduler: scheduler lacks particle bin entries");
     }
     for (std::size_t i = 0; i < state.particles.size(); ++i) {
-      state.particles.time_bin[i] = persistent.bin_index[i];
+      state.particles.time_bin[i] = scheduler.binIndex(checkedLocalParticleRow(i, "sync particle scheduler row"));
     }
   };
   auto sync_cells = [&]() {
@@ -2357,13 +2514,12 @@ bool timeBinMirrorsMatchScheduler(
     const HierarchicalTimeBinScheduler& scheduler,
     const SimulationState& state,
     TimeBinMirrorDomain domain) {
-  const auto& hot = scheduler.hotMetadata();
   auto particles_match = [&]() {
-    if (hot.bin_index.size() < state.particles.size()) {
+    if (scheduler.elementCount() < state.particles.size()) {
       return false;
     }
     for (std::size_t i = 0; i < state.particles.size(); ++i) {
-      if (state.particles.time_bin[i] != hot.bin_index[i]) {
+      if (state.particleTimeBin(i) != scheduler.binIndex(checkedLocalParticleRow(i, "timeBinMirrorsMatchScheduler particle row"))) {
         return false;
       }
     }
@@ -2376,7 +2532,7 @@ bool timeBinMirrorsMatchScheduler(
     if (!state.gas_cell_identity.isConsistent() || !state.gas_cell_identity.coversDenseLocalRows(state.cells.size())) {
       return false;
     }
-    if (hot.bin_index.size() < state.particles.size()) {
+    if (scheduler.elementCount() < state.particles.size()) {
       return false;
     }
     for (std::uint32_t i = 0; i < state.cells.size(); ++i) {
@@ -2394,7 +2550,7 @@ bool timeBinMirrorsMatchScheduler(
       const std::uint32_t particle_index = checkedLocalParticleRow(
           static_cast<std::size_t>(particle_distance),
           "timeBinMirrorsMatchScheduler parent row");
-      if (state.cells.time_bin[i] != hot.bin_index[particle_index]) {
+      if (state.cells.time_bin[i] != scheduler.binIndex(particle_index)) {
         return false;
       }
     }
@@ -2416,15 +2572,14 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
     const HierarchicalTimeBinScheduler& scheduler,
     const SimulationState& state,
     TimeBinMirrorDomain domain) {
-  const auto& hot = scheduler.hotMetadata();
   const auto throw_particle = [&](std::uint32_t index) {
     throw std::runtime_error(timeBinContextMessage(
         "time_bin mirror authority invariant violated for particle mirror",
         "debugAssertTimeBinMirrorAuthorityInvariant",
         scheduler.currentTick(),
         index,
-        index < hot.bin_index.size() ? hot.bin_index[index] : 0,
-        index < hot.next_activation_tick.size() ? hot.next_activation_tick[index] : scheduler.currentTick()));
+        index < scheduler.elementCount() ? scheduler.binIndex(index) : 0,
+        index < scheduler.elementCount() ? scheduler.nextActivationTick(index) : scheduler.currentTick()));
   };
   const auto throw_cell = [&](std::uint32_t index) {
     throw std::runtime_error(timeBinContextMessage(
@@ -2432,22 +2587,22 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
         "debugAssertTimeBinMirrorAuthorityInvariant",
         scheduler.currentTick(),
         index,
-        index < hot.bin_index.size() ? hot.bin_index[index] : 0,
-        index < hot.next_activation_tick.size() ? hot.next_activation_tick[index] : scheduler.currentTick()));
+        index < scheduler.elementCount() ? scheduler.binIndex(index) : 0,
+        index < scheduler.elementCount() ? scheduler.nextActivationTick(index) : scheduler.currentTick()));
   };
   if ((domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
-      hot.bin_index.size() < state.particles.size()) {
+      scheduler.elementCount() < state.particles.size()) {
     throw_particle(checkedLocalParticleRow(
-        hot.bin_index.size(), "debugAssertTimeBinMirrorAuthorityInvariant particle scheduler size"));
+        scheduler.elementCount(), "debugAssertTimeBinMirrorAuthorityInvariant particle scheduler size"));
   }
   if ((domain == TimeBinMirrorDomain::kCells || domain == TimeBinMirrorDomain::kParticlesAndCells) &&
-      hot.bin_index.size() < state.cells.size()) {
+      scheduler.elementCount() < state.cells.size()) {
     throw_cell(checkedLocalCellRow(
-        hot.bin_index.size(), "debugAssertTimeBinMirrorAuthorityInvariant cell scheduler size"));
+        scheduler.elementCount(), "debugAssertTimeBinMirrorAuthorityInvariant cell scheduler size"));
   }
   if (domain == TimeBinMirrorDomain::kParticles || domain == TimeBinMirrorDomain::kParticlesAndCells) {
     for (std::uint32_t i = 0; i < state.particles.size(); ++i) {
-      if (state.particles.time_bin[i] != hot.bin_index[i]) {
+      if (state.particleTimeBin(i) != scheduler.binIndex(checkedLocalParticleRow(i, "timeBinMirrorsMatchScheduler particle row"))) {
         throw_particle(i);
       }
     }

@@ -23,7 +23,8 @@ bool ParticleSoa::isConsistent() const noexcept {
   const std::size_t expected = position_x_comoving.size();
   if (position_y_comoving.size() != expected || position_z_comoving.size() != expected ||
       velocity_x_peculiar.size() != expected || velocity_y_peculiar.size() != expected ||
-      velocity_z_peculiar.size() != expected || mass_code.size() != expected || time_bin.size() != expected) {
+      velocity_z_peculiar.size() != expected || mass_code.size() != expected ||
+      (!time_bin.empty() && time_bin.size() != expected)) {
     return false;
   }
   for (std::size_t i = 0; i < expected; ++i) {
@@ -64,22 +65,28 @@ std::size_t ParticleSidecar::size() const noexcept { return particle_id.size(); 
 
 bool ParticleSidecar::isConsistent() const noexcept {
   const std::size_t expected = particle_id.size();
-  if (sfc_key.size() != expected || species_tag.size() != expected || particle_flags.size() != expected ||
-      owning_rank.size() != expected ||
-      last_drift_time_code.size() != expected || last_drift_scale_factor.size() != expected ||
+  if ((!sfc_key.empty() && sfc_key.size() != expected) ||
+      (!species_tag.empty() && species_tag.size() != expected) ||
+      (!particle_flags.empty() && particle_flags.size() != expected) ||
+      (!owning_rank.empty() && owning_rank.size() != expected) ||
+      (!last_drift_time_code.empty() && last_drift_time_code.size() != expected) ||
+      (!last_drift_scale_factor.empty() && last_drift_scale_factor.size() != expected) ||
       (!gravity_softening_comoving.empty() && gravity_softening_comoving.size() != expected) ||
       (!has_gravity_softening_override.empty() && has_gravity_softening_override.size() != expected) ||
       (!has_gravity_softening_override.empty() && gravity_softening_comoving.empty())) {
     return false;
   }
-  for (std::size_t i = 0; i < expected; ++i) {
+  if (last_drift_time_code.size() != last_drift_scale_factor.size()) return false;
+  for (std::size_t i = 0; i < last_drift_time_code.size(); ++i) {
     if (!std::isfinite(last_drift_time_code[i]) || !std::isfinite(last_drift_scale_factor[i]) ||
         last_drift_scale_factor[i] <= 0.0) {
       return false;
     }
+  }
+  for (std::size_t i = 0; i < gravity_softening_comoving.size(); ++i) {
     const bool has_softening_override =
         !has_gravity_softening_override.empty() && has_gravity_softening_override[i] != 0U;
-    if (!gravity_softening_comoving.empty() && has_softening_override &&
+    if (has_softening_override &&
         (!std::isfinite(gravity_softening_comoving[i]) || !(gravity_softening_comoving[i] > 0.0))) {
       return false;
     }

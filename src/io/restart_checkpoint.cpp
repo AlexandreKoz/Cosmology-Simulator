@@ -250,12 +250,12 @@ void validateRestartTimeBinMirrorsAgainstScheduler(
     std::string_view context) {
   validateSchedulerPersistentStateForRestart(
       scheduler_state, state.particles.size(), context, "/scheduler");
-  if (state.particles.time_bin.size() != scheduler_state.bin_index.size()) {
+  if (state.particles.size() != scheduler_state.bin_index.size()) {
     throw std::invalid_argument(
-        std::string(context) + ": /state/particles/time_bin length must match /scheduler/bin_index length");
+        std::string(context) + ": logical particle time_bin length must match /scheduler/bin_index length");
   }
-  for (std::size_t i = 0; i < state.particles.time_bin.size(); ++i) {
-    if (state.particles.time_bin[i] != scheduler_state.bin_index[i]) {
+  for (std::size_t i = 0; i < state.particles.size(); ++i) {
+    if (state.particleTimeBin(i) != scheduler_state.bin_index[i]) {
       throw std::invalid_argument(
           std::string(context) + ": /state/particles/time_bin is stale relative to /scheduler/bin_index");
     }
@@ -981,6 +981,32 @@ void writeDataset1d(
     hid_t memory_type,
     const std::vector<T, Allocator>& values) {
   writeDataset1d<T>(group, name, file_type, memory_type, std::span<const T>(values.data(), values.size()));
+}
+
+
+template <typename T>
+void writeUniformDataset1d(
+    hid_t group, std::string_view name, hid_t file_type, hid_t memory_type,
+    std::size_t count, T value) {
+  hsize_t dims[1] = {static_cast<hsize_t>(count)};
+  Hdf5Handle space(H5Screate_simple(1, dims, nullptr));
+  Hdf5Handle dataset(H5Dcreate2(group, std::string(name).c_str(), file_type, space.get(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT));
+  if (!dataset.valid()) throw std::runtime_error("failed creating dataset: " + std::string(name));
+  constexpr std::size_t k_chunk_elements = 64U * 1024U;
+  std::vector<T> chunk(std::min(count, k_chunk_elements), value);
+  for (std::size_t offset = 0; offset < count; offset += chunk.size()) {
+    const std::size_t n = std::min(chunk.size(), count - offset);
+    hsize_t start[1] = {static_cast<hsize_t>(offset)};
+    hsize_t extent[1] = {static_cast<hsize_t>(n)};
+    Hdf5Handle file_space(H5Dget_space(dataset.get()));
+    if (!file_space.valid() || H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, start, nullptr, extent, nullptr) < 0) {
+      throw std::runtime_error("failed selecting uniform dataset hyperslab: " + std::string(name));
+    }
+    Hdf5Handle memory_space(H5Screate_simple(1, extent, nullptr));
+    if (!memory_space.valid() || H5Dwrite(dataset.get(), memory_type, memory_space.get(), file_space.get(), H5P_DEFAULT, chunk.data()) < 0) {
+      throw std::runtime_error("failed writing uniform dataset: " + std::string(name));
+    }
+  }
 }
 
 // Read directly into the destination allocator. In particular, an aligned
@@ -1825,16 +1851,35 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(particles_group.get(), "velocity_y_peculiar", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particles.velocity_y_peculiar);
   writeDataset1d(particles_group.get(), "velocity_z_peculiar", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particles.velocity_z_peculiar);
   writeDataset1d(particles_group.get(), "mass_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particles.mass_code);
-  writeDataset1d(particles_group.get(), "time_bin", H5T_STD_U8LE, H5T_NATIVE_UINT8, state.particles.time_bin);
+  if (state.hasHomogeneousDmoMetadata()) {
+    writeUniformDataset1d(particles_group.get(), "time_bin", H5T_STD_U8LE, H5T_NATIVE_UINT8, state.particles.size(), static_cast<std::uint8_t>(0U));
+  } else {
+    writeDataset1d(particles_group.get(), "time_bin", H5T_STD_U8LE, H5T_NATIVE_UINT8, state.particles.time_bin);
+  }
 
   Hdf5Handle particle_sidecar_group(openOrCreateGroup(state_group.get(), "particle_sidecar"));
   writeDataset1d(particle_sidecar_group.get(), "particle_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.particle_sidecar.particle_id);
-  writeDataset1d(particle_sidecar_group.get(), "sfc_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.particle_sidecar.sfc_key);
-  writeDataset1d(particle_sidecar_group.get(), "species_tag", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.species_tag);
-  writeDataset1d(particle_sidecar_group.get(), "particle_flags", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.particle_flags);
-  writeDataset1d(particle_sidecar_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.owning_rank);
-  writeDataset1d(particle_sidecar_group.get(), "last_drift_time_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particle_sidecar.last_drift_time_code);
-  writeDataset1d(particle_sidecar_group.get(), "last_drift_scale_factor", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particle_sidecar.last_drift_scale_factor);
+  if (state.hasHomogeneousDmoMetadata()) {
+    const std::size_t n = state.particles.size();
+    const std::size_t probe = 0U;
+    if (state.particle_sidecar.sfc_key.empty()) {
+      writeUniformDataset1d(particle_sidecar_group.get(), "sfc_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, n, n == 0U ? 0ULL : state.particleSfcKey(probe));
+    } else {
+      writeDataset1d(particle_sidecar_group.get(), "sfc_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.particle_sidecar.sfc_key);
+    }
+    writeUniformDataset1d(particle_sidecar_group.get(), "species_tag", H5T_STD_U32LE, H5T_NATIVE_UINT32, n, n == 0U ? static_cast<std::uint32_t>(core::ParticleSpecies::kDarkMatter) : state.particleSpeciesTag(probe));
+    writeUniformDataset1d(particle_sidecar_group.get(), "particle_flags", H5T_STD_U32LE, H5T_NATIVE_UINT32, n, n == 0U ? 0U : state.particleFlags(probe));
+    writeUniformDataset1d(particle_sidecar_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, n, n == 0U ? 0U : state.particleOwningRank(probe));
+    writeUniformDataset1d(particle_sidecar_group.get(), "last_drift_time_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, n, n == 0U ? 0.0 : state.particleLastDriftTimeCode(probe));
+    writeUniformDataset1d(particle_sidecar_group.get(), "last_drift_scale_factor", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, n, n == 0U ? 1.0 : state.particleLastDriftScaleFactor(probe));
+  } else {
+    writeDataset1d(particle_sidecar_group.get(), "sfc_key", H5T_STD_U64LE, H5T_NATIVE_UINT64, state.particle_sidecar.sfc_key);
+    writeDataset1d(particle_sidecar_group.get(), "species_tag", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.species_tag);
+    writeDataset1d(particle_sidecar_group.get(), "particle_flags", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.particle_flags);
+    writeDataset1d(particle_sidecar_group.get(), "owning_rank", H5T_STD_U32LE, H5T_NATIVE_UINT32, state.particle_sidecar.owning_rank);
+    writeDataset1d(particle_sidecar_group.get(), "last_drift_time_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particle_sidecar.last_drift_time_code);
+    writeDataset1d(particle_sidecar_group.get(), "last_drift_scale_factor", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particle_sidecar.last_drift_scale_factor);
+  }
   writeDataset1d(
       particle_sidecar_group.get(),
       "gravity_softening_comoving",
@@ -2593,7 +2638,14 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
     validateGravityForceCacheForRestart(
         gravity_force_cache, *payload.persistent_state.simulation_state, "restart payload");
   }
-  const core::TimeBinPersistentState scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  const bool uniform_particle_scheduler =
+      payload.scheduler->representation() == core::SchedulerRepresentation::kUniformRungZero;
+  core::TimeBinPersistentState scheduler_state_for_validation;
+  scheduler_state_for_validation.current_tick = payload.scheduler->currentTick();
+  scheduler_state_for_validation.max_bin = payload.scheduler->maxBin();
+  if (!uniform_particle_scheduler) {
+    scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  }
   const core::TimeBinPersistentState gas_cell_scheduler_state_for_validation =
       payload.gas_cell_scheduler != nullptr
           ? payload.gas_cell_scheduler->exportPersistentState()
@@ -2605,10 +2657,22 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   if (gas_cell_scheduler_state_for_validation.current_tick != scheduler_state_for_validation.current_tick) {
     throw std::invalid_argument("restart payload particle and gas-cell schedulers must share current_tick");
   }
-  validateRestartTimeBinMirrorsAgainstScheduler(
-      *payload.persistent_state.simulation_state,
-      scheduler_state_for_validation,
-      "restart payload");
+  if (uniform_particle_scheduler) {
+    if (payload.scheduler->elementCount() != payload.persistent_state.simulation_state->particles.size() ||
+        payload.scheduler->maxBin() != 0U) {
+      throw std::invalid_argument("restart payload uniform particle scheduler extent/rung contract is invalid");
+    }
+    for (std::size_t i = 0; i < payload.persistent_state.simulation_state->particles.size(); ++i) {
+      if (payload.persistent_state.simulation_state->particleTimeBin(i) != payload.scheduler->binIndex(static_cast<std::uint32_t>(i))) {
+        throw std::invalid_argument("restart payload particle time_bin mirror is stale relative to uniform scheduler authority");
+      }
+    }
+  } else {
+    validateRestartTimeBinMirrorsAgainstScheduler(
+        *payload.persistent_state.simulation_state,
+        scheduler_state_for_validation,
+        "restart payload");
+  }
   validateGasCellTimeBinMirrorsAgainstScheduler(
       *payload.persistent_state.simulation_state,
       gas_cell_scheduler_state_for_validation,
@@ -2669,6 +2733,18 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
     }
   };
 
+
+  const auto append_logical_lane = [&hash, &strong_hash, &append_u64](std::size_t count, auto getter) {
+    using Value = std::decay_t<decltype(getter(std::size_t{}))>;
+    append_u64(static_cast<std::uint64_t>(count));
+    append_u64(static_cast<std::uint64_t>(count) * sizeof(Value));
+    for (std::size_t i = 0; i < count; ++i) {
+      const Value value = getter(i);
+      hash = fnv1aAppend(hash, {reinterpret_cast<const std::byte*>(&value), sizeof(Value)});
+      appendCanonicalSha256(strong_hash, value);
+    }
+  };
+
   const core::SimulationState& state = *payload.persistent_state.simulation_state;
   append_any_vec(state.particles.position_x_comoving);
   append_any_vec(state.particles.position_y_comoving);
@@ -2677,14 +2753,27 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   append_any_vec(state.particles.velocity_y_peculiar);
   append_any_vec(state.particles.velocity_z_peculiar);
   append_any_vec(state.particles.mass_code);
-  append_any_vec(state.particles.time_bin);
+  if (state.hasHomogeneousDmoMetadata()) {
+    append_logical_lane(state.particles.size(), [&](std::size_t i) { return state.particleTimeBin(i); });
+  } else {
+    append_any_vec(state.particles.time_bin);
+  }
   append_any_vec(state.particle_sidecar.particle_id);
-  append_any_vec(state.particle_sidecar.sfc_key);
-  append_any_vec(state.particle_sidecar.species_tag);
-  append_any_vec(state.particle_sidecar.particle_flags);
-  append_any_vec(state.particle_sidecar.owning_rank);
-  append_any_vec(state.particle_sidecar.last_drift_time_code);
-  append_any_vec(state.particle_sidecar.last_drift_scale_factor);
+  if (state.hasHomogeneousDmoMetadata()) {
+    append_logical_lane(state.particles.size(), [&](std::size_t i) { return state.particleSfcKey(i); });
+    append_logical_lane(state.particles.size(), [&](std::size_t i) { return state.particleSpeciesTag(i); });
+    append_logical_lane(state.particles.size(), [&](std::size_t i) { return state.particleFlags(i); });
+    append_logical_lane(state.particles.size(), [&](std::size_t i) { return state.particleOwningRank(i); });
+    append_logical_lane(state.particles.size(), [&](std::size_t i) { return state.particleLastDriftTimeCode(i); });
+    append_logical_lane(state.particles.size(), [&](std::size_t i) { return state.particleLastDriftScaleFactor(i); });
+  } else {
+    append_any_vec(state.particle_sidecar.sfc_key);
+    append_any_vec(state.particle_sidecar.species_tag);
+    append_any_vec(state.particle_sidecar.particle_flags);
+    append_any_vec(state.particle_sidecar.owning_rank);
+    append_any_vec(state.particle_sidecar.last_drift_time_code);
+    append_any_vec(state.particle_sidecar.last_drift_scale_factor);
+  }
   append_any_vec(state.particle_sidecar.gravity_softening_comoving);
   append_any_vec(state.particle_sidecar.has_gravity_softening_override);
 
@@ -2982,12 +3071,28 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   }
 
   const core::TimeBinPersistentState& scheduler_state = scheduler_state_for_validation;
-  append_u64(scheduler_state.current_tick);
-  append_u64(static_cast<std::uint64_t>(scheduler_state.max_bin));
-  append_any_vec(scheduler_state.bin_index);
-  append_any_vec(scheduler_state.next_activation_tick);
-  append_any_vec(scheduler_state.active_flag);
-  append_any_vec(scheduler_state.pending_bin_index);
+  append_u64(payload.scheduler->currentTick());
+  append_u64(static_cast<std::uint64_t>(payload.scheduler->maxBin()));
+  if (uniform_particle_scheduler) {
+    const std::size_t scheduler_count = payload.scheduler->elementCount();
+    append_logical_lane(scheduler_count, [&](std::size_t i) {
+      return payload.scheduler->binIndex(static_cast<std::uint32_t>(i));
+    });
+    append_logical_lane(scheduler_count, [&](std::size_t i) {
+      return payload.scheduler->nextActivationTick(static_cast<std::uint32_t>(i));
+    });
+    append_logical_lane(scheduler_count, [&](std::size_t i) {
+      return static_cast<std::uint8_t>(payload.scheduler->isElementActive(static_cast<std::uint32_t>(i)) ? 1U : 0U);
+    });
+    append_logical_lane(scheduler_count, [&](std::size_t i) {
+      return payload.scheduler->pendingBinIndex(static_cast<std::uint32_t>(i));
+    });
+  } else {
+    append_any_vec(scheduler_state.bin_index);
+    append_any_vec(scheduler_state.next_activation_tick);
+    append_any_vec(scheduler_state.active_flag);
+    append_any_vec(scheduler_state.pending_bin_index);
+  }
   if (include_gas_cell_scheduler) {
     append_string(std::string(k_gas_cell_scheduler_identity_key));
     const core::TimeBinPersistentState& gas_scheduler_state = gas_cell_scheduler_state_for_validation;
@@ -3107,7 +3212,14 @@ void writeRestartCheckpointHdf5(
   if (!payload.persistent_state.simulation_state->validateOwnershipInvariants()) {
     throw std::invalid_argument("cannot checkpoint invalid simulation state");
   }
-  const core::TimeBinPersistentState scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  const bool uniform_particle_scheduler =
+      payload.scheduler->representation() == core::SchedulerRepresentation::kUniformRungZero;
+  core::TimeBinPersistentState scheduler_state_for_validation;
+  scheduler_state_for_validation.current_tick = payload.scheduler->currentTick();
+  scheduler_state_for_validation.max_bin = payload.scheduler->maxBin();
+  if (!uniform_particle_scheduler) {
+    scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  }
   const core::TimeBinPersistentState gas_cell_scheduler_state_for_validation =
       payload.gas_cell_scheduler != nullptr
           ? payload.gas_cell_scheduler->exportPersistentState()
@@ -3119,10 +3231,22 @@ void writeRestartCheckpointHdf5(
   if (gas_cell_scheduler_state_for_validation.current_tick != scheduler_state_for_validation.current_tick) {
     throw std::invalid_argument("restart writer particle and gas-cell schedulers must share current_tick");
   }
-  validateRestartTimeBinMirrorsAgainstScheduler(
-      *payload.persistent_state.simulation_state,
-      scheduler_state_for_validation,
-      "restart writer");
+  if (uniform_particle_scheduler) {
+    if (payload.scheduler->elementCount() != payload.persistent_state.simulation_state->particles.size() ||
+        payload.scheduler->maxBin() != 0U) {
+      throw std::invalid_argument("restart writer uniform particle scheduler extent/rung contract is invalid");
+    }
+    for (std::size_t i = 0; i < payload.persistent_state.simulation_state->particles.size(); ++i) {
+      if (payload.persistent_state.simulation_state->particleTimeBin(i) != payload.scheduler->binIndex(static_cast<std::uint32_t>(i))) {
+        throw std::invalid_argument("restart writer particle time_bin mirror is stale relative to uniform scheduler authority");
+      }
+    }
+  } else {
+    validateRestartTimeBinMirrorsAgainstScheduler(
+        *payload.persistent_state.simulation_state,
+        scheduler_state_for_validation,
+        "restart writer");
+  }
   validateGasCellTimeBinMirrorsAgainstScheduler(
       *payload.persistent_state.simulation_state,
       gas_cell_scheduler_state_for_validation,
@@ -3225,22 +3349,23 @@ void writeRestartCheckpointHdf5(
 
   const core::TimeBinPersistentState scheduler_state = scheduler_state_for_validation;
   Hdf5Handle scheduler_group(openOrCreateGroup(file.get(), "/scheduler"));
-  writeScalarU64Attribute(scheduler_group.get(), "current_tick", scheduler_state.current_tick);
-  writeScalarU32Attribute(scheduler_group.get(), "max_bin", scheduler_state.max_bin);
-  writeDataset1d(scheduler_group.get(), "bin_index", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_state.bin_index);
-  writeDataset1d(
-      scheduler_group.get(),
-      "next_activation_tick",
-      H5T_STD_U64LE,
-      H5T_NATIVE_UINT64,
-      scheduler_state.next_activation_tick);
-  writeDataset1d(scheduler_group.get(), "active_flag", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_state.active_flag);
-  writeDataset1d(
-      scheduler_group.get(),
-      "pending_bin_index",
-      H5T_STD_U8LE,
-      H5T_NATIVE_UINT8,
-      scheduler_state.pending_bin_index);
+  writeScalarU64Attribute(scheduler_group.get(), "current_tick", payload.scheduler->currentTick());
+  writeScalarU32Attribute(scheduler_group.get(), "max_bin", payload.scheduler->maxBin());
+  if (uniform_particle_scheduler) {
+    const std::size_t scheduler_count = payload.scheduler->elementCount();
+    writeUniformDataset1d<std::uint8_t>(scheduler_group.get(), "bin_index", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_count, 0U);
+    writeUniformDataset1d<std::uint64_t>(scheduler_group.get(), "next_activation_tick", H5T_STD_U64LE, H5T_NATIVE_UINT64, scheduler_count, payload.scheduler->currentTick());
+    writeUniformDataset1d<std::uint8_t>(scheduler_group.get(), "active_flag", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_count, 0U);
+    const std::uint8_t uniform_pending = scheduler_count == 0U
+        ? core::HierarchicalTimeBinScheduler::k_unset_pending_bin
+        : payload.scheduler->pendingBinIndex(0U);
+    writeUniformDataset1d<std::uint8_t>(scheduler_group.get(), "pending_bin_index", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_count, uniform_pending);
+  } else {
+    writeDataset1d(scheduler_group.get(), "bin_index", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_state.bin_index);
+    writeDataset1d(scheduler_group.get(), "next_activation_tick", H5T_STD_U64LE, H5T_NATIVE_UINT64, scheduler_state.next_activation_tick);
+    writeDataset1d(scheduler_group.get(), "active_flag", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_state.active_flag);
+    writeDataset1d(scheduler_group.get(), "pending_bin_index", H5T_STD_U8LE, H5T_NATIVE_UINT8, scheduler_state.pending_bin_index);
+  }
 
   Hdf5Handle gas_scheduler_group(openOrCreateGroup(file.get(), "/gas_cell_scheduler"));
   writeScalarStringAttribute(
@@ -3277,14 +3402,20 @@ void writeRestartCheckpointHdf5(
       gas_cell_scheduler_state_for_validation.pending_bin_index);
   writeOutputCadenceGroup(file.get(), payload.output_cadence_state);
   writeStochasticStateGroup(file.get(), payload.stochastic_state);
-  writeRestartDiagnosticsGroup(
-      file.get(),
-      makeRestartDiagnosticsSummary(
-          *payload.integrator_state,
-          scheduler_state,
-          gas_cell_scheduler_state_for_validation,
-          payload.output_cadence_state,
-          payload.stochastic_state));
+  RestartDiagnosticsSummary restart_diagnostics = makeRestartDiagnosticsSummary(
+      *payload.integrator_state,
+      scheduler_state,
+      gas_cell_scheduler_state_for_validation,
+      payload.output_cadence_state,
+      payload.stochastic_state);
+  if (uniform_particle_scheduler) {
+    restart_diagnostics.scheduler_current_tick = payload.scheduler->currentTick();
+    restart_diagnostics.scheduler_max_bin = payload.scheduler->maxBin();
+    restart_diagnostics.scheduler_element_count = payload.scheduler->elementCount();
+    restart_diagnostics.scheduler_active_count = 0U;
+    restart_diagnostics.scheduler_pending_transition_count = 0U;
+  }
+  writeRestartDiagnosticsGroup(file.get(), restart_diagnostics);
   writeDistributedGravityGroup(file.get(), payload.distributed_gravity_state);
 
   if (H5Fflush(file.get(), H5F_SCOPE_GLOBAL) < 0) {
@@ -3658,6 +3789,17 @@ RestartReadResult readRestartCheckpointHdf5(
   if (schema_version >= k_restart_schema_v23 &&
       computed_integrity.sha256_hex != result.payload_integrity_sha256_hex) {
     throw std::runtime_error("restart canonical SHA-256 payload integrity mismatch");
+  }
+
+  // The on-disk schema remains fully explicit. Only after complete logical
+  // validation and integrity verification do we release redundant homogeneous
+  // DMO metadata capacities. Nonuniform imported SFC or other metadata remains
+  // materialized exactly because compactHomogeneousDmoMetadata rejects it or
+  // preserves the exact SFC exception lane.
+  if (result.state.particles.size() != 0U &&
+      result.state.particle_sidecar.owning_rank.size() == result.state.particles.size()) {
+    const std::uint32_t restored_local_rank = result.state.particle_sidecar.owning_rank.front();
+    (void)result.state.compactHomogeneousDmoMetadata(restored_local_rank);
   }
 
   return result;

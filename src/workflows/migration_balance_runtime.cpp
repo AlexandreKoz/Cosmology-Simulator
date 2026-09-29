@@ -368,7 +368,7 @@ void compactStateToCurrentOwner(
   std::vector<std::uint32_t> stale_ghost_indices;
   stale_ghost_indices.reserve(state.particles.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-    const bool owned_here = state.particle_sidecar.owning_rank[particle_index] == static_cast<std::uint32_t>(world_rank);
+    const bool owned_here = state.particleOwningRank(particle_index) == static_cast<std::uint32_t>(world_rank);
     if (!owned_here) {
       stale_ghost_indices.push_back(static_cast<std::uint32_t>(particle_index));
     }
@@ -512,13 +512,13 @@ void applyMemoryAwareDecompositionEnvelope(
   std::vector<parallel::DecompositionItem> items;
   items.reserve(state.particles.size() + state.patches.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-    const std::uint32_t species_tag = state.particle_sidecar.species_tag[particle_index];
+    const std::uint32_t species_tag = state.particleSpeciesTag(particle_index);
     parallel::DecompositionItem item;
     item.entity_id = state.particle_sidecar.particle_id[particle_index];
     item.kind = parallel::DecompositionEntityKind::kParticle;
     item.current_owner_rank = state.particle_sidecar.owning_rank.empty()
         ? world_rank
-        : static_cast<int>(state.particle_sidecar.owning_rank[particle_index]);
+        : static_cast<int>(state.particleOwningRank(particle_index));
     item.x_comov = state.particles.position_x_comoving[particle_index];
     item.y_comov = state.particles.position_y_comoving[particle_index];
     item.z_comov = state.particles.position_z_comoving[particle_index];
@@ -899,6 +899,7 @@ struct MigrationAdmissionPlan {
   std::uint64_t scheduler_remap_bytes = 0U;
   std::uint64_t index_map_bytes = 0U;
   std::uint64_t commit_coexistence_bytes = 0U;
+  std::uint64_t metadata_materialization_bytes = 0U;
   std::uint64_t requested_extra_bytes = 0U;
   std::vector<std::uint64_t> outbound_particle_count_by_rank;
   std::vector<std::uint64_t> outbound_particle_record_capacity_count_by_rank;
@@ -997,7 +998,7 @@ struct MigrationAdmissionPlan {
     max_particle_state_bytes = std::max(
         max_particle_state_bytes,
         estimateParticleMemoryBytesForDecomposition(
-            state, state.particle_sidecar.species_tag[particle_index]));
+            state, state.particleSpeciesTag(particle_index)));
     }
 
     for (const parallel::ParticleMigrationIntent& intent : rebalance.particle_migrations) {
@@ -1018,7 +1019,7 @@ struct MigrationAdmissionPlan {
         migration_wire::estimateParticleMigrationDynamicHeapUpperBoundBytes(state, local_index),
         "particle migration dynamic heap upper bound");
     const std::uint64_t state_bytes = estimateParticleMemoryBytesForDecomposition(
-        state, state.particle_sidecar.species_tag[local_index]);
+        state, state.particleSpeciesTag(local_index));
     plan.outbound_particle_count_by_rank[target] = core::checkedMemoryBytesAdd(
         plan.outbound_particle_count_by_rank[target], 1U,
         "particle migration outbound count");
@@ -1245,7 +1246,22 @@ struct MigrationAdmissionPlan {
       plan.packet_staging_bytes, max_record_assembly,
       "migration packet plus single-record assembly staging");
 
-  plan.requested_extra_bytes = plan.commit_coexistence_bytes;
+  if (state.hasHomogeneousDmoMetadata()) {
+    const std::uint64_t materialization_bytes_per_particle =
+        sizeof(std::uint8_t) + sizeof(std::uint32_t) * 3U + sizeof(double) * 2U +
+        sizeof(std::uint32_t) * 2U +
+        (state.particle_sidecar.sfc_key.empty() ? sizeof(std::uint64_t) : 0U);
+    plan.metadata_materialization_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+        core::checkedSizeMultiply(
+            state.particles.size(),
+            static_cast<std::size_t>(materialization_bytes_per_particle),
+            "migration compact-DMO metadata materialization"),
+        "migration compact-DMO metadata materialization bytes");
+  }
+
+  plan.requested_extra_bytes = core::checkedMemoryBytesAdd(
+      plan.commit_coexistence_bytes, plan.metadata_materialization_bytes,
+      "migration commit/materialization coexistence");
   for (const auto [bytes, label] : std::array{
            std::pair{plan.record_capacity_bytes, std::string_view{"migration record capacities"}},
            std::pair{plan.scheduler_remap_bytes, std::string_view{"migration scheduler remap"}},
@@ -1284,7 +1300,7 @@ void requireGlobalOwnedParticlePartitionIdentity(
   local_owned_ids.reserve(state.particles.size());
   const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-    if (state.particle_sidecar.owning_rank[particle_index] == world_rank) {
+    if (state.particleOwningRank(particle_index) == world_rank) {
       local_owned_ids.push_back(state.particle_sidecar.particle_id[particle_index]);
     }
   }
@@ -1690,6 +1706,7 @@ void exchangeAndValidateAmrPatchPayloads(
     return false;
   }
 
+  const bool restore_compact_dmo_after_commit = state.hasHomogeneousDmoMetadata();
   const std::array transaction_reports{
       core::collectSimulationMemoryReport(state),
       core::collectSchedulerMemoryReport(scheduler, gas_cell_scheduler)};
@@ -1722,6 +1739,10 @@ void exchangeAndValidateAmrPatchPayloads(
   FailureCoordinator(services).rethrowCollectiveFailure(
       migration_admission_failure, "runtime migration memory admission");
 
+  if (restore_compact_dmo_after_commit) {
+    state.materializeParticleMetadata();
+  }
+
   const std::uint64_t particle_index_generation_before = state.particleIndexGeneration();
   const std::uint64_t cell_index_generation_before = state.cellIndexGeneration();
   const std::uint64_t gas_identity_generation_before = state.gasCellIdentityGeneration();
@@ -1748,7 +1769,7 @@ void exchangeAndValidateAmrPatchPayloads(
     if (new_owner_rank == world_rank) {
       return;
     }
-    if (state.particle_sidecar.owning_rank[local_index] != static_cast<std::uint32_t>(world_rank)) {
+    if (state.particleOwningRank(local_index) != static_cast<std::uint32_t>(world_rank)) {
       throw std::runtime_error("runtime rebalance attempted to migrate a non-authoritative local particle via " + std::string(source_label));
     }
      const auto [it, inserted] = outbound_target_by_local_index.emplace(local_index, new_owner_rank);
@@ -1815,7 +1836,7 @@ void exchangeAndValidateAmrPatchPayloads(
               local_index_by_particle_id,
               "runtime rebalance AMR patch ownership update");
           if (gas_particle_index.has_value() &&
-              state.particle_sidecar.owning_rank[*gas_particle_index] == static_cast<std::uint32_t>(world_rank)) {
+              state.particleOwningRank(*gas_particle_index) == static_cast<std::uint32_t>(world_rank)) {
             add_particle_migration(*gas_particle_index, update.new_owner_rank, "amr_patch_ownership_update");
           }
         }
@@ -1997,6 +2018,12 @@ void exchangeAndValidateAmrPatchPayloads(
     }
   }
   exchangeAndValidateAmrPatchPayloads(state, mpi_context, world_rank, step_index, profiler);
+  if (restore_compact_dmo_after_commit) {
+    if (!state.compactHomogeneousDmoMetadata(static_cast<std::uint32_t>(world_rank))) {
+      throw std::runtime_error(
+          "runtime migration could not restore the pre-transaction homogeneous-DMO metadata representation");
+    }
+  }
 
   recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
   if (profiler != nullptr && (!outbound_local_indices.empty() || inbound_particle_count != 0U)) {
@@ -2015,6 +2042,7 @@ void exchangeAndValidateAmrPatchPayloads(
             {"migration_packet_staging_bound_bytes", std::to_string(migration_admission_plan.packet_staging_bytes)},
             {"migration_scheduler_remap_capacity_bytes", std::to_string(migration_admission_plan.scheduler_remap_bytes)},
             {"migration_index_map_capacity_bytes", std::to_string(migration_admission_plan.index_map_bytes)},
+            {"migration_metadata_materialization_bytes", std::to_string(migration_admission_plan.metadata_materialization_bytes)},
             {"migration_outbound_wire_traffic_upper_bound_bytes", std::to_string(migration_admission_plan.outbound_wire_bytes)},
             {"migration_inbound_wire_traffic_upper_bound_bytes", std::to_string(migration_admission_plan.inbound_wire_bytes)},
             {"migration_packet_send_capacity_bytes", std::to_string(std::max(
@@ -2152,7 +2180,7 @@ struct StartupDensityOccupancyGrids {
     if (!state.particles.time_bin.empty() && state.particles.time_bin[particle_index] == 0U) {
       ++grids.active_occupancy[cell];
     }
-    if (state.particle_sidecar.species_tag[particle_index] ==
+    if (state.particleSpeciesTag(particle_index) ==
         static_cast<std::uint32_t>(core::ParticleSpecies::kGas)) {
       ++grids.gas_occupancy[cell];
     }
@@ -2213,7 +2241,7 @@ struct StartupDecompositionWeight {
   StartupDecompositionWeight weight;
   weight.kind = parallel::DecompositionEntityKind::kParticle;
   weight.entity_id = state.particle_sidecar.particle_id[particle_index];
-  weight.current_owner_rank = static_cast<int>(state.particle_sidecar.owning_rank[particle_index]);
+  weight.current_owner_rank = static_cast<int>(state.particleOwningRank(particle_index));
   const double x = state.particles.position_x_comoving[particle_index];
   const double y = state.particles.position_y_comoving[particle_index];
   const double z = state.particles.position_z_comoving[particle_index];
@@ -2224,7 +2252,7 @@ struct StartupDecompositionWeight {
   const std::uint32_t local_gas = grids.gas_occupancy[density_cell];
   const std::uint32_t pm_load =
       grids.pm_x_occupancy[startupPmXIndex(config, x, grids.pm_x_occupancy.size())];
-  const std::uint32_t species_tag = state.particle_sidecar.species_tag[particle_index];
+  const std::uint32_t species_tag = state.particleSpeciesTag(particle_index);
   double amr_patch_cost = 0.0;
   if (species_tag == static_cast<std::uint32_t>(core::ParticleSpecies::kGas) &&
       !state.cells.patch_index.empty()) {

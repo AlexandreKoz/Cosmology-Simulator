@@ -208,7 +208,7 @@ void maybeInitializeParticleSofteningFromSpeciesPolicy(
   const auto by_species = speciesSofteningByTag(config);
   state.particle_sidecar.gravity_softening_comoving.resize(state.particles.size(), 0.0);
   for (std::size_t i = 0; i < state.particles.size(); ++i) {
-    const std::size_t species_tag = static_cast<std::size_t>(state.particle_sidecar.species_tag[i]);
+    const std::size_t species_tag = static_cast<std::size_t>(state.particleSpeciesTag(i));
     if (species_tag < by_species.epsilon_comoving_by_species.size()) {
       state.particle_sidecar.gravity_softening_comoving[i] = by_species.epsilon_comoving_by_species[species_tag];
     } else {
@@ -1213,7 +1213,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
             static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
         for (std::size_t particle_index = 0; particle_index < particle_count;
              ++particle_index) {
-          if (context.state.particle_sidecar.owning_rank[particle_index] ==
+          if (context.state.particleOwningRank(particle_index) ==
               local_rank) {
             m_force_refresh_particle_indices.push_back(
                 static_cast<std::uint32_t>(particle_index));
@@ -2122,11 +2122,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
         static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
     for (std::size_t particle_index = 0; particle_index < particle_count;
          ++particle_index) {
-      if (context.state.particle_sidecar.species_tag[particle_index] ==
+      if (context.state.particleSpeciesTag(particle_index) ==
           gas_species_tag) {
         continue;
       }
-      if (context.state.particle_sidecar.owning_rank[particle_index] ==
+      if (context.state.particleOwningRank(particle_index) ==
               local_rank &&
           m_particle_force_cache_valid[particle_index] == 0U) {
         m_force_cache_valid = false;
@@ -2326,8 +2326,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
       if (particle_index >= particle_count) {
         throw std::out_of_range("gravity cached kick particle index out of range");
       }
-      if (context.state.particle_sidecar.owning_rank[particle_index] != local_rank ||
-          context.state.particle_sidecar.species_tag[particle_index] == gas_species_tag) {
+      if (context.state.particleOwningRank(particle_index) != local_rank ||
+          context.state.particleSpeciesTag(particle_index) == gas_species_tag) {
         continue;
       }
       if (m_particle_force_cache_valid[particle_index] == 0U) {
@@ -2573,10 +2573,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
             std::numeric_limits<std::uint32_t>::max())) {
       return false;
     }
-    if (!state.particles.isConsistent() ||
-        !state.particle_sidecar.isConsistent() ||
-        state.particle_sidecar.species_tag.size() != particle_count ||
-        state.particle_sidecar.owning_rank.size() != particle_count) {
+    if (!state.particles.isConsistent() || !state.particle_sidecar.isConsistent()) {
+      return false;
+    }
+    if (!state.hasHomogeneousDmoMetadata() &&
+        (state.particle_sidecar.species_tag.size() != particle_count ||
+         state.particle_sidecar.owning_rank.size() != particle_count)) {
       return false;
     }
     if (!state.particle_sidecar.has_gravity_softening_override.empty() &&
@@ -2595,8 +2597,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
     const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
     for (std::size_t row = 0; row < particle_count; ++row) {
-      if (state.particle_sidecar.owning_rank[row] != local_rank ||
-          state.particle_sidecar.species_tag[row] != dm_species_tag) {
+      if (state.particleOwningRank(row) != local_rank ||
+          state.particleSpeciesTag(row) != dm_species_tag) {
         return false;
       }
       if (!state.particle_sidecar.has_gravity_softening_override.empty() &&
@@ -2804,10 +2806,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
     std::vector<std::uint8_t> active_mask;
     if (prediction_epoch != SourcePredictionEpoch::kNone) {
-      if (state.particle_sidecar.last_drift_time_code.size() != particle_count ||
-          state.particle_sidecar.last_drift_scale_factor.size() != particle_count) {
+      if (!state.hasHomogeneousDmoMetadata() &&
+          (state.particle_sidecar.last_drift_time_code.size() != particle_count ||
+           state.particle_sidecar.last_drift_scale_factor.size() != particle_count)) {
         throw std::runtime_error(
-            "PM source prediction requires per-particle drift epoch sidecars");
+            "PM source prediction requires logical particle drift epochs");
       }
       active_mask.assign(particle_count, 0U);
       for (const std::uint32_t global_index : prediction_current_particles) {
@@ -2949,9 +2952,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
       if (prediction_epoch != SourcePredictionEpoch::kNone &&
           active_mask[global_index] == 0U) {
         const double source_time =
-            state.particle_sidecar.last_drift_time_code[global_index];
+            state.particleLastDriftTimeCode(global_index);
         const double source_scale =
-            state.particle_sidecar.last_drift_scale_factor[global_index];
+            state.particleLastDriftScaleFactor(global_index);
         const double evaluation_time =
             prediction_epoch == SourcePredictionEpoch::kStepBegin
             ? context.timeline_step.time_begin_code
@@ -2998,7 +3001,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
           source_y,
           source_z,
           state.particles.mass_code[global_index],
-          state.particle_sidecar.species_tag[global_index],
+          state.particleSpeciesTag(global_index),
           softening_value,
           softening_override,
           static_cast<std::uint32_t>(global_index),
@@ -3052,7 +3055,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
         throw std::out_of_range(
             "gravity callback active particle index out of range");
       }
-      if (state.particle_sidecar.species_tag[global_index] == gas_species_tag) {
+      if (state.particleSpeciesTag(global_index) == gas_species_tag) {
         continue;
       }
       const int local_index = m_owned_local_index_by_global[global_index];
