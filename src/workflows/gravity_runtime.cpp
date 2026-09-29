@@ -561,6 +561,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
           "dmo_process_pre_run_aggregate_required_bytes=" +
           std::to_string(m_last_process_memory_estimate.aggregate_required_bytes));
     }
+    merged.notes.push_back(
+        std::string("gravity_source_representation=") +
+        (m_source_representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+             ? "borrowed_homogeneous_dmo"
+             : "materialized_generic"));
     return merged;
   }
   [[nodiscard]] const parallel::DecompositionRuntimeMeasurements& lastRuntimeDecompositionMeasurements() const noexcept {
@@ -623,7 +628,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
       return;
     }
     if (m_authoritative_top_domain_source_generation_valid &&
-        m_authoritative_top_domain_source_generation == current_source_generation) {
+        m_authoritative_top_domain_source_generation == current_source_generation &&
+        m_source_predicted_inactive_count == 0U) {
       publishAuthoritativeTopDomainLeavesSpan();
       return;
     }
@@ -651,9 +657,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
     try {
       refreshed = parallel::refitAuthoritativeTopDomainLeaves(
           refit_seed,
-          m_local_source_x,
-          m_local_source_y,
-          m_local_source_z,
+          sourcePosX(context.state),
+          sourcePosY(context.state),
+          sourcePosZ(context.state),
           refit_config,
           std::max(mpi_context.worldRank(), 0),
           m_decomposition_epoch.value,
@@ -694,6 +700,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_source_generation = 0U;
     m_particle_force_cache_valid.clear();
     m_cell_force_cache_valid.clear();
+    m_active_source_indices = {};
+    m_borrowed_particle_index_generation = 0U;
+    m_borrowed_gravity_source_generation = 0U;
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      m_source_representation =
+          gravity::GravitySourceRepresentation::kMaterializedGeneric;
+    }
   }
 
   void installAuthoritativeTopDomainLeaves(
@@ -921,6 +935,15 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
   [[nodiscard]] std::uint64_t estimateIncrementalMemory(
       const core::SimulationState& state) const {
+    const auto representation = borrowedHomogeneousDmoBaseEligible(state)
+        ? gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        : gravity::GravitySourceRepresentation::kMaterializedGeneric;
+    return estimateIncrementalMemoryForRepresentation(state, representation);
+  }
+
+  [[nodiscard]] std::uint64_t estimateIncrementalMemoryForRepresentation(
+      const core::SimulationState& state,
+      gravity::GravitySourceRepresentation representation) const {
     const std::size_t particle_count = state.particles.size();
     const std::size_t cell_count = state.cells.size();
     const parallel::MpiContext& mpi_context = m_services.mpi_context;
@@ -935,6 +958,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
                 .local_target_count = static_cast<std::uint64_t>(conservative_count),
                 .local_particle_count = static_cast<std::uint64_t>(particle_count),
                 .local_cell_count = static_cast<std::uint64_t>(cell_count),
+                .source_representation = representation,
+                .relative_force_mac_enabled =
+                    m_tree_pm_options.tree_options.opening_criterion ==
+                    gravity::TreeOpeningCriterion::kRelativeForceError,
                 .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
                 .multipole_order = m_tree_pm_options.tree_options.multipole_order,
                 .pm_shape = m_pm_grid_shape,
@@ -963,9 +990,25 @@ class GravityRuntimeImpl final : public GravityRuntime {
       throw std::logic_error(
           "gravity communication arena estimate exceeds the total governed peak");
     }
+    std::uint64_t phase_resident_peak =
+        governed_peak.known_peak_bytes - governed_peak.communication_arena_bytes;
+    if (representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      // The sole uint32 identity lane is physically owned and admitted by the
+      // governed TransientStepWorkspace scratch arena. The gravity estimate
+      // keeps it in process/preflight modeling, but the phase lease must not
+      // reserve the same physical bytes a second time.
+      const std::uint64_t scratch_index_bytes = static_cast<std::uint64_t>(
+          core::checkedSizeMultiply(
+              particle_count, sizeof(std::uint32_t),
+              "borrowed DMO target/source scratch byte count"));
+      if (scratch_index_bytes > phase_resident_peak) {
+        throw std::logic_error(
+            "borrowed DMO scratch index estimate exceeds gravity phase peak");
+      }
+      phase_resident_peak -= scratch_index_bytes;
+    }
     return incrementalMemoryBeyondRetained(
-        governed_peak.known_peak_bytes - governed_peak.communication_arena_bytes,
-        gravity_baseline_before);
+        phase_resident_peak, gravity_baseline_before);
   }
 
   void execute(GravityStageView& view) override {
@@ -998,6 +1041,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
         core::memoryReportBaselineOwnedBytes(memoryReport());
     std::uint64_t process_baseline_before = 0U;
     core::MemoryReservation gravity_phase_reservation;
+    core::MemoryReservation gravity_fallback_reservation;
     std::exception_ptr gravity_admission_failure;
     try {
       if (m_services.memory_governor != nullptr) {
@@ -1019,21 +1063,37 @@ class GravityRuntimeImpl final : public GravityRuntime {
     FailureCoordinator(m_services).rethrowCollectiveFailure(
         gravity_admission_failure, "gravity TreePM memory admission");
 
-    const auto admitAllParticleIndexScratch = [&]() {
+    const auto admitAllParticleIndexScratch = [&](bool force_all_particles = false) {
       if (context.workspace == nullptr ||
-          context.stage != core::IntegrationStage::kGravityKickPre ||
-          context.active_set.hasParticleSubset(particle_count)) {
+          (!force_all_particles &&
+           (context.stage != core::IntegrationStage::kGravityKickPre ||
+            context.active_set.hasParticleSubset(particle_count)))) {
         return;
       }
       std::exception_ptr scratch_admission_failure;
       try {
-        context.workspace->prepareGravityParticleIndexScratch(particle_count);
+        if (context.workspace->gravity_particle_index_scratch.size() != particle_count) {
+          context.workspace->prepareGravityParticleIndexScratch(particle_count);
+        }
       } catch (...) {
         scratch_admission_failure = std::current_exception();
       }
       FailureCoordinator(m_services).rethrowCollectiveFailure(
           scratch_admission_failure,
           "gravity all-particle scratch admission");
+      auto scratch = context.workspace->gravity_particle_index_scratch;
+      if (scratch.size() != particle_count) {
+        throw std::logic_error(
+            "gravity all-particle scratch admission returned an unexpected extent");
+      }
+      for (std::size_t particle_index = 0; particle_index < particle_count;
+           ++particle_index) {
+        if (particle_index > std::numeric_limits<std::uint32_t>::max()) {
+          throw std::overflow_error(
+              "gravity all-particle scratch exceeds the uint32 local-index contract");
+        }
+        scratch[particle_index] = static_cast<std::uint32_t>(particle_index);
+      }
     };
 
     const bool particle_cache_generation_changed =
@@ -1126,6 +1186,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
     std::span<const std::uint32_t> force_target_particles =
         context.active_set.particle_indices;
+    const bool borrowed_dmo_base_eligible =
+        borrowedHomogeneousDmoBaseEligible(context.state);
+    bool force_targets_use_identity_scratch =
+        context.workspace != nullptr &&
+        borrowed_dmo_base_eligible &&
+        isIdentityParticleSpan(force_target_particles, particle_count);
     SourcePredictionEpoch source_prediction_epoch =
         context.pm_refresh_directive.requires_predicted_inactive_sources
         ? SourcePredictionEpoch::kStepEnd
@@ -1136,19 +1202,25 @@ class GravityRuntimeImpl final : public GravityRuntime {
       // coordinated solve so later local pre-kicks never mix stale cache rows
       // with current ones. Sources whose persistent coordinates lag the
       // current scheduler time are predicted to the pre-kick epoch.
-      m_force_refresh_particle_indices.clear();
-      m_force_refresh_particle_indices.reserve(particle_count);
-      const std::uint32_t local_rank =
-          static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
-      for (std::size_t particle_index = 0; particle_index < particle_count;
-           ++particle_index) {
-        if (context.state.particle_sidecar.owning_rank[particle_index] ==
-            local_rank) {
-          m_force_refresh_particle_indices.push_back(
-              static_cast<std::uint32_t>(particle_index));
+      if (borrowed_dmo_base_eligible && context.workspace != nullptr) {
+        releaseVectorCapacity(m_force_refresh_particle_indices);
+        force_target_particles = {};
+        force_targets_use_identity_scratch = true;
+      } else {
+        m_force_refresh_particle_indices.clear();
+        m_force_refresh_particle_indices.reserve(particle_count);
+        const std::uint32_t local_rank =
+            static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
+        for (std::size_t particle_index = 0; particle_index < particle_count;
+             ++particle_index) {
+          if (context.state.particle_sidecar.owning_rank[particle_index] ==
+              local_rank) {
+            m_force_refresh_particle_indices.push_back(
+                static_cast<std::uint32_t>(particle_index));
+          }
         }
+        force_target_particles = m_force_refresh_particle_indices;
       }
-      force_target_particles = m_force_refresh_particle_indices;
       source_prediction_epoch = SourcePredictionEpoch::kStepBegin;
     }
 
@@ -1157,14 +1229,63 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // deliberately outside this gravity-only budget and is reported by core.
     const std::size_t conservative_local_source_count = core::checkedSizeAdd(
         particle_count, cell_count, "gravity pre-run local source count");
+    const std::size_t force_target_count = force_targets_use_identity_scratch
+        ? particle_count
+        : force_target_particles.size();
+    const bool prediction_requires_inactive_coordinates =
+        source_prediction_epoch != SourcePredictionEpoch::kNone &&
+        !isIdentityParticleSpan(context.active_set.particle_indices, particle_count);
+    const bool borrowed_homogeneous_dmo_preflight =
+        borrowed_dmo_base_eligible && force_targets_use_identity_scratch &&
+        !prediction_requires_inactive_coordinates;
+
+    // The early phase reservation is allowed to credit the state-only DMO
+    // opportunity. If the stage shape proves that the borrowed identity view
+    // cannot be used, collectively re-admit the generic increment before any
+    // materialized O(N) source/map allocation occurs.
+    if (borrowed_dmo_base_eligible &&
+        !borrowed_homogeneous_dmo_preflight &&
+        m_services.memory_governor != nullptr) {
+      std::exception_ptr fallback_admission_failure;
+      try {
+        const std::uint64_t borrowed_increment =
+            estimateIncrementalMemoryForRepresentation(
+                context.state,
+                gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo);
+        const std::uint64_t generic_increment =
+            estimateIncrementalMemoryForRepresentation(
+                context.state,
+                gravity::GravitySourceRepresentation::kMaterializedGeneric);
+        const std::uint64_t additional_bytes = generic_increment > borrowed_increment
+            ? generic_increment - borrowed_increment
+            : 0U;
+        gravity_fallback_reservation = m_services.memory_governor->reserve(
+            core::MemoryClass::kPhaseResident,
+            additional_bytes,
+            "gravity.treepm.generic_fallback");
+        gravity_fallback_reservation.commit();
+      } catch (...) {
+        fallback_admission_failure = std::current_exception();
+      }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          fallback_admission_failure,
+          "gravity TreePM generic fallback memory admission");
+    }
+
     const std::size_t conservative_local_target_count = core::checkedSizeAdd(
-        force_target_particles.size(), cell_count, "gravity pre-run local target count");
+        force_target_count, cell_count, "gravity pre-run local target count");
     m_last_pre_run_memory_estimate = gravity::estimateGravityMemory(
         gravity::GravityMemoryEstimateInput{
             .local_source_count = static_cast<std::uint64_t>(conservative_local_source_count),
             .local_target_count = static_cast<std::uint64_t>(conservative_local_target_count),
             .local_particle_count = static_cast<std::uint64_t>(particle_count),
             .local_cell_count = static_cast<std::uint64_t>(cell_count),
+            .source_representation = borrowed_homogeneous_dmo_preflight
+                ? gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+                : gravity::GravitySourceRepresentation::kMaterializedGeneric,
+            .relative_force_mac_enabled =
+                m_tree_pm_options.tree_options.opening_criterion ==
+                gravity::TreeOpeningCriterion::kRelativeForceError,
             .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
             .multipole_order = m_tree_pm_options.tree_options.multipole_order,
             .pm_shape = m_pm_grid_shape,
@@ -1333,38 +1454,62 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // preflight, admit the one physical all-particle uint32 index lane needed
     // by the subsequent direct drift view. The pre-kick no longer constructs
     // an N-sized compatibility vector before this governed owner exists.
-    admitAllParticleIndexScratch();
+    admitAllParticleIndexScratch(force_targets_use_identity_scratch);
+
+    if (force_targets_use_identity_scratch) {
+      if (context.workspace == nullptr) {
+        throw std::logic_error(
+            "borrowed homogeneous DMO force targets require the governed workspace index lane");
+      }
+      force_target_particles = context.workspace->gravity_particle_index_scratch;
+    }
 
     rebuildOwnedParticleCompactView(
         context,
         force_target_particles,
-        source_prediction_epoch);
+        source_prediction_epoch,
+        context.active_set.particle_indices);
     // Refresh derived top-domain leaf bounds against the source snapshot this
     // solve will evaluate (post-prediction compact sources). Cached-kick
     // paths returned earlier, so this O(N) scan never runs on a pure cache hit.
     refreshAuthoritativeTopDomainGeometryForSolve(context, mpi_context);
     m_local_kick_particle_count = 0U;
-    for (const std::uint32_t particle_index :
-         context.active_set.particle_indices) {
-      if (particle_index < m_owned_local_index_by_global.size() &&
-          m_owned_local_index_by_global[particle_index] >= 0) {
-        ++m_local_kick_particle_count;
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      m_local_kick_particle_count = context.active_set.particle_indices.size();
+    } else {
+      for (const std::uint32_t particle_index :
+           context.active_set.particle_indices) {
+        if (particle_index < m_owned_local_index_by_global.size() &&
+            m_owned_local_index_by_global[particle_index] >= 0) {
+          ++m_local_kick_particle_count;
+        }
       }
     }
-    m_active_accel_x.assign(m_local_active_indices.size(), 0.0);
-    m_active_accel_y.assign(m_local_active_indices.size(), 0.0);
-    m_active_accel_z.assign(m_local_active_indices.size(), 0.0);
-    m_active_slot_by_particle.assign(particle_count, -1);
-    m_active_slot_by_cell.assign(cell_count, -1);
+    const auto active_source_indices = activeSourceIndices();
+    m_active_accel_x.assign(active_source_indices.size(), 0.0);
+    m_active_accel_y.assign(active_source_indices.size(), 0.0);
+    m_active_accel_z.assign(active_source_indices.size(), 0.0);
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      releaseVectorCapacity(m_active_slot_by_particle);
+      releaseVectorCapacity(m_active_slot_by_cell);
+    } else {
+      m_active_slot_by_particle.assign(particle_count, -1);
+      m_active_slot_by_cell.assign(cell_count, -1);
+    }
     constexpr std::uint32_t no_target_row =
         std::numeric_limits<std::uint32_t>::max();
-    for (std::size_t target_slot = 0; target_slot < m_local_active_indices.size(); ++target_slot) {
-      if (m_active_target_particle_row[target_slot] != no_target_row) {
-        m_active_slot_by_particle[m_active_target_particle_row[target_slot]] =
+    for (std::size_t target_slot = 0;
+         m_source_representation == gravity::GravitySourceRepresentation::kMaterializedGeneric &&
+         target_slot < active_source_indices.size();
+         ++target_slot) {
+      if (targetParticleRow(target_slot) != no_target_row) {
+        m_active_slot_by_particle[targetParticleRow(target_slot)] =
             static_cast<int>(target_slot);
       }
-      if (m_active_target_cell_row[target_slot] != no_target_row) {
-        m_active_slot_by_cell[m_active_target_cell_row[target_slot]] =
+      if (targetCellRow(target_slot) != no_target_row) {
+        m_active_slot_by_cell[targetCellRow(target_slot)] =
             static_cast<int>(target_slot);
       }
     }
@@ -1374,7 +1519,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
       const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
       const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
       m_source_is_high_res.assign(m_local_source_x.size(), 0U);
-      m_active_is_high_res.assign(m_local_active_indices.size(), 0U);
+      m_active_is_high_res.assign(active_source_indices.size(), 0U);
       for (std::size_t i = 0; i < m_local_source_x.size(); ++i) {
         if (!m_zoom_high_res_particle_ids.empty()) {
           const std::uint32_t particle_row = m_local_source_particle_row[i];
@@ -1409,8 +1554,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_source_is_high_res[i] =
             (r <= m_tree_pm_options.zoom_region_radius_comoving) ? 1U : 0U;
       }
-      for (std::size_t i = 0; i < m_local_active_indices.size(); ++i) {
-        m_active_is_high_res[i] = m_source_is_high_res[m_local_active_indices[i]];
+      for (std::size_t i = 0; i < active_source_indices.size(); ++i) {
+        m_active_is_high_res[i] = m_source_is_high_res[active_source_indices[i]];
       }
       m_tree_pm_options.source_is_high_res = m_source_is_high_res;
       m_tree_pm_options.active_is_high_res = m_active_is_high_res;
@@ -1436,10 +1581,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_cell_accel_z.size() == cell_count;
     if (relative_mac_cache_compatible) {
       m_active_previous_acceleration_magnitude.resize(
-          m_local_active_indices.size(),
+          active_source_indices.size(),
           std::numeric_limits<double>::quiet_NaN());
-      for (std::size_t target_slot = 0; target_slot < m_local_active_indices.size(); ++target_slot) {
-        const std::uint32_t particle_row = m_active_target_particle_row[target_slot];
+      for (std::size_t target_slot = 0; target_slot < active_source_indices.size(); ++target_slot) {
+        const std::uint32_t particle_row = targetParticleRow(target_slot);
         if (particle_row != no_target_row &&
             particle_row < m_particle_force_cache_valid.size() &&
             m_particle_force_cache_valid[particle_row] != 0U) {
@@ -1449,7 +1594,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
               m_particle_accel_z[particle_row] * m_particle_accel_z[particle_row]);
           continue;
         }
-        const std::uint32_t cell_row = m_active_target_cell_row[target_slot];
+        const std::uint32_t cell_row = targetCellRow(target_slot);
         if (cell_row != no_target_row &&
             cell_row < m_cell_force_cache_valid.size() &&
             m_cell_force_cache_valid[cell_row] != 0U) {
@@ -1462,7 +1607,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
 
     gravity::TreePmForceAccumulatorView accumulator{
-        .active_particle_index = m_local_active_indices,
+        .active_particle_index = active_source_indices,
         .accel_x_comoving = m_active_accel_x,
         .accel_y_comoving = m_active_accel_y,
         .accel_z_comoving = m_active_accel_z,
@@ -1579,14 +1724,35 @@ class GravityRuntimeImpl final : public GravityRuntime {
           "TreePM PM-field reuse rejected because authoritative gravity sources changed since the committed mesh refresh");
     }
 
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      if (m_borrowed_particle_index_generation !=
+              context.state.particleIndexGeneration() ||
+          m_borrowed_gravity_source_generation !=
+              context.state.gravitySourceGeneration()) {
+        throw std::runtime_error(
+            "borrowed homogeneous DMO gravity view became stale before TreePM solve");
+      }
+      m_tree_pm_options.tree_options.softening.epsilon_comoving =
+          m_tree_pm_species_softening.enabled
+          ? m_tree_pm_species_softening.epsilon_comoving_by_species[
+                static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)]
+          : m_config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
+    } else {
+      m_tree_pm_options.tree_options.softening.epsilon_comoving =
+          m_config.numerics.gravity_softening_kpc_comoving * 1.0e-3;
+    }
+
     const gravity::GravitySourceSnapshot source_snapshot{
-        .pos_x_comoving = m_local_source_x,
-        .pos_y_comoving = m_local_source_y,
-        .pos_z_comoving = m_local_source_z,
-        .mass_code = m_local_source_mass,
-        .species_tag = m_local_source_species_tag,
+        .pos_x_comoving = sourcePosX(context.state),
+        .pos_y_comoving = sourcePosY(context.state),
+        .pos_z_comoving = sourcePosZ(context.state),
+        .mass_code = sourceMass(context.state),
+        .species_tag = sourceSpecies(),
         .generation = m_tree_pm_options.source_generation,
         .evaluation_epoch = m_tree_pm_options.force_epoch,
+        .particle_index_generation = context.state.particleIndexGeneration(),
+        .representation = m_source_representation,
         .contains_predicted_coordinates = m_source_predicted_inactive_count != 0U,
     };
     source_snapshot.validate();
@@ -1606,13 +1772,17 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_cell_force_cache_valid.assign(context.state.cells.size(), 0U);
     }
     const gravity::TreeSofteningView softening_view{
-        .source_species_tag = std::span<const std::uint32_t>(m_local_source_species_tag.data(), m_local_source_species_tag.size()),
-        .source_particle_epsilon_comoving = std::span<const double>(
-            m_local_source_softening_comoving.empty() ? nullptr : m_local_source_softening_comoving.data(),
-            m_local_source_softening_comoving.size()),
-        .source_particle_epsilon_override_mask = std::span<const std::uint8_t>(
-            m_local_source_softening_override_mask.empty() ? nullptr : m_local_source_softening_override_mask.data(),
-            m_local_source_softening_override_mask.size()),
+        .source_species_tag = sourceSpecies(),
+        .source_particle_epsilon_comoving = m_source_representation ==
+                gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+            ? std::span<const double>{}
+            : std::span<const double>(m_local_source_softening_comoving.data(),
+                                      m_local_source_softening_comoving.size()),
+        .source_particle_epsilon_override_mask = m_source_representation ==
+                gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+            ? std::span<const std::uint8_t>{}
+            : std::span<const std::uint8_t>(m_local_source_softening_override_mask.data(),
+                                            m_local_source_softening_override_mask.size()),
          .target_species_tag = {},
          .target_particle_epsilon_comoving = {},
          .target_particle_epsilon_override_mask = {},
@@ -1741,12 +1911,25 @@ class GravityRuntimeImpl final : public GravityRuntime {
                       {"pm_fft_backend", m_pm_backend},
                       {"pm_backend_capability", std::string(gravity::pmBackendCapabilityName(gravity::pmBackendCapability()))},
                       {"gravity_acceptance_profile_id", "unverified_current_source"},
-                      {"active_particles_kicked", std::to_string(m_local_active_global_indices.size())},
+                      {"active_particles_kicked", std::to_string(m_local_kick_particle_count)},
+                      {"gravity_source_representation",
+                       m_source_representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+                           ? "borrowed_homogeneous_dmo"
+                           : "materialized_generic"},
+                      {"borrowed_source_count",
+                       std::to_string(m_source_representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+                           ? source_snapshot.size()
+                           : 0U)},
+                      {"materialized_source_count",
+                       std::to_string(m_source_representation == gravity::GravitySourceRepresentation::kMaterializedGeneric
+                           ? source_snapshot.size()
+                           : 0U)},
                       {"inactive_particles_skipped", std::to_string(inactive_particles_skipped)},
                       {"ghost_refresh_sent_bytes", std::to_string(gravity_ghost_refresh.sent_bytes)},
                       {"ghost_refresh_received_bytes", std::to_string(gravity_ghost_refresh.received_bytes)},
                       {"ghost_refresh_committed_slots", std::to_string(gravity_ghost_refresh.committed_slots)},
                       {"predicted_inactive_source_particles", std::to_string(m_source_predicted_inactive_count)},
+                      {"predicted_inactive_source_count", std::to_string(m_source_predicted_inactive_count)},
                       {"predicted_inactive_sources_required",
                           context.pm_refresh_directive.requires_predicted_inactive_sources ? "true" : "false"},
                       {"pm_refresh_reason", std::string(pmRefreshReasonName(context.pm_refresh_directive.reason))},
@@ -1910,15 +2093,16 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
     constexpr std::uint32_t no_scatter_row =
         std::numeric_limits<std::uint32_t>::max();
-    for (std::size_t target_slot = 0; target_slot < m_local_active_indices.size(); ++target_slot) {
-      const std::uint32_t particle_row = m_active_target_particle_row[target_slot];
+    const auto solved_active_indices = activeSourceIndices();
+    for (std::size_t target_slot = 0; target_slot < solved_active_indices.size(); ++target_slot) {
+      const std::uint32_t particle_row = targetParticleRow(target_slot);
       if (particle_row != no_scatter_row) {
         m_particle_accel_x[particle_row] = m_active_accel_x[target_slot];
         m_particle_accel_y[particle_row] = m_active_accel_y[target_slot];
         m_particle_accel_z[particle_row] = m_active_accel_z[target_slot];
         m_particle_force_cache_valid[particle_row] = 1U;
       }
-      const std::uint32_t cell_row = m_active_target_cell_row[target_slot];
+      const std::uint32_t cell_row = targetCellRow(target_slot);
       if (cell_row != no_scatter_row) {
         m_cell_accel_x[cell_row] = m_active_accel_x[target_slot];
         m_cell_accel_y[cell_row] = m_active_accel_y[target_slot];
@@ -1949,7 +2133,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         break;
       }
     }
-    if (m_force_cache_valid) {
+    if (m_force_cache_valid &&
+        m_source_representation == gravity::GravitySourceRepresentation::kMaterializedGeneric) {
       for (std::size_t cell_index = 0; cell_index < cell_count; ++cell_index) {
         if (m_owned_leaf_cell_mask[cell_index] != 0U &&
             m_cell_force_cache_valid[cell_index] == 0U) {
@@ -1959,6 +2144,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
       }
     }
 
+    if (gravity_fallback_reservation.valid()) {
+      gravity_fallback_reservation.release();
+    }
     if (gravity_phase_reservation.valid()) {
       const std::uint64_t gravity_baseline_after =
           core::memoryReportBaselineOwnedBytes(memoryReport());
@@ -1970,6 +2158,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
               "gravity retained-capacity baseline reconciliation");
       gravity_phase_reservation.reconcileBaselineOwnedAndRelease(
           reconciled_process_baseline);
+    }
+    // Borrowed spans may alias the step workspace. Keep only the explicit
+    // representation/generation policy after the solve; rebuild the span at the
+    // next force evaluation rather than retaining a pointer across phase reset.
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      m_active_source_indices = {};
     }
 
   }
@@ -2054,22 +2249,27 @@ class GravityRuntimeImpl final : public GravityRuntime {
     const double hubble_drag = hubbleDragFactorForStage(context);
     for (const std::uint32_t particle_index :
          context.active_set.particle_indices) {
-      if (particle_index >= m_active_slot_by_particle.size()) {
-        throw std::out_of_range(
-            "gravity kick particle index is outside the fresh-force slot map");
-      }
-      const int active_slot = m_active_slot_by_particle[particle_index];
-      if (active_slot < 0) {
+      const std::optional<std::size_t> active_slot =
+          activeSlotForParticle(particle_index);
+      if (!active_slot.has_value()) {
         continue;
       }
       applyPeculiarVelocityKick(
           context.state,
           particle_index,
-          m_active_accel_x[static_cast<std::size_t>(active_slot)],
-          m_active_accel_y[static_cast<std::size_t>(active_slot)],
-          m_active_accel_z[static_cast<std::size_t>(active_slot)],
+          m_active_accel_x[*active_slot],
+          m_active_accel_y[*active_slot],
+          m_active_accel_z[*active_slot],
           kick_factor,
           hubble_drag);
+    }
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      if (!context.active_set.cell_indices.empty()) {
+        throw std::logic_error(
+            "borrowed homogeneous DMO fresh-force path unexpectedly received gas-cell targets");
+      }
+      return;
     }
     for (const std::uint32_t cell_index : context.active_set.cell_indices) {
       if (cell_index >= m_active_slot_by_cell.size()) {
@@ -2222,12 +2422,15 @@ class GravityRuntimeImpl final : public GravityRuntime {
     };
 
     ++summary.cheap_checks_executed;
-    if (m_local_active_indices.size() != m_active_target_particle_row.size() ||
-        m_local_active_indices.size() != m_active_target_cell_row.size()) {
+    const auto health_active_indices = activeSourceIndices();
+    const std::size_t health_source_count = sourceMass(context.state).size();
+    if (m_source_representation == gravity::GravitySourceRepresentation::kMaterializedGeneric &&
+        (health_active_indices.size() != m_active_target_particle_row.size() ||
+         health_active_indices.size() != m_active_target_cell_row.size())) {
       ++summary.decomposition_sanity_failure_count;
       failFatal("local gravity target vectors diverged after compact-view rebuild");
     }
-    if (m_local_active_indices.size() > m_local_source_x.size()) {
+    if (health_active_indices.size() > health_source_count) {
       ++summary.decomposition_sanity_failure_count;
       failFatal("active local subset exceeds local source population");
     }
@@ -2340,6 +2543,206 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
   }
 
+  template <typename T>
+  static void releaseVectorCapacity(std::vector<T>& values) {
+    std::vector<T>().swap(values);
+  }
+
+  [[nodiscard]] static bool isIdentityParticleSpan(
+      std::span<const std::uint32_t> rows,
+      std::size_t particle_count) noexcept {
+    if (rows.size() != particle_count) {
+      return false;
+    }
+    for (std::size_t i = 0; i < particle_count; ++i) {
+      if (rows[i] != i) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool borrowedHomogeneousDmoBaseEligible(
+      const core::SimulationState& state) const {
+    if (m_tree_pm_options.enable_zoom_long_range_correction ||
+        state.cells.size() != 0U) {
+      return false;
+    }
+    const std::size_t particle_count = state.particles.size();
+    if (particle_count > static_cast<std::size_t>(
+            std::numeric_limits<std::uint32_t>::max())) {
+      return false;
+    }
+    if (!state.particles.isConsistent() ||
+        !state.particle_sidecar.isConsistent() ||
+        state.particle_sidecar.species_tag.size() != particle_count ||
+        state.particle_sidecar.owning_rank.size() != particle_count) {
+      return false;
+    }
+    if (!state.particle_sidecar.has_gravity_softening_override.empty() &&
+        state.particle_sidecar.has_gravity_softening_override.size() != particle_count) {
+      return false;
+    }
+
+    const std::uint32_t local_rank =
+        static_cast<std::uint32_t>(std::max(m_runtime_topology.world_rank, 0));
+    const std::uint32_t dm_species_tag =
+        static_cast<std::uint32_t>(core::ParticleSpecies::kDarkMatter);
+    const bool periodic_sources =
+        m_tree_pm_options.pm_options.boundary_condition ==
+        gravity::PmBoundaryCondition::kPeriodic;
+    const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
+    const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
+    const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
+    for (std::size_t row = 0; row < particle_count; ++row) {
+      if (state.particle_sidecar.owning_rank[row] != local_rank ||
+          state.particle_sidecar.species_tag[row] != dm_species_tag) {
+        return false;
+      }
+      if (!state.particle_sidecar.has_gravity_softening_override.empty() &&
+          state.particle_sidecar.has_gravity_softening_override[row] != 0U) {
+        return false;
+      }
+      const double x = state.particles.position_x_comoving[row];
+      const double y = state.particles.position_y_comoving[row];
+      const double z = state.particles.position_z_comoving[row];
+      const double mass = state.particles.mass_code[row];
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) ||
+          !std::isfinite(mass) || mass < 0.0) {
+        throw std::runtime_error(
+            "borrowed homogeneous DMO gravity source has non-finite coordinates or negative/non-finite mass");
+      }
+      if (periodic_sources &&
+          (x < 0.0 || x >= box_size_x || y < 0.0 || y >= box_size_y ||
+           z < 0.0 || z >= box_size_z)) {
+        return false;
+      }
+    }
+
+    const double dm_softening = m_tree_pm_species_softening.enabled
+        ? m_tree_pm_species_softening.epsilon_comoving_by_species[
+              static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)]
+        : m_tree_pm_options.tree_options.softening.epsilon_comoving;
+    constexpr double max_certified_softening_to_split_ratio = 0.20;
+    if (!std::isfinite(dm_softening) || dm_softening < 0.0 ||
+        dm_softening > max_certified_softening_to_split_ratio *
+            m_tree_pm_options.split_policy.split_scale_comoving) {
+      return false;
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool borrowedHomogeneousDmoEligible(
+      const core::StepContext& context,
+      std::span<const std::uint32_t> active_particles,
+      bool prediction_requires_inactive_coordinates) const {
+    return !prediction_requires_inactive_coordinates &&
+        borrowedHomogeneousDmoBaseEligible(context.state) &&
+        isIdentityParticleSpan(active_particles, context.state.particles.size());
+  }
+
+  void releaseGenericGravityRepresentationCapacity() {
+    releaseVectorCapacity(m_active_slot_by_particle);
+    releaseVectorCapacity(m_active_slot_by_cell);
+    releaseVectorCapacity(m_owned_local_index_by_global);
+    releaseVectorCapacity(m_owned_local_index_by_cell);
+    releaseVectorCapacity(m_owned_leaf_cell_mask);
+    releaseVectorCapacity(m_local_source_x);
+    releaseVectorCapacity(m_local_source_y);
+    releaseVectorCapacity(m_local_source_z);
+    releaseVectorCapacity(m_local_source_mass);
+    releaseVectorCapacity(m_local_source_species_tag);
+    releaseVectorCapacity(m_local_source_softening_comoving);
+    releaseVectorCapacity(m_local_source_softening_override_mask);
+    releaseVectorCapacity(m_local_source_particle_row);
+    releaseVectorCapacity(m_local_source_cell_row);
+    releaseVectorCapacity(m_active_target_particle_row);
+    releaseVectorCapacity(m_active_target_cell_row);
+    releaseVectorCapacity(m_local_active_indices);
+    releaseVectorCapacity(m_local_active_global_indices);
+    releaseVectorCapacity(m_force_refresh_particle_indices);
+    releaseVectorCapacity(m_source_is_high_res);
+    releaseVectorCapacity(m_active_is_high_res);
+  }
+
+  [[nodiscard]] std::span<const double> sourcePosX(
+      const core::SimulationState& state) const noexcept {
+    return m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? std::span<const double>(state.particles.position_x_comoving.data(),
+                                  state.particles.position_x_comoving.size())
+        : std::span<const double>(m_local_source_x.data(), m_local_source_x.size());
+  }
+  [[nodiscard]] std::span<const double> sourcePosY(
+      const core::SimulationState& state) const noexcept {
+    return m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? std::span<const double>(state.particles.position_y_comoving.data(),
+                                  state.particles.position_y_comoving.size())
+        : std::span<const double>(m_local_source_y.data(), m_local_source_y.size());
+  }
+  [[nodiscard]] std::span<const double> sourcePosZ(
+      const core::SimulationState& state) const noexcept {
+    return m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? std::span<const double>(state.particles.position_z_comoving.data(),
+                                  state.particles.position_z_comoving.size())
+        : std::span<const double>(m_local_source_z.data(), m_local_source_z.size());
+  }
+  [[nodiscard]] std::span<const double> sourceMass(
+      const core::SimulationState& state) const noexcept {
+    return m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? std::span<const double>(state.particles.mass_code.data(),
+                                  state.particles.mass_code.size())
+        : std::span<const double>(m_local_source_mass.data(), m_local_source_mass.size());
+  }
+  [[nodiscard]] std::span<const std::uint32_t> sourceSpecies() const noexcept {
+    return m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? std::span<const std::uint32_t>{}
+        : std::span<const std::uint32_t>(m_local_source_species_tag.data(),
+                                         m_local_source_species_tag.size());
+  }
+  [[nodiscard]] std::span<const std::uint32_t> activeSourceIndices() const noexcept {
+    return m_active_source_indices;
+  }
+  [[nodiscard]] std::uint32_t targetParticleRow(std::size_t target_slot) const {
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      return static_cast<std::uint32_t>(target_slot);
+    }
+    return m_active_target_particle_row.at(target_slot);
+  }
+  [[nodiscard]] std::uint32_t targetCellRow(std::size_t target_slot) const {
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      return std::numeric_limits<std::uint32_t>::max();
+    }
+    return m_active_target_cell_row.at(target_slot);
+  }
+
+  [[nodiscard]] std::optional<std::size_t> activeSlotForParticle(
+      std::uint32_t particle_row) const {
+    if (m_source_representation ==
+        gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
+      if (particle_row >= m_active_accel_x.size()) {
+        throw std::out_of_range(
+            "borrowed homogeneous DMO particle row exceeds active acceleration extent");
+      }
+      return static_cast<std::size_t>(particle_row);
+    }
+    if (particle_row >= m_active_slot_by_particle.size()) {
+      throw std::out_of_range(
+          "gravity kick particle index is outside the fresh-force slot map");
+    }
+    const int active_slot = m_active_slot_by_particle[particle_row];
+    if (active_slot < 0) {
+      return std::nullopt;
+    }
+    return static_cast<std::size_t>(active_slot);
+  }
+
   enum class SourcePredictionEpoch : std::uint8_t {
     kNone = 0,
     kStepBegin = 1,
@@ -2349,14 +2752,40 @@ class GravityRuntimeImpl final : public GravityRuntime {
   void rebuildOwnedParticleCompactView(
       const core::StepContext& context,
       std::span<const std::uint32_t> active_particles,
-      SourcePredictionEpoch prediction_epoch = SourcePredictionEpoch::kNone) {
+      SourcePredictionEpoch prediction_epoch = SourcePredictionEpoch::kNone,
+      std::span<const std::uint32_t> prediction_current_particles = {}) {
     const core::SimulationState& state = context.state;
+    const std::size_t particle_count = state.particles.size();
+    const std::size_t cell_count = state.cells.size();
+    const bool prediction_requires_inactive_coordinates =
+        prediction_epoch != SourcePredictionEpoch::kNone &&
+        !isIdentityParticleSpan(prediction_current_particles, particle_count);
+    m_active_source_indices = {};
+    if (borrowedHomogeneousDmoEligible(
+            context, active_particles, prediction_requires_inactive_coordinates)) {
+      if (context.workspace == nullptr ||
+          context.workspace->gravity_particle_index_scratch.size() != particle_count) {
+        throw std::logic_error(
+            "borrowed homogeneous DMO gravity requires the admitted all-particle index lane");
+      }
+      releaseGenericGravityRepresentationCapacity();
+      m_source_representation =
+          gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo;
+      m_borrowed_particle_index_generation = state.particleIndexGeneration();
+      m_borrowed_gravity_source_generation = state.gravitySourceGeneration();
+      m_active_source_indices = context.workspace->gravity_particle_index_scratch;
+      m_source_predicted_inactive_count = 0U;
+      return;
+    }
+
+    m_source_representation =
+        gravity::GravitySourceRepresentation::kMaterializedGeneric;
+    m_borrowed_particle_index_generation = 0U;
+    m_borrowed_gravity_source_generation = 0U;
     state.requireGasCellIdentityMapCoversDenseRows(
         "gravity authoritative gas source rebuild");
     const std::uint32_t world_rank =
         static_cast<std::uint32_t>(m_runtime_topology.world_rank);
-    const std::size_t particle_count = state.particles.size();
-    const std::size_t cell_count = state.cells.size();
     constexpr std::uint32_t no_row = std::numeric_limits<std::uint32_t>::max();
 
     m_owned_local_index_by_global.assign(particle_count, -1);
@@ -2381,7 +2810,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
             "PM source prediction requires per-particle drift epoch sidecars");
       }
       active_mask.assign(particle_count, 0U);
-      for (const std::uint32_t global_index : active_particles) {
+      for (const std::uint32_t global_index : prediction_current_particles) {
         if (global_index >= particle_count) {
           throw std::out_of_range(
               "gravity callback active particle index out of range");
@@ -2598,27 +3027,24 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_owned_local_index_by_cell[cell_index] = static_cast<int>(source_index);
     }
 
-     m_local_active_indices.clear();
-     m_local_active_global_indices.clear();
-     m_active_target_particle_row.clear();
-     m_active_target_cell_row.clear();
-     const std::size_t target_capacity = core::checkedSizeAdd(
-
+    m_local_active_indices.clear();
+    m_local_active_global_indices.clear();
+    m_active_target_particle_row.clear();
+    m_active_target_cell_row.clear();
+    const std::size_t target_capacity = core::checkedSizeAdd(
         active_particles.size(), authoritative_source_rows.gas_cell_rows.size(),
         "gravity authoritative target capacity");
     m_local_active_indices.reserve(target_capacity);
     m_local_active_global_indices.reserve(active_particles.size());
     m_active_target_particle_row.reserve(target_capacity);
-     m_active_target_cell_row.reserve(target_capacity);
-
+    m_active_target_cell_row.reserve(target_capacity);
 
     const auto appendTarget = [&](std::uint32_t source_index,
                                   std::uint32_t particle_row,
                                   std::uint32_t cell_row) {
-       m_local_active_indices.push_back(source_index);
-       m_active_target_particle_row.push_back(particle_row);
-       m_active_target_cell_row.push_back(cell_row);
-
+      m_local_active_indices.push_back(source_index);
+      m_active_target_particle_row.push_back(particle_row);
+      m_active_target_cell_row.push_back(cell_row);
     };
 
     for (const std::uint32_t global_index : active_particles) {
@@ -2653,6 +3079,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
           no_row,
           static_cast<std::uint32_t>(cell_index));
     }
+    m_active_source_indices = m_local_active_indices;
   }
 
   const RuntimeServices& m_services;
@@ -2670,6 +3097,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
   gravity::TreePmCoordinator m_tree_pm_coordinator;
   gravity::TreePmOptions m_tree_pm_options;
   gravity::TreeSofteningSpeciesPolicy m_tree_pm_species_softening{};
+  gravity::GravitySourceRepresentation m_source_representation =
+      gravity::GravitySourceRepresentation::kMaterializedGeneric;
+  std::uint64_t m_borrowed_particle_index_generation = 0U;
+  std::uint64_t m_borrowed_gravity_source_generation = 0U;
+  std::span<const std::uint32_t> m_active_source_indices{};
   std::vector<double> m_active_accel_x;
   std::vector<double> m_active_accel_y;
   std::vector<double> m_active_accel_z;
@@ -2694,9 +3126,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<std::uint8_t> m_local_source_softening_override_mask;
   std::vector<std::uint32_t> m_local_source_particle_row;
   std::vector<std::uint32_t> m_local_source_cell_row;
-   std::vector<std::uint32_t> m_active_target_particle_row;
-   std::vector<std::uint32_t> m_active_target_cell_row;
-   std::vector<std::uint8_t> m_source_is_high_res;
+  std::vector<std::uint32_t> m_active_target_particle_row;
+  std::vector<std::uint32_t> m_active_target_cell_row;
+  std::vector<std::uint8_t> m_source_is_high_res;
 
   std::vector<std::uint8_t> m_active_is_high_res;
   std::filesystem::path m_zoom_region_path;

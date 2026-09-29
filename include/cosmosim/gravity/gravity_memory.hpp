@@ -5,6 +5,7 @@
 
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/gravity/gravity_source_snapshot.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_gravity.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
@@ -80,6 +81,9 @@ struct GravityMemoryEstimateInput {
   std::uint64_t local_target_count = 0U;
   std::uint64_t local_particle_count = 0U;
   std::uint64_t local_cell_count = 0U;
+  GravitySourceRepresentation source_representation =
+      GravitySourceRepresentation::kMaterializedGeneric;
+  bool relative_force_mac_enabled = false;
   std::size_t tree_leaf_size = 16U;
   TreeMultipoleOrder multipole_order = TreeMultipoleOrder::kQuadrupole;
   PmGridShape pm_shape{};

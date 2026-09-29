@@ -325,20 +325,38 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   // source-index views, so there is no second target coordinate triplet here.
   // High-resolution classification is cold unless the zoom long-range
   // correction is active; do not charge its byte lanes to homogeneous runs.
+  const bool borrowed_homogeneous_dmo =
+      input.source_representation ==
+      GravitySourceRepresentation::kBorrowedHomogeneousDmo;
+  if (borrowed_homogeneous_dmo &&
+      (input.local_cell_count != 0U || input.zoom_enabled)) {
+    throw std::invalid_argument(
+        "borrowed homogeneous DMO gravity estimate requires zero cells and disabled zoom correction");
+  }
   const std::uint64_t zoom_mask_bytes_per_source =
       input.zoom_enabled ? sizeof(std::uint8_t) : 0U;
   const std::uint64_t zoom_mask_bytes_per_target =
       input.zoom_enabled ? sizeof(std::uint8_t) : 0U;
-  const std::uint64_t source_staging_bytes = checkedMul(
-      input.local_source_count,
-      5U * sizeof(double) + 3U * sizeof(std::uint32_t) + sizeof(std::uint8_t) +
-          zoom_mask_bytes_per_source,
-      "gravity source staging estimate overflow");
-  const std::uint64_t target_view_bytes = checkedMul(
-      input.local_target_count,
-      5U * sizeof(std::uint32_t) + 2U * sizeof(double) + sizeof(std::uint8_t) +
-          zoom_mask_bytes_per_target,
-      "gravity target view estimate overflow");
+  const std::uint64_t source_staging_bytes = borrowed_homogeneous_dmo
+      ? 0U
+      : checkedMul(
+            input.local_source_count,
+            5U * sizeof(double) + 3U * sizeof(std::uint32_t) +
+                sizeof(std::uint8_t) + zoom_mask_bytes_per_source,
+            "gravity source staging estimate overflow");
+  const std::uint64_t borrowed_target_bytes_per_target = checkedAdd(
+      sizeof(std::uint32_t),
+      input.relative_force_mac_enabled ? sizeof(double) : 0U,
+      "gravity borrowed target view byte estimate overflow");
+  const std::uint64_t target_view_bytes = borrowed_homogeneous_dmo
+      ? checkedMul(
+            input.local_target_count, borrowed_target_bytes_per_target,
+            "gravity borrowed target-view estimate overflow")
+      : checkedMul(
+            input.local_target_count,
+            5U * sizeof(std::uint32_t) + 2U * sizeof(double) +
+                sizeof(std::uint8_t) + zoom_mask_bytes_per_target,
+            "gravity target view estimate overflow");
   const std::uint64_t tree_construction_bytes = checkedMul(
       input.local_source_count,
       2U * sizeof(std::uint64_t) + 2U * sizeof(TreeLocalIndex) + sizeof(double),
@@ -363,17 +381,23 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       input.local_source_count,
       3U * sizeof(double) + sizeof(std::uint8_t),
       "gravity persistent force cache estimate overflow");
-  const std::uint64_t runtime_particle_map_bytes = checkedMul(
-      input.local_particle_count,
-      3U * sizeof(std::int32_t),
-      "gravity runtime particle map estimate overflow");
-  const std::uint64_t runtime_cell_map_bytes = checkedMul(
-      input.local_cell_count,
-      2U * sizeof(std::int32_t) + sizeof(std::uint8_t),
-      "gravity runtime cell map estimate overflow");
-  const std::uint64_t runtime_refresh_list_bytes = checkedMul(
-      input.local_particle_count, sizeof(std::uint32_t),
-      "gravity runtime refresh-list estimate overflow");
+  const std::uint64_t runtime_particle_map_bytes = borrowed_homogeneous_dmo
+      ? 0U
+      : checkedMul(
+            input.local_particle_count,
+            3U * sizeof(std::int32_t),
+            "gravity runtime particle map estimate overflow");
+  const std::uint64_t runtime_cell_map_bytes = borrowed_homogeneous_dmo
+      ? 0U
+      : checkedMul(
+            input.local_cell_count,
+            2U * sizeof(std::int32_t) + sizeof(std::uint8_t),
+            "gravity runtime cell map estimate overflow");
+  const std::uint64_t runtime_refresh_list_bytes = borrowed_homogeneous_dmo
+      ? 0U
+      : checkedMul(
+            input.local_particle_count, sizeof(std::uint32_t),
+            "gravity runtime refresh-list estimate overflow");
   const std::uint64_t runtime_mapping_bytes = checkedAdd(
       checkedAdd(runtime_particle_map_bytes, runtime_cell_map_bytes,
                  "gravity runtime mapping estimate overflow"),
@@ -474,10 +498,16 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   core::MemoryReportBuilder builder;
   addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
               "gravity.estimate.source_staging", source_staging_bytes,
-              "authoritative source staging; excludes canonical SimulationState");
+              borrowed_homogeneous_dmo
+                  ? "borrowed homogeneous DMO uses canonical SimulationState XYZ/mass and implicit species/row identity"
+                  : "authoritative source staging; excludes canonical SimulationState");
   addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
               "gravity.estimate.target_index_views", target_view_bytes,
-              "targets alias source coordinates by compact local index");
+              borrowed_homogeneous_dmo
+                  ? (input.relative_force_mac_enabled
+                         ? "one governed uint32 all-particle source/target index lane plus lazy relative-MAC previous-acceleration magnitude"
+                         : "one governed uint32 all-particle source/target index lane")
+                  : "targets alias source coordinates by compact local index");
   addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
               "gravity.estimate.force_accumulators", acceleration_bytes,
               "authoritative compact active acceleration triplet");
@@ -496,7 +526,9 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
               "three acceleration lanes plus validity; exact particle/cell split is runtime-owned");
   addEstimate(builder, core::MemorySubsystem::kActiveSets, core::MemoryLifetime::kTransient,
               "gravity.estimate.runtime_index_and_selection_maps", runtime_mapping_bytes,
-              "active-slot/owned-local maps, leaf mask and force-refresh particle list");
+              borrowed_homogeneous_dmo
+                  ? "identity particle/source/target/active-slot mappings are implicit; no cell maps or refresh list"
+                  : "active-slot/owned-local maps, leaf mask and force-refresh particle list");
   addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
               "gravity.estimate.tree_nodes", tree_nodes_bytes,
               "leaf-derived estimate; dynamic growth remains possible for adversarial geometry");
@@ -598,7 +630,9 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   GravityMemoryEstimate result;
   result.report = std::move(builder).finish();
   result.report.notes.push_back(
-      "Gravity pre-run estimate includes owned source staging, compact target/force lanes, runtime index/selection maps, PM indexed-target scratch, periodic tree staging, tree workspace, PM fields, explicit PM PlanResources arrays, optional zoom lanes, persistent force cache, persistent PM force-halo cache, one shared bounded gravity communication arena, and known CUDA buffers; canonical SimulationState is reported separately.");
+      borrowed_homogeneous_dmo
+          ? "Gravity pre-run estimate selected borrowed_homogeneous_dmo: canonical XYZ/mass are aliased, homogeneous DM species and row mappings are implicit, and one governed uint32 target/source index lane remains; canonical SimulationState is reported separately."
+          : "Gravity pre-run estimate selected materialized_generic: owned source staging, compact target/force lanes, runtime index/selection maps, PM indexed-target scratch, periodic tree staging, tree workspace, PM fields, explicit PM PlanResources arrays, optional zoom lanes, persistent force cache, persistent PM force-halo cache, one shared bounded gravity communication arena, and known CUDA buffers are modeled; canonical SimulationState is reported separately.");
   result.report.notes.push_back(
       std::string("PM estimate profile assignment=") +
       (input.assignment_scheme == PmAssignmentScheme::kTsc ? "tsc" : "cic") +
