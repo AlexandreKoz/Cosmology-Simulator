@@ -881,14 +881,18 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     };
     const parallel::LocalOwnershipIdentitySummary final_expected_global_identity =
         reduceParticleIdentity(expected_global_particle_ids, mpi_context);
-    std::vector<std::uint64_t> final_local_owned_particle_ids;
-    final_local_owned_particle_ids.reserve(state.particles.size());
-    for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-      if (state.particleOwningRank(particle_index) ==
-          static_cast<std::uint32_t>(mpi_context.worldRank())) {
-        final_local_owned_particle_ids.push_back(
-            state.particle_sidecar.particle_id[particle_index]);
+    std::vector<std::uint64_t> final_generic_local_owned_particle_ids;
+    std::span<const std::uint64_t> final_local_owned_particle_ids = state.particle_sidecar.particle_id;
+    if (!state.hasHomogeneousDmoMetadata()) {
+      final_generic_local_owned_particle_ids.reserve(state.particles.size());
+      for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+        if (state.particleOwningRank(particle_index) ==
+            static_cast<std::uint32_t>(mpi_context.worldRank())) {
+          final_generic_local_owned_particle_ids.push_back(
+              state.particle_sidecar.particle_id[particle_index]);
+        }
       }
+      final_local_owned_particle_ids = final_generic_local_owned_particle_ids;
     }
     const parallel::ExactOwnershipPartitionReport exact_partition =
         parallel::validateExactGlobalOwnershipPartition(
@@ -911,9 +915,9 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
           ", expected_square_sum=" + std::to_string(final_expected_global_identity.local_particle_id_square_sum) +
           ", actual_xor=" + std::to_string(report.global_particle_id_xor) +
           ", expected_xor=" + std::to_string(final_expected_global_identity.local_particle_id_xor) +
-          ", duplicate_count=" + std::to_string(exact_partition.duplicate_particle_ids.size()) +
-          ", missing_count=" + std::to_string(exact_partition.missing_expected_particle_ids.size()) +
-          ", extra_count=" + std::to_string(exact_partition.extra_particle_ids.size()));
+          ", duplicate_count=" + std::to_string(exact_partition.duplicate_count) +
+          ", missing_count=" + std::to_string(exact_partition.missing_count) +
+          ", extra_count=" + std::to_string(exact_partition.extra_count));
     }
     report.treepm_long_range_refresh_count = gravity_callback.longRangeRefreshCount();
     report.treepm_long_range_reuse_count = gravity_callback.longRangeReuseCount();

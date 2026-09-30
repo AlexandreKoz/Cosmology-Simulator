@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -852,6 +853,242 @@ template <typename TRecord, typename TEncode, typename TDecode>
 #endif
 }
 
+
+struct CompactDmoExchangeResult {
+  MigrationExchangeStats stats{};
+  std::vector<std::uint64_t> inbound_particle_ids;
+};
+
+[[nodiscard]] CompactDmoExchangeResult exchangeRuntimeCompactDmoParticles(
+    const parallel::MpiContext& mpi_context,
+    const core::SimulationState& state,
+    const std::vector<std::vector<std::uint32_t>>& local_indices_by_rank,
+    std::span<const std::uint64_t> inbound_count_by_rank,
+    core::ParticleSoa& candidate_particles,
+    core::ParticleSidecar& candidate_sidecar,
+    std::size_t inbound_begin,
+    bool materialize_candidate_sfc) {
+  const int world_size = mpi_context.worldSize();
+  const std::size_t rank_count = static_cast<std::size_t>(world_size);
+  if (world_size <= 0 || local_indices_by_rank.size() != rank_count ||
+      inbound_count_by_rank.size() != rank_count) {
+    throw std::invalid_argument("compact DMO migration exchange rank extent mismatch");
+  }
+  CompactDmoExchangeResult result;
+  std::size_t total_inbound = 0U;
+  std::vector<std::size_t> inbound_peer_begin(rank_count, inbound_begin);
+  for (std::size_t peer = 0; peer < rank_count; ++peer) {
+    inbound_peer_begin[peer] = core::checkedSizeAdd(inbound_begin, total_inbound,
+        "compact DMO inbound peer begin");
+    total_inbound = core::checkedSizeAdd(total_inbound,
+        core::checkedIntegralNarrow<std::size_t>(inbound_count_by_rank[peer],
+            "compact DMO inbound peer count"),
+        "compact DMO total inbound count");
+  }
+  if (core::checkedSizeAdd(inbound_begin, total_inbound, "compact DMO candidate inbound extent") !=
+      candidate_particles.size()) {
+    throw std::logic_error("compact DMO migration candidate inbound extent mismatch");
+  }
+  result.inbound_particle_ids.reserve(total_inbound);
+  if (world_size == 1) {
+    if (total_inbound != 0U || !local_indices_by_rank.front().empty()) {
+      throw std::logic_error("single-rank compact DMO migration cannot contain remote records");
+    }
+    return result;
+  }
+  if (!mpi_context.isEnabled()) {
+    throw std::runtime_error("compact DMO migration exchange requires MPI for world_size > 1");
+  }
+#if COSMOSIM_ENABLE_MPI
+  struct OutboundCursor {
+    std::size_t record_index = 0U;
+    std::size_t fragment_offset = 0U;
+    std::vector<std::uint8_t> encoded_record;
+  };
+  struct InboundAssembly {
+    std::uint64_t record_sequence = 0U;
+    std::uint64_t total_bytes = 0U;
+    std::size_t received_bytes = 0U;
+    std::vector<std::uint8_t> encoded_record;
+    bool active = false;
+  };
+  const std::size_t round_limit = parallel::mpiTransportRoundLimitBytes();
+  const migration_wire::PacketCapacityPlan packet_plan =
+      migration_wire::planPacketCapacity(round_limit, rank_count);
+  const std::size_t fragment_payload_limit = packet_plan.fragment_payload_bytes;
+  std::vector<OutboundCursor> outbound(rank_count);
+  std::vector<InboundAssembly> inbound_assembly(rank_count);
+  std::vector<std::vector<std::uint8_t>> send_payloads(rank_count);
+  const auto localHasPending = [&]() {
+    for (std::size_t peer = 0; peer < rank_count; ++peer) {
+      if (outbound[peer].record_index < local_indices_by_rank[peer].size()) return true;
+    }
+    return false;
+  };
+  const auto payloadCapacityBytes = [](const std::vector<std::vector<std::uint8_t>>& payloads) {
+    std::uint64_t total = 0U;
+    for (const auto& payload : payloads) {
+      total = core::checkedMemoryBytesAdd(total,
+          core::checkedIntegralNarrow<std::uint64_t>(payload.capacity(), "compact DMO packet capacity"),
+          "compact DMO packet aggregate capacity");
+    }
+    return total;
+  };
+  const auto assemblyCapacityBytes = [&]() {
+    std::uint64_t total = 0U;
+    for (const auto& assembly : inbound_assembly) {
+      total = core::checkedMemoryBytesAdd(total,
+          core::checkedIntegralNarrow<std::uint64_t>(assembly.encoded_record.capacity(),
+              "compact DMO record assembly capacity"),
+          "compact DMO record assembly aggregate capacity");
+    }
+    return total;
+  };
+  while (mpi_context.allreduceMaxUint64(localHasPending() ? 1U : 0U) != 0U) {
+    std::exception_ptr local_failure;
+    try {
+      for (auto& payload : send_payloads) payload.clear();
+      for (std::size_t peer = 0; peer < rank_count; ++peer) {
+        auto& cursor = outbound[peer];
+        if (cursor.record_index >= local_indices_by_rank[peer].size()) continue;
+        if (cursor.encoded_record.empty()) {
+          const std::uint32_t row = local_indices_by_rank[peer][cursor.record_index];
+          if (row >= state.particles.size()) throw std::out_of_range("compact DMO outbound row out of range");
+          cursor.encoded_record = migration_wire::encodeDmoParticleMigrationRecord(
+              migration_wire::DmoParticleMigrationRecord{
+                  .particle_id = state.particle_sidecar.particle_id[row],
+                  .sfc_key = state.particleSfcKey(row),
+                  .position_x_comoving = state.particles.position_x_comoving[row],
+                  .position_y_comoving = state.particles.position_y_comoving[row],
+                  .position_z_comoving = state.particles.position_z_comoving[row],
+                  .velocity_x_peculiar = state.particles.velocity_x_peculiar[row],
+                  .velocity_y_peculiar = state.particles.velocity_y_peculiar[row],
+                  .velocity_z_peculiar = state.particles.velocity_z_peculiar[row],
+                  .mass_code = state.particles.mass_code[row],
+              });
+          cursor.fragment_offset = 0U;
+        }
+        const std::size_t remaining = cursor.encoded_record.size() - cursor.fragment_offset;
+        const std::size_t fragment_bytes = std::min(fragment_payload_limit, remaining);
+        send_payloads[peer] = migration_wire::encodeFragment(
+            static_cast<std::uint64_t>(cursor.record_index),
+            static_cast<std::uint64_t>(cursor.encoded_record.size()),
+            static_cast<std::uint64_t>(cursor.fragment_offset),
+            std::span<const std::uint8_t>(cursor.encoded_record.data() + cursor.fragment_offset,
+                                          fragment_bytes));
+        result.stats.wire_bytes_sent = core::checkedMemoryBytesAdd(
+            result.stats.wire_bytes_sent,
+            core::checkedIntegralNarrow<std::uint64_t>(send_payloads[peer].size(),
+                "compact DMO sent packet bytes"),
+            "compact DMO cumulative wire bytes sent");
+        cursor.fragment_offset = core::checkedSizeAdd(cursor.fragment_offset, fragment_bytes,
+                                                       "compact DMO outbound fragment progress");
+        if (cursor.fragment_offset == cursor.encoded_record.size()) {
+          cursor.encoded_record.clear();
+          ++cursor.record_index;
+          cursor.fragment_offset = 0U;
+        }
+      }
+    } catch (...) { local_failure = std::current_exception(); }
+    mpi_context.rethrowCollectivePreparationFailure(local_failure,
+        "compact DMO migration bounded packet preparation");
+    result.stats.packet_send_capacity_bytes = std::max(result.stats.packet_send_capacity_bytes,
+                                                        payloadCapacityBytes(send_payloads));
+    const auto recv_payloads = parallel::exchangeBoundedAlltoallBytes(mpi_context, send_payloads);
+    result.stats.packet_receive_capacity_bytes = std::max(result.stats.packet_receive_capacity_bytes,
+                                                           payloadCapacityBytes(recv_payloads));
+    ++result.stats.physical_exchange_rounds;
+    local_failure = nullptr;
+    try {
+      for (std::size_t peer = 0; peer < rank_count; ++peer) {
+        const auto& payload = recv_payloads[peer];
+        if (payload.empty()) continue;
+        result.stats.wire_bytes_received = core::checkedMemoryBytesAdd(
+            result.stats.wire_bytes_received,
+            core::checkedIntegralNarrow<std::uint64_t>(payload.size(), "compact DMO received packet bytes"),
+            "compact DMO cumulative wire bytes received");
+        const migration_wire::FragmentView fragment = migration_wire::decodeFragment(payload);
+        auto& assembly = inbound_assembly[peer];
+        if (!assembly.active) {
+          if (fragment.fragment_offset != 0U) throw std::runtime_error("compact DMO fragment stream did not start at zero");
+          if (fragment.record_sequence >= inbound_count_by_rank[peer]) throw std::runtime_error("compact DMO inbound sequence exceeds admitted count");
+          assembly.active = true;
+          assembly.record_sequence = fragment.record_sequence;
+          assembly.total_bytes = fragment.record_total_bytes;
+          assembly.received_bytes = 0U;
+          assembly.encoded_record.resize(core::checkedIntegralNarrow<std::size_t>(
+              fragment.record_total_bytes, "compact DMO inbound record bytes"));
+        }
+        if (fragment.record_sequence != assembly.record_sequence ||
+            fragment.record_total_bytes != assembly.total_bytes ||
+            fragment.fragment_offset != assembly.received_bytes) {
+          throw std::runtime_error("compact DMO fragment sequence/offset contract mismatch");
+        }
+        if (fragment.payload.size() > assembly.encoded_record.size() - assembly.received_bytes) {
+          throw std::runtime_error("compact DMO fragment exceeds record assembly capacity");
+        }
+        std::copy(fragment.payload.begin(), fragment.payload.end(),
+                  assembly.encoded_record.begin() + static_cast<std::ptrdiff_t>(assembly.received_bytes));
+        assembly.received_bytes = core::checkedSizeAdd(assembly.received_bytes, fragment.payload.size(),
+                                                        "compact DMO inbound fragment progress");
+        if (assembly.received_bytes == assembly.encoded_record.size()) {
+          const auto record = migration_wire::decodeDmoParticleMigrationRecord(assembly.encoded_record);
+          if (!std::isfinite(record.position_x_comoving) || !std::isfinite(record.position_y_comoving) ||
+              !std::isfinite(record.position_z_comoving) || !std::isfinite(record.velocity_x_peculiar) ||
+              !std::isfinite(record.velocity_y_peculiar) || !std::isfinite(record.velocity_z_peculiar) ||
+              !std::isfinite(record.mass_code) || record.mass_code < 0.0) {
+            throw std::runtime_error("compact DMO migration received non-finite/negative particle state");
+          }
+          const std::size_t destination = core::checkedSizeAdd(
+              inbound_peer_begin[peer],
+              core::checkedIntegralNarrow<std::size_t>(assembly.record_sequence,
+                  "compact DMO inbound sequence width"),
+              "compact DMO inbound destination row");
+          if (destination >= candidate_particles.size()) throw std::runtime_error("compact DMO inbound destination outside candidate");
+          candidate_sidecar.particle_id[destination] = record.particle_id;
+          if (materialize_candidate_sfc) candidate_sidecar.sfc_key[destination] = record.sfc_key;
+          candidate_particles.position_x_comoving[destination] = record.position_x_comoving;
+          candidate_particles.position_y_comoving[destination] = record.position_y_comoving;
+          candidate_particles.position_z_comoving[destination] = record.position_z_comoving;
+          candidate_particles.velocity_x_peculiar[destination] = record.velocity_x_peculiar;
+          candidate_particles.velocity_y_peculiar[destination] = record.velocity_y_peculiar;
+          candidate_particles.velocity_z_peculiar[destination] = record.velocity_z_peculiar;
+          candidate_particles.mass_code[destination] = record.mass_code;
+          result.inbound_particle_ids.push_back(record.particle_id);
+          assembly.encoded_record.clear();
+          assembly.active = false;
+          assembly.total_bytes = 0U;
+          assembly.received_bytes = 0U;
+        }
+      }
+      result.stats.record_assembly_capacity_bytes = std::max(result.stats.record_assembly_capacity_bytes,
+                                                               assemblyCapacityBytes());
+      result.stats.communication_high_water_bytes = std::max(
+          result.stats.communication_high_water_bytes,
+          core::checkedMemoryBytesAdd(
+              core::checkedMemoryBytesAdd(result.stats.packet_send_capacity_bytes,
+                                          result.stats.packet_receive_capacity_bytes,
+                                          "compact DMO packet capacities"),
+              result.stats.record_assembly_capacity_bytes,
+              "compact DMO communication high water"));
+    } catch (...) { local_failure = std::current_exception(); }
+    mpi_context.rethrowCollectivePreparationFailure(local_failure,
+        "compact DMO migration bounded packet receive");
+  }
+  for (const auto& assembly : inbound_assembly) {
+    if (assembly.active || !assembly.encoded_record.empty()) {
+      throw std::runtime_error("compact DMO migration ended with incomplete inbound record");
+    }
+  }
+  if (result.inbound_particle_ids.size() != total_inbound) {
+    throw std::runtime_error("compact DMO migration received count differs from admitted count");
+  }
+  return result;
+#else
+  throw std::runtime_error("compact DMO migration exchange requires an MPI-enabled build");
+#endif
+}
+
 MigrationExchangeResult<core::ParticleMigrationRecord> exchangeRuntimeParticleMigrationRecords(
     const parallel::MpiContext& mpi_context,
     const std::vector<std::vector<core::ParticleMigrationRecord>>& records_by_rank) {
@@ -883,7 +1120,13 @@ MigrationExchangeResult<core::AmrPatchMigrationRecord> exchangeRuntimeAmrPatchMi
 }
 
 
+enum class MigrationTransactionRepresentation : std::uint8_t {
+  kCompactHomogeneousDmo = 0,
+  kGenericFullPhysics = 1,
+};
+
 struct MigrationAdmissionPlan {
+  MigrationTransactionRepresentation representation = MigrationTransactionRepresentation::kGenericFullPhysics;
   std::uint64_t outbound_particle_count = 0U;
   std::uint64_t inbound_particle_count = 0U;
   std::uint64_t outbound_particle_record_capacity_count = 0U;
@@ -900,8 +1143,15 @@ struct MigrationAdmissionPlan {
   std::uint64_t index_map_bytes = 0U;
   std::uint64_t commit_coexistence_bytes = 0U;
   std::uint64_t metadata_materialization_bytes = 0U;
+  std::uint64_t candidate_state_capacity_bytes = 0U;
+  std::uint64_t selection_capacity_bytes = 0U;
+  std::uint64_t record_assembly_bound_bytes = 0U;
+  std::uint64_t exact_ownership_workspace_bound_bytes = 0U;
+  std::uint64_t uniform_scheduler_capacity_bytes = 0U;
+  bool candidate_requires_sfc_lane = false;
   std::uint64_t requested_extra_bytes = 0U;
   std::vector<std::uint64_t> outbound_particle_count_by_rank;
+  std::vector<std::uint64_t> inbound_particle_count_by_rank;
   std::vector<std::uint64_t> outbound_particle_record_capacity_count_by_rank;
   std::vector<std::uint64_t> outbound_patch_count_by_rank;
 };
@@ -960,6 +1210,156 @@ struct MigrationAdmissionPlan {
       "runtime AMR patch local index");
 }
 
+
+[[nodiscard]] bool compactDmoMigrationEligible(
+    const core::SimulationState& state,
+    const core::HierarchicalTimeBinScheduler& scheduler,
+    const parallel::RuntimeRebalancePlan& rebalance) {
+  return state.hasHomogeneousDmoMetadata() &&
+      scheduler.representation() == core::SchedulerRepresentation::kUniformRungZero &&
+      scheduler.maxBin() == 0U &&
+      state.cells.size() == 0U && state.patches.size() == 0U &&
+      state.star_particles.size() == 0U && state.black_holes.size() == 0U && state.tracers.size() == 0U &&
+      state.sidecars.size() == 0U &&
+      state.particle_sidecar.gravity_softening_comoving.empty() &&
+      state.particle_sidecar.has_gravity_softening_override.empty() &&
+      rebalance.amr_patch_ownership_updates.empty();
+}
+
+[[nodiscard]] bool compactDmoMetadataConsensus(
+    const core::SimulationState& state,
+    const core::HierarchicalTimeBinScheduler& scheduler,
+    const parallel::MpiContext& mpi_context) {
+  if (!state.hasHomogeneousDmoMetadata() ||
+      scheduler.representation() != core::SchedulerRepresentation::kUniformRungZero) return false;
+  const auto agrees_u64 = [&](std::uint64_t value) {
+    return mpi_context.allreduceMinUint64(value) == mpi_context.allreduceMaxUint64(value);
+  };
+  return agrees_u64(state.homogeneousDmoParticleFlags()) &&
+      agrees_u64(std::bit_cast<std::uint64_t>(state.homogeneousDmoLastDriftTimeCode())) &&
+      agrees_u64(std::bit_cast<std::uint64_t>(state.homogeneousDmoLastDriftScaleFactor())) &&
+      agrees_u64(scheduler.currentTick()) && agrees_u64(scheduler.maxBin());
+}
+
+[[nodiscard]] MigrationAdmissionPlan buildCompactDmoMigrationAdmissionPlan(
+    const core::SimulationState& state,
+    const parallel::RuntimeRebalancePlan& rebalance,
+    const parallel::MpiContext& mpi_context,
+    int world_rank,
+    bool exact_ownership_audit_enabled) {
+  const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
+  MigrationAdmissionPlan plan;
+  plan.representation = MigrationTransactionRepresentation::kCompactHomogeneousDmo;
+  plan.outbound_particle_count_by_rank.assign(rank_count, 0U);
+  plan.outbound_particle_record_capacity_count_by_rank.assign(rank_count, 0U);
+  plan.outbound_patch_count_by_rank.assign(rank_count, 0U);
+  for (const auto& intent : rebalance.particle_migrations) {
+    if (intent.old_owner_rank != world_rank || intent.new_owner_rank == world_rank) continue;
+    if (intent.new_owner_rank < 0 || intent.new_owner_rank >= mpi_context.worldSize() ||
+        intent.item_index >= state.particles.size() ||
+        state.particle_sidecar.particle_id[intent.item_index] != intent.particle_id) {
+      throw std::runtime_error("compact DMO migration intent failed authoritative local-row validation");
+    }
+    auto& count = plan.outbound_particle_count_by_rank[static_cast<std::size_t>(intent.new_owner_rank)];
+    count = core::checkedMemoryBytesAdd(count, 1U, "compact DMO outbound count");
+  }
+  plan.inbound_particle_count_by_rank = exchangeMigrationControlU64(
+      mpi_context, plan.outbound_particle_count_by_rank,
+      "compact DMO particle-count admission exchange");
+  plan.outbound_particle_count = sumU64(plan.outbound_particle_count_by_rank,
+                                         "compact DMO outbound particle count");
+  plan.inbound_particle_count = sumU64(plan.inbound_particle_count_by_rank,
+                                        "compact DMO inbound particle count");
+  const std::uint64_t local_rows = core::checkedIntegralNarrow<std::uint64_t>(
+      state.particles.size(), "compact DMO local particle rows");
+  if (plan.outbound_particle_count > local_rows) {
+    throw std::runtime_error("compact DMO outbound migration count exceeds local particle population");
+  }
+  const std::uint64_t final_rows = core::checkedMemoryBytesAdd(
+      local_rows - plan.outbound_particle_count, plan.inbound_particle_count,
+      "compact DMO final particle rows");
+
+  const std::uint64_t local_nonuniform_sfc = state.homogeneousDmoSfcKeyIsUniform() ? 0U : 1U;
+  const bool any_nonuniform_sfc = mpi_context.allreduceSumUint64(local_nonuniform_sfc) != 0U;
+  const std::uint64_t local_uniform_sfc = state.homogeneousDmoSfcKeyIsUniform()
+      ? state.homogeneousDmoUniformSfcKey() : 0U;
+  const bool uniform_key_disagreement = !any_nonuniform_sfc &&
+      mpi_context.allreduceMinUint64(local_uniform_sfc) != mpi_context.allreduceMaxUint64(local_uniform_sfc);
+  plan.candidate_requires_sfc_lane = any_nonuniform_sfc || uniform_key_disagreement;
+
+  const std::uint64_t bytes_per_candidate = sizeof(double) * 7U + sizeof(std::uint64_t) +
+      (plan.candidate_requires_sfc_lane ? sizeof(std::uint64_t) : 0U);
+  plan.candidate_state_capacity_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeMultiply(
+          core::checkedIntegralNarrow<std::size_t>(final_rows, "compact DMO candidate row count"),
+          core::checkedIntegralNarrow<std::size_t>(bytes_per_candidate, "compact DMO candidate row bytes"),
+          "compact DMO candidate state capacity"),
+      "compact DMO candidate state byte width");
+  plan.commit_coexistence_bytes = plan.candidate_state_capacity_bytes;
+  plan.selection_capacity_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeAdd(
+          core::checkedSizeMultiply(
+              core::checkedIntegralNarrow<std::size_t>(plan.outbound_particle_count,
+                  "compact DMO selection count"),
+              sizeof(std::uint32_t) * 2U, "compact DMO selection capacities"),
+          core::checkedSizeMultiply(rank_count, sizeof(std::vector<std::uint32_t>),
+                                    "compact DMO peer selection headers"),
+          "compact DMO selection total capacity"),
+      "compact DMO selection byte width");
+  plan.uniform_scheduler_capacity_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeMultiply(
+          core::checkedIntegralNarrow<std::size_t>(final_rows,
+              "compact DMO scheduler final rows"),
+          sizeof(std::uint32_t), "compact DMO uniform scheduler identity lane"),
+      "compact DMO uniform scheduler byte width");
+  const std::uint64_t round_limit = core::checkedIntegralNarrow<std::uint64_t>(
+      parallel::mpiTransportRoundLimitBytes(), "compact DMO MPI round limit");
+  plan.record_assembly_bound_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeMultiply(rank_count, migration_wire::dmoParticleMigrationWireBytes(),
+                                "compact DMO record assembly bound"),
+      "compact DMO record assembly bound width");
+  plan.packet_staging_bytes = core::checkedMemoryBytesAdd(
+      core::checkedMemoryBytesAdd(round_limit, round_limit, "compact DMO MPI internal round buffers"),
+      core::checkedMemoryBytesAdd(round_limit, round_limit, "compact DMO packet send/receive vectors"),
+      "compact DMO packet staging");
+  plan.packet_staging_bytes = core::checkedMemoryBytesAdd(
+      plan.packet_staging_bytes, plan.record_assembly_bound_bytes,
+      "compact DMO packet plus assembly staging");
+  plan.outbound_wire_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeMultiply(
+          core::checkedIntegralNarrow<std::size_t>(plan.outbound_particle_count,
+              "compact DMO outbound wire count"),
+          migration_wire::dmoParticleMigrationWireBytes() + migration_wire::k_fragment_header_bytes,
+          "compact DMO outbound wire upper bound"),
+      "compact DMO outbound wire byte width");
+  plan.inbound_wire_bytes = core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeMultiply(
+          core::checkedIntegralNarrow<std::size_t>(plan.inbound_particle_count,
+              "compact DMO inbound wire count"),
+          migration_wire::dmoParticleMigrationWireBytes() + migration_wire::k_fragment_header_bytes,
+          "compact DMO inbound wire upper bound"),
+      "compact DMO inbound wire byte width");
+  const std::uint64_t inbound_duplicate_staging = core::checkedIntegralNarrow<std::uint64_t>(
+      core::checkedSizeMultiply(
+          core::checkedIntegralNarrow<std::size_t>(plan.inbound_particle_count,
+              "compact DMO inbound duplicate count"),
+          sizeof(std::uint64_t), "compact DMO inbound duplicate staging"),
+      "compact DMO inbound duplicate byte width");
+  plan.exact_ownership_workspace_bound_bytes = exact_ownership_audit_enabled
+      ? parallel::k_exact_ownership_validation_workspace_limit_bytes : 0U;
+  plan.requested_extra_bytes = plan.candidate_state_capacity_bytes;
+  for (const auto [bytes, label] : std::array{
+           std::pair{plan.selection_capacity_bytes, std::string_view{"compact DMO outbound selection"}},
+           std::pair{plan.packet_staging_bytes, std::string_view{"compact DMO bounded packets"}},
+           std::pair{inbound_duplicate_staging, std::string_view{"compact DMO inbound duplicate staging"}},
+           std::pair{plan.uniform_scheduler_capacity_bytes, std::string_view{"compact DMO uniform scheduler candidate"}},
+           std::pair{plan.exact_ownership_workspace_bound_bytes, std::string_view{"compact DMO exact ownership workspace"}},
+       }) {
+    plan.requested_extra_bytes = core::checkedMemoryBytesAdd(plan.requested_extra_bytes, bytes, label);
+  }
+  return plan;
+}
+
 [[nodiscard]] MigrationAdmissionPlan buildMigrationAdmissionPlan(
     const core::SimulationState& state,
     const parallel::RuntimeRebalancePlan& rebalance,
@@ -968,6 +1368,7 @@ struct MigrationAdmissionPlan {
     std::uint64_t transaction_baseline_before) {
   const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
   MigrationAdmissionPlan plan;
+  plan.representation = MigrationTransactionRepresentation::kGenericFullPhysics;
   plan.outbound_particle_count_by_rank.assign(rank_count, 0U);
   plan.outbound_particle_record_capacity_count_by_rank.assign(rank_count, 0U);
   plan.outbound_patch_count_by_rank.assign(rank_count, 0U);
@@ -1119,6 +1520,7 @@ struct MigrationAdmissionPlan {
 
   const std::vector<std::uint64_t> recv_particle_counts = exchangeMigrationControlU64(
       mpi_context, plan.outbound_particle_count_by_rank, "particle migration count admission exchange");
+  plan.inbound_particle_count_by_rank = recv_particle_counts;
   const std::vector<std::uint64_t> recv_patch_counts = exchangeMigrationControlU64(
       mpi_context, plan.outbound_patch_count_by_rank, "AMR migration count admission exchange");
   const std::vector<std::uint64_t> recv_wire = exchangeMigrationControlU64(
@@ -1296,22 +1698,26 @@ void requireGlobalOwnedParticlePartitionIdentity(
     const parallel::MpiContext& mpi_context,
     std::span<const std::uint64_t> expected_global_particle_ids,
     std::string_view caller) {
-  std::vector<std::uint64_t> local_owned_ids;
-  local_owned_ids.reserve(state.particles.size());
-  const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
-  for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
-    if (state.particleOwningRank(particle_index) == world_rank) {
-      local_owned_ids.push_back(state.particle_sidecar.particle_id[particle_index]);
+  std::vector<std::uint64_t> generic_local_owned_ids;
+  std::span<const std::uint64_t> local_owned_ids = state.particle_sidecar.particle_id;
+  if (!state.hasHomogeneousDmoMetadata()) {
+    generic_local_owned_ids.reserve(state.particles.size());
+    const std::uint32_t world_rank = static_cast<std::uint32_t>(mpi_context.worldRank());
+    for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
+      if (state.particleOwningRank(particle_index) == world_rank) {
+        generic_local_owned_ids.push_back(state.particle_sidecar.particle_id[particle_index]);
+      }
     }
+    local_owned_ids = generic_local_owned_ids;
   }
   const parallel::ExactOwnershipPartitionReport report =
       parallel::validateExactGlobalOwnershipPartition(mpi_context, local_owned_ids, expected_global_particle_ids);
   if (!report.valid()) {
     throw std::runtime_error(std::string(caller) +
         ": exact distributed authoritative ownership table has duplicate=" +
-        std::to_string(report.duplicate_particle_ids.size()) +
-        ", missing=" + std::to_string(report.missing_expected_particle_ids.size()) +
-        ", extra=" + std::to_string(report.extra_particle_ids.size()) + " particle IDs");
+        std::to_string(report.duplicate_count) +
+        ", missing=" + std::to_string(report.missing_count) +
+        ", extra=" + std::to_string(report.extra_count) + " particle IDs");
   }
 }
 
@@ -1478,6 +1884,181 @@ void exchangeAndValidateAmrPatchPayloads(
                     {"remote_patch_ghost_count", std::to_string(diagnostics.remote_patch_ghost_count)},
                     {"remote_interface_count", std::to_string(diagnostics.remote_interface_count)}}});
   }
+}
+
+
+struct CompactDmoMigrationCommitResult {
+  MigrationExchangeStats exchange_stats{};
+  std::size_t outbound_count = 0U;
+  std::size_t inbound_count = 0U;
+};
+
+[[nodiscard]] CompactDmoMigrationCommitResult executeCompactDmoMigrationTransaction(
+    core::SimulationState& state,
+    core::HierarchicalTimeBinScheduler& scheduler,
+    const parallel::RuntimeRebalancePlan& rebalance,
+    const parallel::MpiContext& mpi_context,
+    int world_rank,
+    const MigrationAdmissionPlan& plan,
+    std::span<const std::uint64_t> expected_global_particle_ids,
+    bool exact_ownership_audit_enabled) {
+  if (plan.representation != MigrationTransactionRepresentation::kCompactHomogeneousDmo) {
+    throw std::logic_error("compact DMO transaction invoked with generic admission plan");
+  }
+  const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
+  std::vector<std::vector<std::uint32_t>> selections_by_rank;
+  std::vector<std::uint32_t> outbound_rows;
+  core::ParticleSoa candidate_particles;
+  core::ParticleSidecar candidate_sidecar;
+  std::optional<core::HierarchicalTimeBinScheduler> candidate_scheduler;
+  std::size_t kept_count = 0U;
+  std::size_t final_count = 0U;
+
+  std::exception_ptr local_preparation_failure;
+  try {
+    selections_by_rank.resize(rank_count);
+    for (std::size_t peer = 0; peer < rank_count; ++peer) {
+      selections_by_rank[peer].reserve(core::checkedIntegralNarrow<std::size_t>(
+          plan.outbound_particle_count_by_rank[peer], "compact DMO per-peer selection reserve"));
+    }
+    for (const auto& intent : rebalance.particle_migrations) {
+      if (intent.old_owner_rank != world_rank || intent.new_owner_rank == world_rank) continue;
+      if (intent.new_owner_rank < 0 || intent.new_owner_rank >= mpi_context.worldSize() ||
+          intent.item_index >= state.particles.size()) {
+        throw std::runtime_error("compact DMO migration intent is outside authoritative local row/rank bounds");
+      }
+      const auto row = core::checkedIntegralNarrow<std::uint32_t>(
+          intent.item_index, "compact DMO migration intent local row");
+      if (state.particle_sidecar.particle_id[row] != intent.particle_id ||
+          state.particleOwningRank(row) != static_cast<std::uint32_t>(world_rank)) {
+        throw std::runtime_error("compact DMO migration intent does not match authoritative local identity");
+      }
+      selections_by_rank[static_cast<std::size_t>(intent.new_owner_rank)].push_back(row);
+    }
+    outbound_rows.reserve(core::checkedIntegralNarrow<std::size_t>(
+        plan.outbound_particle_count, "compact DMO outbound row reserve"));
+    for (auto& peer_rows : selections_by_rank) {
+      std::sort(peer_rows.begin(), peer_rows.end());
+      if (std::adjacent_find(peer_rows.begin(), peer_rows.end()) != peer_rows.end()) {
+        throw std::runtime_error("compact DMO migration contains a duplicate local row for one destination");
+      }
+      outbound_rows.insert(outbound_rows.end(), peer_rows.begin(), peer_rows.end());
+    }
+    std::sort(outbound_rows.begin(), outbound_rows.end());
+    if (std::adjacent_find(outbound_rows.begin(), outbound_rows.end()) != outbound_rows.end()) {
+      throw std::runtime_error("compact DMO migration contains one local row with multiple destinations");
+    }
+    if (outbound_rows.size() != plan.outbound_particle_count) {
+      throw std::runtime_error("compact DMO physical selection count differs from admission count");
+    }
+
+    kept_count = state.particles.size() - outbound_rows.size();
+    final_count = core::checkedSizeAdd(
+        kept_count,
+        core::checkedIntegralNarrow<std::size_t>(plan.inbound_particle_count,
+            "compact DMO inbound final count"),
+        "compact DMO final candidate count");
+    candidate_particles.position_x_comoving.resize(final_count);
+    candidate_particles.position_y_comoving.resize(final_count);
+    candidate_particles.position_z_comoving.resize(final_count);
+    candidate_particles.velocity_x_peculiar.resize(final_count);
+    candidate_particles.velocity_y_peculiar.resize(final_count);
+    candidate_particles.velocity_z_peculiar.resize(final_count);
+    candidate_particles.mass_code.resize(final_count);
+    candidate_sidecar.particle_id.resize(final_count);
+    if (plan.candidate_requires_sfc_lane) candidate_sidecar.sfc_key.resize(final_count);
+    candidate_scheduler.emplace(0U);
+    candidate_scheduler->reset(
+        core::checkedIntegralNarrow<std::uint32_t>(final_count,
+            "compact DMO scheduler candidate population"),
+        0U, scheduler.currentTick());
+
+    std::size_t outbound_cursor = 0U;
+    std::size_t destination = 0U;
+    for (std::size_t row = 0; row < state.particles.size(); ++row) {
+      if (outbound_cursor < outbound_rows.size() && outbound_rows[outbound_cursor] == row) {
+        ++outbound_cursor;
+        continue;
+      }
+      candidate_sidecar.particle_id[destination] = state.particle_sidecar.particle_id[row];
+      if (plan.candidate_requires_sfc_lane) candidate_sidecar.sfc_key[destination] = state.particleSfcKey(row);
+      candidate_particles.position_x_comoving[destination] = state.particles.position_x_comoving[row];
+      candidate_particles.position_y_comoving[destination] = state.particles.position_y_comoving[row];
+      candidate_particles.position_z_comoving[destination] = state.particles.position_z_comoving[row];
+      candidate_particles.velocity_x_peculiar[destination] = state.particles.velocity_x_peculiar[row];
+      candidate_particles.velocity_y_peculiar[destination] = state.particles.velocity_y_peculiar[row];
+      candidate_particles.velocity_z_peculiar[destination] = state.particles.velocity_z_peculiar[row];
+      candidate_particles.mass_code[destination] = state.particles.mass_code[row];
+      ++destination;
+    }
+    if (destination != kept_count || outbound_cursor != outbound_rows.size()) {
+      throw std::logic_error("compact DMO kept-row streaming did not consume the admitted selection exactly");
+    }
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_preparation_failure, "compact DMO candidate preparation");
+
+  CompactDmoExchangeResult exchange = exchangeRuntimeCompactDmoParticles(
+      mpi_context, state, selections_by_rank, plan.inbound_particle_count_by_rank,
+      candidate_particles, candidate_sidecar, kept_count, plan.candidate_requires_sfc_lane);
+
+  std::exception_ptr local_validation_failure;
+  try {
+    std::sort(exchange.inbound_particle_ids.begin(), exchange.inbound_particle_ids.end());
+    if (std::adjacent_find(exchange.inbound_particle_ids.begin(), exchange.inbound_particle_ids.end()) !=
+        exchange.inbound_particle_ids.end()) {
+      throw std::runtime_error("compact DMO migration received duplicate inbound particle IDs");
+    }
+    for (std::size_t row = 0; row < kept_count; ++row) {
+      if (std::binary_search(exchange.inbound_particle_ids.begin(),
+                             exchange.inbound_particle_ids.end(),
+                             candidate_sidecar.particle_id[row])) {
+        throw std::runtime_error(
+            "compact DMO migration received an inbound particle ID that duplicates a kept local particle");
+      }
+    }
+    if (!candidate_particles.isConsistent() || !candidate_sidecar.isConsistent()) {
+      throw std::runtime_error("compact DMO migration candidate failed canonical lane validation");
+    }
+  } catch (...) {
+    local_validation_failure = std::current_exception();
+  }
+  mpi_context.rethrowCollectivePreparationFailure(
+      local_validation_failure, "compact DMO candidate local validation");
+
+  if (exact_ownership_audit_enabled) {
+    const auto report = parallel::validateExactGlobalOwnershipPartition(
+        mpi_context, candidate_sidecar.particle_id, expected_global_particle_ids);
+    if (!report.valid()) {
+      throw std::runtime_error(
+          "compact DMO candidate exact ownership validation failed: duplicate=" +
+          std::to_string(report.duplicate_count) + ", missing=" +
+          std::to_string(report.missing_count) + ", extra=" +
+          std::to_string(report.extra_count));
+    }
+  }
+
+  // From here to publication there are no population-sized allocations. The
+  // replacement rung-zero scheduler was prepared under the same reservation.
+  static_assert(std::is_nothrow_move_assignable_v<core::HierarchicalTimeBinScheduler>);
+  if (!candidate_scheduler.has_value()) {
+    throw std::logic_error("compact DMO scheduler candidate was not prepared");
+  }
+  const std::uint32_t uniform_flags = state.homogeneousDmoParticleFlags();
+  const double drift_time_code = state.homogeneousDmoLastDriftTimeCode();
+  const double drift_scale_factor = state.homogeneousDmoLastDriftScaleFactor();
+  state.commitCompactHomogeneousDmoCandidate(
+      std::move(candidate_particles), std::move(candidate_sidecar),
+      static_cast<std::uint32_t>(world_rank), uniform_flags,
+      drift_time_code, drift_scale_factor);
+  scheduler = std::move(*candidate_scheduler);
+  return CompactDmoMigrationCommitResult{
+      .exchange_stats = exchange.stats,
+      .outbound_count = outbound_rows.size(),
+      .inbound_count = exchange.inbound_particle_ids.size(),
+  };
 }
 
 [[nodiscard]] bool applyMeasuredRuntimeRebalancePlan(
@@ -1707,6 +2288,12 @@ void exchangeAndValidateAmrPatchPayloads(
   }
 
   const bool restore_compact_dmo_after_commit = state.hasHomogeneousDmoMetadata();
+  const bool local_compact_dmo_eligible = compactDmoMigrationEligible(state, scheduler, rebalance);
+  const bool all_ranks_compact_dmo_eligible =
+      mpi_context.allreduceSumUint64(local_compact_dmo_eligible ? 1ULL : 0ULL) ==
+      static_cast<std::uint64_t>(mpi_context.worldSize());
+  const bool use_compact_dmo_migration = all_ranks_compact_dmo_eligible &&
+      compactDmoMetadataConsensus(state, scheduler, mpi_context);
   const std::array transaction_reports{
       core::collectSimulationMemoryReport(state),
       core::collectSchedulerMemoryReport(scheduler, gas_cell_scheduler)};
@@ -1718,8 +2305,12 @@ void exchangeAndValidateAmrPatchPayloads(
   core::MemoryReservation migration_reservation;
   std::exception_ptr migration_admission_failure;
   try {
-    migration_admission_plan = buildMigrationAdmissionPlan(
-        state, rebalance, mpi_context, world_rank, transaction_baseline_before);
+    migration_admission_plan = use_compact_dmo_migration
+        ? buildCompactDmoMigrationAdmissionPlan(
+              state, rebalance, mpi_context, world_rank,
+              config.parallel.decomposition_debug_exact_ownership_audit)
+        : buildMigrationAdmissionPlan(
+              state, rebalance, mpi_context, world_rank, transaction_baseline_before);
     if (services.memory_governor != nullptr) {
       process_baseline_before =
           services.memory_governor->snapshot().baseline_owned_bytes;
@@ -1739,13 +2330,69 @@ void exchangeAndValidateAmrPatchPayloads(
   FailureCoordinator(services).rethrowCollectiveFailure(
       migration_admission_failure, "runtime migration memory admission");
 
-  if (restore_compact_dmo_after_commit) {
-    state.materializeParticleMetadata();
-  }
-
   const std::uint64_t particle_index_generation_before = state.particleIndexGeneration();
   const std::uint64_t cell_index_generation_before = state.cellIndexGeneration();
   const std::uint64_t gas_identity_generation_before = state.gasCellIdentityGeneration();
+
+  if (use_compact_dmo_migration) {
+    CompactDmoMigrationCommitResult compact_result;
+    std::exception_ptr compact_failure;
+    try {
+      compact_result = executeCompactDmoMigrationTransaction(
+          state, scheduler, rebalance, mpi_context, world_rank,
+          migration_admission_plan, expected_global_particle_ids,
+          config.parallel.decomposition_debug_exact_ownership_audit);
+    } catch (...) {
+      compact_failure = std::current_exception();
+    }
+    FailureCoordinator(services).rethrowCollectiveFailure(
+        compact_failure, "compact homogeneous-DMO migration transaction");
+
+    recordRuntimeRebalanceDecision(profiler, rebalance, step_index);
+    if (profiler != nullptr) {
+      profiler->recordEvent(core::RuntimeEvent{
+          .event_kind = "parallel.decomposition.runtime_migration_commit",
+          .severity = core::RuntimeEventSeverity::kWarning,
+          .subsystem = "parallel.domain_decomposition",
+          .step_index = step_index,
+          .message = "runtime rebalance committed compact homogeneous-DMO migration at a closed rung-zero boundary",
+          .payload = {
+              {"migration_representation", "compact_homogeneous_dmo"},
+              {"outbound_particle_count", std::to_string(compact_result.outbound_count)},
+              {"inbound_particle_count", std::to_string(compact_result.inbound_count)},
+              {"candidate_state_capacity_bytes", std::to_string(migration_admission_plan.candidate_state_capacity_bytes)},
+              {"selection_capacity_bytes", std::to_string(migration_admission_plan.selection_capacity_bytes)},
+              {"packet_staging_bound_bytes", std::to_string(migration_admission_plan.packet_staging_bytes)},
+              {"record_assembly_bound_bytes", std::to_string(migration_admission_plan.record_assembly_bound_bytes)},
+              {"uniform_scheduler_capacity_bytes", std::to_string(migration_admission_plan.uniform_scheduler_capacity_bytes)},
+              {"exact_ownership_workspace_bound_bytes", std::to_string(migration_admission_plan.exact_ownership_workspace_bound_bytes)},
+              {"migration_transaction_reserved_bytes", std::to_string(migration_admission_plan.requested_extra_bytes)},
+              {"wire_bytes_sent", std::to_string(compact_result.exchange_stats.wire_bytes_sent)},
+              {"wire_bytes_received", std::to_string(compact_result.exchange_stats.wire_bytes_received)},
+              {"physical_exchange_rounds", std::to_string(compact_result.exchange_stats.physical_exchange_rounds)},
+          },
+      });
+    }
+    if (migration_reservation.valid()) {
+      const std::array reconciled_transaction_reports{
+          core::collectSimulationMemoryReport(state),
+          core::collectSchedulerMemoryReport(scheduler, gas_cell_scheduler)};
+      const std::uint64_t transaction_baseline_after =
+          core::memoryReportBaselineOwnedBytes(core::mergeMemoryReports(reconciled_transaction_reports));
+      const std::uint64_t non_transaction_baseline = process_baseline_before - transaction_baseline_before;
+      const std::uint64_t reconciled_process_baseline = core::checkedMemoryBytesAdd(
+          non_transaction_baseline, transaction_baseline_after,
+          "compact DMO migration retained-capacity baseline reconciliation");
+      migration_reservation.reconcileBaselineOwnedAndRelease(reconciled_process_baseline);
+    }
+    return state.particleIndexGeneration() != particle_index_generation_before ||
+        state.cellIndexGeneration() != cell_index_generation_before ||
+        state.gasCellIdentityGeneration() != gas_identity_generation_before;
+  }
+
+  if (restore_compact_dmo_after_commit) {
+    state.materializeParticleMetadata();
+  }
 
   std::unordered_map<std::uint64_t, std::uint32_t> local_index_by_particle_id;
   local_index_by_particle_id.reserve(state.particles.size());
@@ -2034,6 +2681,7 @@ void exchangeAndValidateAmrPatchPayloads(
         .step_index = step_index,
         .message = "runtime rebalance committed authoritative particle migration at a safe scheduler boundary",
         .payload = {
+            {"migration_representation", "generic_full_physics"},
             {"outbound_particle_count", std::to_string(outbound_local_indices.size())},
             {"inbound_particle_count", std::to_string(inbound_particle_count)},
             {"inbound_patch_count", std::to_string(inbound_patch_count)},

@@ -428,6 +428,81 @@ bool SimulationState::compactHomogeneousDmoMetadata(std::uint32_t local_rank) {
   return true;
 }
 
+std::uint32_t SimulationState::homogeneousDmoParticleFlags() const {
+  if (!hasHomogeneousDmoMetadata()) throw std::logic_error("homogeneousDmoParticleFlags requires compact DMO metadata");
+  return m_uniform_particle_flags;
+}
+
+double SimulationState::homogeneousDmoLastDriftTimeCode() const {
+  if (!hasHomogeneousDmoMetadata()) throw std::logic_error("homogeneousDmoLastDriftTimeCode requires compact DMO metadata");
+  return m_common_last_drift_time_code;
+}
+
+double SimulationState::homogeneousDmoLastDriftScaleFactor() const {
+  if (!hasHomogeneousDmoMetadata()) throw std::logic_error("homogeneousDmoLastDriftScaleFactor requires compact DMO metadata");
+  return m_common_last_drift_scale_factor;
+}
+
+bool SimulationState::homogeneousDmoSfcKeyIsUniform() const {
+  if (!hasHomogeneousDmoMetadata()) throw std::logic_error("homogeneousDmoSfcKeyIsUniform requires compact DMO metadata");
+  return m_sfc_key_is_uniform;
+}
+
+std::uint64_t SimulationState::homogeneousDmoUniformSfcKey() const {
+  if (!hasHomogeneousDmoMetadata()) throw std::logic_error("homogeneousDmoUniformSfcKey requires compact DMO metadata");
+  return m_uniform_sfc_key;
+}
+
+void SimulationState::commitCompactHomogeneousDmoCandidate(
+    ParticleSoa&& candidate_particles,
+    ParticleSidecar&& candidate_sidecar,
+    std::uint32_t local_rank,
+    std::uint32_t uniform_particle_flags,
+    double common_last_drift_time_code,
+    double common_last_drift_scale_factor) {
+  const std::size_t count = candidate_particles.size();
+  if (!hasHomogeneousDmoMetadata() || cells.size() != 0U || star_particles.size() != 0U ||
+      black_holes.size() != 0U || tracers.size() != 0U || !candidate_particles.isConsistent() ||
+      !candidate_sidecar.isConsistent() || candidate_sidecar.particle_id.size() != count ||
+      !candidate_particles.time_bin.empty() || !candidate_sidecar.species_tag.empty() ||
+      !candidate_sidecar.particle_flags.empty() || !candidate_sidecar.owning_rank.empty() ||
+      !candidate_sidecar.last_drift_time_code.empty() || !candidate_sidecar.last_drift_scale_factor.empty() ||
+      !candidate_sidecar.gravity_softening_comoving.empty() || !candidate_sidecar.has_gravity_softening_override.empty() ||
+      (!candidate_sidecar.sfc_key.empty() && candidate_sidecar.sfc_key.size() != count) ||
+      !std::isfinite(common_last_drift_time_code) || !std::isfinite(common_last_drift_scale_factor) ||
+      common_last_drift_scale_factor <= 0.0) {
+    throw std::invalid_argument("compact DMO migration candidate violates canonical representation invariants");
+  }
+  std::uint64_t uniform_sfc_key = 0U;
+  bool sfc_uniform = true;
+  if (!candidate_sidecar.sfc_key.empty()) {
+    uniform_sfc_key = candidate_sidecar.sfc_key.front();
+    sfc_uniform = std::all_of(candidate_sidecar.sfc_key.begin(), candidate_sidecar.sfc_key.end(),
+                              [&](std::uint64_t key) { return key == uniform_sfc_key; });
+    if (sfc_uniform) AlignedVector<std::uint64_t>{}.swap(candidate_sidecar.sfc_key);
+  } else if (count != 0U) {
+    uniform_sfc_key = m_uniform_sfc_key;
+  }
+
+  using std::swap;
+  swap(particles, candidate_particles);
+  swap(particle_sidecar, candidate_sidecar);
+  m_particle_metadata_representation = ParticleMetadataRepresentation::kHomogeneousDmo;
+  m_uniform_species_tag = static_cast<std::uint32_t>(ParticleSpecies::kDarkMatter);
+  m_uniform_particle_flags = uniform_particle_flags;
+  m_uniform_owning_rank = local_rank;
+  m_uniform_sfc_key = uniform_sfc_key;
+  m_sfc_key_is_uniform = sfc_uniform;
+  m_common_last_drift_time_code = common_last_drift_time_code;
+  m_common_last_drift_scale_factor = common_last_drift_scale_factor;
+  particle_species_index.setHomogeneousDmoIdentity(
+      checkedIntegralNarrow<std::uint32_t>(count, "commitCompactHomogeneousDmoCandidate particle count"));
+  species.count_by_species.fill(0U);
+  species.count_by_species[particleSpeciesIndex(ParticleSpecies::kDarkMatter)] = count;
+  bumpParticleIndexGeneration();
+  bumpGravitySourceGeneration();
+}
+
 void SimulationState::materializeParticleMetadata() {
   if (!hasHomogeneousDmoMetadata()) return;
   const std::size_t count = particles.size();

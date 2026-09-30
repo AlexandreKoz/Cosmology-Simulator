@@ -10,10 +10,24 @@
 namespace cosmosim::workflows::internal::migration_wire {
 
 inline constexpr std::uint32_t k_particle_record_wire_version = 2U;
+inline constexpr std::uint32_t k_dmo_particle_record_wire_version = 1U;
 inline constexpr std::uint32_t k_amr_patch_record_wire_version = 3U;
 inline constexpr std::uint32_t k_fragment_wire_version = 1U;
 inline constexpr std::size_t k_fragment_header_bytes =
     sizeof(std::uint32_t) + sizeof(std::uint64_t) * 3U + sizeof(std::uint32_t);
+
+
+struct DmoParticleMigrationRecord {
+  std::uint64_t particle_id = 0U;
+  std::uint64_t sfc_key = 0U;
+  double position_x_comoving = 0.0;
+  double position_y_comoving = 0.0;
+  double position_z_comoving = 0.0;
+  double velocity_x_peculiar = 0.0;
+  double velocity_y_peculiar = 0.0;
+  double velocity_z_peculiar = 0.0;
+  double mass_code = 0.0;
+};
 
 struct FragmentView {
   std::uint64_t record_sequence = 0U;
@@ -39,6 +53,14 @@ struct PacketCapacityPlan {
 [[nodiscard]] PacketCapacityPlan planPacketCapacity(
     std::size_t transport_round_limit_bytes,
     std::size_t rank_count);
+
+[[nodiscard]] std::vector<std::uint8_t> encodeDmoParticleMigrationRecord(
+    const DmoParticleMigrationRecord& record);
+[[nodiscard]] DmoParticleMigrationRecord decodeDmoParticleMigrationRecord(
+    std::span<const std::uint8_t> bytes);
+[[nodiscard]] constexpr std::size_t dmoParticleMigrationWireBytes() noexcept {
+  return sizeof(std::uint32_t) + sizeof(std::uint64_t) * 2U + sizeof(double) * 7U;
+}
 
 [[nodiscard]] std::vector<std::uint8_t> encodeParticleMigrationRecord(
     const core::ParticleMigrationRecord& record);

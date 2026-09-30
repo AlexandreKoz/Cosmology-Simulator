@@ -599,6 +599,49 @@ PacketCapacityPlan planPacketCapacity(
   };
 }
 
+std::vector<std::uint8_t> encodeDmoParticleMigrationRecord(
+    const DmoParticleMigrationRecord& record) {
+  WireWriter out;
+  out.u32(k_dmo_particle_record_wire_version);
+  out.u64(record.particle_id);
+  out.u64(record.sfc_key);
+  out.f64(record.position_x_comoving);
+  out.f64(record.position_y_comoving);
+  out.f64(record.position_z_comoving);
+  out.f64(record.velocity_x_peculiar);
+  out.f64(record.velocity_y_peculiar);
+  out.f64(record.velocity_z_peculiar);
+  out.f64(record.mass_code);
+  auto bytes = std::move(out).take();
+  if (bytes.size() != dmoParticleMigrationWireBytes()) {
+    throw std::logic_error("compact DMO migration wire size contract mismatch");
+  }
+  return bytes;
+}
+
+DmoParticleMigrationRecord decodeDmoParticleMigrationRecord(
+    std::span<const std::uint8_t> bytes) {
+  if (bytes.size() != dmoParticleMigrationWireBytes()) {
+    throw std::runtime_error("compact DMO migration wire extent mismatch");
+  }
+  WireReader in(bytes);
+  if (in.u32("dmo_particle_wire_version") != k_dmo_particle_record_wire_version) {
+    throw std::runtime_error("unsupported compact DMO migration wire version");
+  }
+  DmoParticleMigrationRecord record;
+  record.particle_id = in.u64("dmo_particle_id");
+  record.sfc_key = in.u64("dmo_sfc_key");
+  record.position_x_comoving = in.f64("dmo_position_x_comoving");
+  record.position_y_comoving = in.f64("dmo_position_y_comoving");
+  record.position_z_comoving = in.f64("dmo_position_z_comoving");
+  record.velocity_x_peculiar = in.f64("dmo_velocity_x_peculiar");
+  record.velocity_y_peculiar = in.f64("dmo_velocity_y_peculiar");
+  record.velocity_z_peculiar = in.f64("dmo_velocity_z_peculiar");
+  record.mass_code = in.f64("dmo_mass_code");
+  if (!in.atEnd()) throw std::runtime_error("compact DMO migration wire has trailing bytes");
+  return record;
+}
+
 std::vector<std::uint8_t> encodeParticleMigrationRecord(
     const core::ParticleMigrationRecord& record) {
   WireWriter out;

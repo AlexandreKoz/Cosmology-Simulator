@@ -908,6 +908,20 @@ class SimulationState {
   [[nodiscard]] bool hasHomogeneousDmoMetadata() const noexcept { return m_particle_metadata_representation == ParticleMetadataRepresentation::kHomogeneousDmo; }
   [[nodiscard]] bool compactHomogeneousDmoMetadata(std::uint32_t local_rank);
   void materializeParticleMetadata();
+  [[nodiscard]] std::uint32_t homogeneousDmoParticleFlags() const;
+  [[nodiscard]] double homogeneousDmoLastDriftTimeCode() const;
+  [[nodiscard]] double homogeneousDmoLastDriftScaleFactor() const;
+  [[nodiscard]] bool homogeneousDmoSfcKeyIsUniform() const;
+  [[nodiscard]] std::uint64_t homogeneousDmoUniformSfcKey() const;
+  // Strong-commit seam for the compact homogeneous-DMO migration transaction.
+  // Candidate lanes are fully prepared/validated before this no-allocation swap.
+  void commitCompactHomogeneousDmoCandidate(
+      ParticleSoa&& candidate_particles,
+      ParticleSidecar&& candidate_sidecar,
+      std::uint32_t local_rank,
+      std::uint32_t uniform_particle_flags,
+      double common_last_drift_time_code,
+      double common_last_drift_scale_factor);
   [[nodiscard]] std::uint32_t particleSpeciesTag(std::size_t particle_index) const;
   [[nodiscard]] std::uint32_t particleFlags(std::size_t particle_index) const;
   [[nodiscard]] std::uint32_t particleOwningRank(std::size_t particle_index) const;

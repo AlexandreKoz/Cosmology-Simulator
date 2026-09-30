@@ -787,19 +787,28 @@ struct LocalOwnershipIdentitySummary {
 };
 
 struct ExactOwnershipPartitionReport {
+  static constexpr std::size_t k_max_diagnostic_samples = 16U;
   std::uint64_t global_owned_count = 0;
+  std::uint64_t duplicate_count = 0;
+  std::uint64_t missing_count = 0;
+  std::uint64_t extra_count = 0;
   bool local_particle_ids_unique = true;
   bool globally_unique = true;
   bool matches_expected_ids = true;
+  // Compatibility field names retained as bounded diagnostic samples. Exact
+  // corruption cardinality is carried by the count fields above.
   std::vector<std::uint64_t> duplicate_particle_ids;
   std::vector<std::uint64_t> missing_expected_particle_ids;
   std::vector<std::uint64_t> extra_particle_ids;
 
   [[nodiscard]] bool valid() const noexcept {
     return local_particle_ids_unique && globally_unique && matches_expected_ids &&
-        duplicate_particle_ids.empty() && missing_expected_particle_ids.empty() && extra_particle_ids.empty();
+        duplicate_count == 0U && missing_count == 0U && extra_count == 0U;
   }
 };
+
+inline constexpr std::uint64_t k_exact_ownership_validation_workspace_limit_bytes =
+    64ULL * 1024ULL * 1024ULL;
 
 [[nodiscard]] LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(
     std::span<const std::uint64_t> local_particle_ids);
