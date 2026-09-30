@@ -100,7 +100,7 @@ void appendWireDouble(std::vector<std::uint8_t>& out, double value) {
   const std::size_t n = p.mass_code.size();
   if (p.position_x_comoving.size()!=n || p.position_y_comoving.size()!=n || p.position_z_comoving.size()!=n ||
       p.velocity_x_peculiar.size()!=n || p.velocity_y_peculiar.size()!=n || p.velocity_z_peculiar.size()!=n ||
-      p.species_tag.size()!=n || p.particle_id.size()!=n) {
+      (!p.homogeneous_dmo_species && p.species_tag.size()!=n) || p.particle_id.size()!=n) {
     throw std::invalid_argument("distributed FOF local view has mismatched extents");
   }
   std::vector<std::uint8_t> bytes;
@@ -111,7 +111,11 @@ void appendWireDouble(std::vector<std::uint8_t>& out, double value) {
   for (std::size_t i=0;i<n;++i) {
     appendWireDouble(bytes,p.position_x_comoving[i]); appendWireDouble(bytes,p.position_y_comoving[i]); appendWireDouble(bytes,p.position_z_comoving[i]);
     appendWireDouble(bytes,p.velocity_x_peculiar[i]); appendWireDouble(bytes,p.velocity_y_peculiar[i]); appendWireDouble(bytes,p.velocity_z_peculiar[i]);
-    appendWireDouble(bytes,p.mass_code[i]); appendWireU32(bytes,p.species_tag[i]); appendWireU64(bytes,p.particle_id[i]);
+    appendWireDouble(bytes,p.mass_code[i]);
+    const std::uint32_t species_tag = p.homogeneous_dmo_species
+        ? static_cast<std::uint32_t>(core::ParticleSpecies::kDarkMatter)
+        : p.species_tag[i];
+    appendWireU32(bytes, species_tag); appendWireU64(bytes,p.particle_id[i]);
   }
   return bytes;
 }
@@ -338,6 +342,7 @@ HaloParticleView buildHaloParticleView(const core::SimulationState& state) {
       .velocity_z_peculiar = state.particles.velocity_z_peculiar,
       .mass_code = state.particles.mass_code,
       .species_tag = state.particle_sidecar.species_tag,
+      .homogeneous_dmo_species = state.hasHomogeneousDmoMetadata(),
       .particle_id = state.particle_sidecar.particle_id,
       .normalized_config_hash = state.metadata.normalized_config_hash,
   };
@@ -430,7 +435,7 @@ HaloCatalog FofHaloFinder::buildCatalogFromView(
       particles.velocity_x_peculiar.size() != particles.mass_code.size() ||
       particles.velocity_y_peculiar.size() != particles.mass_code.size() ||
       particles.velocity_z_peculiar.size() != particles.mass_code.size() ||
-      particles.species_tag.size() != particles.mass_code.size() ||
+      (!particles.homogeneous_dmo_species && particles.species_tag.size() != particles.mass_code.size()) ||
       particles.particle_id.size() != particles.mass_code.size()) {
     throw std::invalid_argument("halo particle view has mismatched extents");
   }
@@ -441,10 +446,13 @@ HaloCatalog FofHaloFinder::buildCatalogFromView(
   std::vector<std::uint32_t> candidate_indices;
   candidate_indices.reserve(particles.mass_code.size());
   for (std::uint32_t i = 0; i < particles.mass_code.size(); ++i) {
-    if (!core::isValidParticleSpeciesTag(particles.species_tag[i])) {
+    const std::uint32_t species_tag = particles.homogeneous_dmo_species
+        ? static_cast<std::uint32_t>(core::ParticleSpecies::kDarkMatter)
+        : particles.species_tag[i];
+    if (!core::isValidParticleSpeciesTag(species_tag)) {
       throw std::invalid_argument("FOF encountered an invalid particle species tag");
     }
-    const auto species = static_cast<core::ParticleSpecies>(particles.species_tag[i]);
+    const auto species = static_cast<core::ParticleSpecies>(species_tag);
     if (includeSpecies(species)) {
       candidate_indices.push_back(i);
     }
@@ -702,7 +710,11 @@ DistributedHaloCatalogResult FofHaloFinder::buildDistributedCatalogFromView(
         throw std::runtime_error("distributed FOF gathered wire payload has trailing bytes");
       }
 
-      HaloParticleView global{px, py, pz, vx, vy, vz, mass, species, ids, expected_hash};
+      HaloParticleView global{
+          .position_x_comoving = px, .position_y_comoving = py, .position_z_comoving = pz,
+          .velocity_x_peculiar = vx, .velocity_y_peculiar = vy, .velocity_z_peculiar = vz,
+          .mass_code = mass, .species_tag = species, .homogeneous_dmo_species = false,
+          .particle_id = ids, .normalized_config_hash = expected_hash};
       result.root_catalog = buildCatalogFromView(
           global, config, snapshot_step_index, snapshot_scale_factor, root_profiling);
       result.root_catalog.halo_finder = "fof_spatial_hash_mpi_root_merge_v1";

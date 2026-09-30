@@ -2564,26 +2564,43 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
   [[nodiscard]] bool borrowedHomogeneousDmoBaseEligible(
       const core::SimulationState& state) const {
+    const bool cacheable_compact_state =
+        state.hasHomogeneousDmoMetadata() &&
+        state.particle_sidecar.has_gravity_softening_override.empty();
+    if (cacheable_compact_state && m_borrowed_eligibility_certificate_valid &&
+        m_borrowed_eligibility_particle_index_generation == state.particleIndexGeneration() &&
+        m_borrowed_eligibility_gravity_source_generation == state.gravitySourceGeneration()) {
+      return m_borrowed_eligibility_result;
+    }
+    const auto publish_certificate = [&](bool eligible) {
+      if (cacheable_compact_state) {
+        m_borrowed_eligibility_certificate_valid = true;
+        m_borrowed_eligibility_particle_index_generation = state.particleIndexGeneration();
+        m_borrowed_eligibility_gravity_source_generation = state.gravitySourceGeneration();
+        m_borrowed_eligibility_result = eligible;
+      }
+      return eligible;
+    };
     if (m_tree_pm_options.enable_zoom_long_range_correction ||
         state.cells.size() != 0U) {
-      return false;
+      return publish_certificate(false);
     }
     const std::size_t particle_count = state.particles.size();
     if (particle_count > static_cast<std::size_t>(
             std::numeric_limits<std::uint32_t>::max())) {
-      return false;
+      return publish_certificate(false);
     }
     if (!state.particles.isConsistent() || !state.particle_sidecar.isConsistent()) {
-      return false;
+      return publish_certificate(false);
     }
     if (!state.hasHomogeneousDmoMetadata() &&
         (state.particle_sidecar.species_tag.size() != particle_count ||
          state.particle_sidecar.owning_rank.size() != particle_count)) {
-      return false;
+      return publish_certificate(false);
     }
     if (!state.particle_sidecar.has_gravity_softening_override.empty() &&
         state.particle_sidecar.has_gravity_softening_override.size() != particle_count) {
-      return false;
+      return publish_certificate(false);
     }
 
     const std::uint32_t local_rank =
@@ -2596,14 +2613,16 @@ class GravityRuntimeImpl final : public GravityRuntime {
     const double box_size_x = m_config.cosmology.box_size_x_mpc_comoving;
     const double box_size_y = m_config.cosmology.box_size_y_mpc_comoving;
     const double box_size_z = m_config.cosmology.box_size_z_mpc_comoving;
+    const bool compact_policy_proves_species_and_owner = state.hasHomogeneousDmoMetadata();
     for (std::size_t row = 0; row < particle_count; ++row) {
-      if (state.particleOwningRank(row) != local_rank ||
-          state.particleSpeciesTag(row) != dm_species_tag) {
-        return false;
+      if (!compact_policy_proves_species_and_owner &&
+          (state.particleOwningRank(row) != local_rank ||
+           state.particleSpeciesTag(row) != dm_species_tag)) {
+        return publish_certificate(false);
       }
       if (!state.particle_sidecar.has_gravity_softening_override.empty() &&
           state.particle_sidecar.has_gravity_softening_override[row] != 0U) {
-        return false;
+        return publish_certificate(false);
       }
       const double x = state.particles.position_x_comoving[row];
       const double y = state.particles.position_y_comoving[row];
@@ -2617,7 +2636,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
       if (periodic_sources &&
           (x < 0.0 || x >= box_size_x || y < 0.0 || y >= box_size_y ||
            z < 0.0 || z >= box_size_z)) {
-        return false;
+        return publish_certificate(false);
       }
     }
 
@@ -2629,9 +2648,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
     if (!std::isfinite(dm_softening) || dm_softening < 0.0 ||
         dm_softening > max_certified_softening_to_split_ratio *
             m_tree_pm_options.split_policy.split_scale_comoving) {
-      return false;
+      return publish_certificate(false);
     }
-    return true;
+    return publish_certificate(true);
   }
 
   [[nodiscard]] bool borrowedHomogeneousDmoEligible(
@@ -3104,6 +3123,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
       gravity::GravitySourceRepresentation::kMaterializedGeneric;
   std::uint64_t m_borrowed_particle_index_generation = 0U;
   std::uint64_t m_borrowed_gravity_source_generation = 0U;
+  mutable bool m_borrowed_eligibility_certificate_valid = false;
+  mutable bool m_borrowed_eligibility_result = false;
+  mutable std::uint64_t m_borrowed_eligibility_particle_index_generation = 0U;
+  mutable std::uint64_t m_borrowed_eligibility_gravity_source_generation = 0U;
   std::span<const std::uint32_t> m_active_source_indices{};
   std::vector<double> m_active_accel_x;
   std::vector<double> m_active_accel_y;

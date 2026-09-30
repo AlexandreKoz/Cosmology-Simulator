@@ -171,6 +171,7 @@ struct TreePmDiagnostics {
   double response_exchange_ms = 0.0;
   std::uint64_t pm_solve_count = 0;
   std::uint64_t pm_reuse_count = 0;
+  // Logical left+right halo values per scalar force component (not XYZ total).
   std::uint64_t pm_halo_value_count = 0;
   std::uint64_t pm_local_nx = 0;
   std::uint64_t pm_local_ny = 0;

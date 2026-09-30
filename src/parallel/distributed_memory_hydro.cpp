@@ -282,6 +282,7 @@ PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(
   (void)exchange_sequence;
 #endif
   PmSlabHaloExchangeResult result;
+  result.exchange_sequence = exchange_sequence;
   std::vector<double> send_left;
   std::vector<double> send_right;
   std::size_t halo_value_count = 0U;
@@ -662,7 +663,6 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
     const GhostLayerEpoch& expected_epoch) {
   const int world_rank = mpi_context.worldRank();
   const int world_size = mpi_context.worldSize();
-  std::unordered_map<std::uint64_t, std::uint32_t> owned_index_by_particle_id;
   std::vector<std::vector<std::uint64_t>> requested_particle_ids_by_rank;
   std::vector<std::vector<std::uint32_t>> recv_indices_by_rank;
   std::exception_ptr local_preparation_failure;
@@ -675,20 +675,27 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
       throw std::invalid_argument(
           "executeBlockingGhostRefreshExchangeFromDescriptors: authoritative payload epoch is stale");
     }
-    if (authoritative_local_state.size() < local_ghost_descriptors.size()) {
-      throw std::invalid_argument(
-          "executeBlockingGhostRefreshExchangeFromDescriptors: payload state must expose one row per local descriptor");
+    if (authoritative_local_state.size() > static_cast<std::size_t>(
+            std::numeric_limits<std::uint32_t>::max())) {
+      throw std::overflow_error(
+          "executeBlockingGhostRefreshExchangeFromDescriptors: local payload exceeds uint32 row representation");
     }
     if (world_rank < 0 || world_size <= 0 || world_rank >= world_size) {
       throw std::invalid_argument(
           "executeBlockingGhostRefreshExchangeFromDescriptors: invalid MPI context");
     }
 
-    owned_index_by_particle_id.reserve(local_ghost_descriptors.size());
     requested_particle_ids_by_rank.resize(static_cast<std::size_t>(world_size));
     recv_indices_by_rank.resize(static_cast<std::size_t>(world_size));
-    for (std::uint32_t local_index = 0; local_index < local_ghost_descriptors.size(); ++local_index) {
-      const LocalGhostDescriptor descriptor = local_ghost_descriptors[local_index];
+    for (std::uint32_t descriptor_slot = 0; descriptor_slot < local_ghost_descriptors.size(); ++descriptor_slot) {
+      const LocalGhostDescriptor descriptor = local_ghost_descriptors[descriptor_slot];
+      const std::uint32_t local_index = descriptor.local_index == std::numeric_limits<std::uint32_t>::max()
+          ? descriptor_slot
+          : descriptor.local_index;
+      if (local_index >= authoritative_local_state.size()) {
+        throw std::out_of_range(
+            "executeBlockingGhostRefreshExchangeFromDescriptors: descriptor local_index outside authoritative payload");
+      }
       if (!descriptor.epoch.matches(expected_epoch)) {
         throw std::invalid_argument(
             "executeBlockingGhostRefreshExchangeFromDescriptors: stale local ghost descriptor epoch");
@@ -706,11 +713,9 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
           throw std::invalid_argument(
               "executeBlockingGhostRefreshExchangeFromDescriptors: owned descriptor has nonlocal owner");
         }
-        auto [_, inserted] = owned_index_by_particle_id.emplace(descriptor.particle_id, local_index);
-        if (!inserted) {
-          throw std::invalid_argument(
-              "executeBlockingGhostRefreshExchangeFromDescriptors: duplicate owned particle_id in descriptor table");
-        }
+        // Owned-ID resolution is deferred until this rank has actual incoming
+        // request IDs. Avoid a population-sized hash for ranks that service no
+        // remote requests.
       } else {
         if (descriptor.owning_rank == world_rank) {
           throw std::invalid_argument(
@@ -880,9 +885,48 @@ BlockingGhostRefreshExchange executeBlockingGhostRefreshExchangeFromDescriptors(
     try {
       auto& send_rows = send_indices_by_rank[static_cast<std::size_t>(peer_rank)];
       send_rows.reserve(received_request_ids.size());
+      std::unordered_map<std::uint64_t, std::uint32_t> requested_row_by_particle_id;
+      requested_row_by_particle_id.reserve(received_request_ids.size());
       for (const std::uint64_t particle_id : received_request_ids) {
-        const auto it = owned_index_by_particle_id.find(particle_id);
-        if (it == owned_index_by_particle_id.end()) {
+        if (!requested_row_by_particle_id.emplace(
+                particle_id, std::numeric_limits<std::uint32_t>::max()).second) {
+          throw std::runtime_error(
+              "executeBlockingGhostRefreshExchangeFromDescriptors: peer sent duplicate requested particle_id");
+        }
+      }
+      std::unordered_set<std::uint32_t> ghost_rows;
+      ghost_rows.reserve(local_ghost_descriptors.size());
+      for (std::uint32_t descriptor_slot = 0;
+           descriptor_slot < local_ghost_descriptors.size(); ++descriptor_slot) {
+        const LocalGhostDescriptor descriptor = local_ghost_descriptors[descriptor_slot];
+        if (descriptor.residency != LocalIndexResidency::kGhost) {
+          continue;
+        }
+        const std::uint32_t ghost_row = descriptor.local_index == std::numeric_limits<std::uint32_t>::max()
+            ? descriptor_slot
+            : descriptor.local_index;
+        ghost_rows.insert(ghost_row);
+      }
+      for (std::uint32_t local_index = 0;
+           local_index < authoritative_local_state.size(); ++local_index) {
+        if (ghost_rows.contains(local_index)) {
+          continue;
+        }
+        const std::uint64_t particle_id = authoritative_local_state.entity_id[local_index];
+        const auto it = requested_row_by_particle_id.find(particle_id);
+        if (it == requested_row_by_particle_id.end()) {
+          continue;
+        }
+        if (it->second != std::numeric_limits<std::uint32_t>::max()) {
+          throw std::runtime_error(
+              "executeBlockingGhostRefreshExchangeFromDescriptors: requested particle_id resolves to multiple authoritative rows");
+        }
+        it->second = local_index;
+      }
+      for (const std::uint64_t particle_id : received_request_ids) {
+        const auto it = requested_row_by_particle_id.find(particle_id);
+        if (it == requested_row_by_particle_id.end() ||
+            it->second == std::numeric_limits<std::uint32_t>::max()) {
           throw std::runtime_error(
               "executeBlockingGhostRefreshExchangeFromDescriptors: peer requested a particle_id not owned by this rank");
         }
@@ -988,6 +1032,25 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
   BlockingGhostExchangeResult result;
   result.received_ghosts.epoch = expected_epoch;
 
+  const bool sparse_demand_descriptors = std::any_of(
+      local_ghost_descriptors.begin(), local_ghost_descriptors.end(),
+      [](const LocalGhostDescriptor& descriptor) {
+        return descriptor.local_index != std::numeric_limits<std::uint32_t>::max();
+      });
+  const auto find_descriptor = [&](std::uint32_t local_index) -> const LocalGhostDescriptor* {
+    if (!sparse_demand_descriptors) {
+      return local_index < local_ghost_descriptors.size()
+          ? &local_ghost_descriptors[local_index]
+          : nullptr;
+    }
+    const auto it = std::find_if(
+        local_ghost_descriptors.begin(), local_ghost_descriptors.end(),
+        [local_index](const LocalGhostDescriptor& descriptor) {
+          return descriptor.local_index == local_index;
+        });
+    return it == local_ghost_descriptors.end() ? nullptr : &*it;
+  };
+
   std::vector<GhostExchangeBuffer> send_buffers;
   std::exception_ptr local_preparation_failure;
   try {
@@ -1010,15 +1073,20 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
     std::size_t total_receive_records = 0U;
     for (std::size_t slot = 0; slot < plan.neighbor_ranks.size(); ++slot) {
       for (const std::uint32_t local_index : plan.send_local_indices_by_neighbor[slot]) {
-        if (local_index >= authoritative_local_state.size() ||
-            local_index >= local_ghost_descriptors.size()) {
+        if (local_index >= authoritative_local_state.size()) {
           throw std::out_of_range(
-              "executeBlockingGhostRefreshExchange: send descriptor index is outside local payload state");
+              "executeBlockingGhostRefreshExchange: send index is outside local payload state");
         }
-        if (authoritative_local_state.entity_id[local_index] !=
-            local_ghost_descriptors[local_index].particle_id) {
-          throw std::invalid_argument(
-              "executeBlockingGhostRefreshExchange: send payload entity_id does not match owned descriptor particle_id");
+        const LocalGhostDescriptor* descriptor = find_descriptor(local_index);
+        if (descriptor != nullptr) {
+          if (descriptor->residency != LocalIndexResidency::kOwned ||
+              authoritative_local_state.entity_id[local_index] != descriptor->particle_id) {
+            throw std::invalid_argument(
+                "executeBlockingGhostRefreshExchange: send row is not authoritative or its particle_id mismatches");
+          }
+        } else if (!sparse_demand_descriptors) {
+          throw std::out_of_range(
+              "executeBlockingGhostRefreshExchange: send descriptor index is outside residency table");
         }
       }
       send_buffers[slot].packFrom(
@@ -1186,12 +1254,13 @@ BlockingGhostExchangeResult executeBlockingGhostRefreshExchange(
            i < plan.recv_local_indices_by_neighbor[slot].size(); ++i) {
         const std::uint32_t local_index =
             plan.recv_local_indices_by_neighbor[slot][i];
-        if (local_index >= local_ghost_descriptors.size()) {
+        const LocalGhostDescriptor* descriptor = find_descriptor(local_index);
+        if (descriptor == nullptr || descriptor->residency != LocalIndexResidency::kGhost) {
           throw std::out_of_range(
-              "executeBlockingGhostRefreshExchange: receive descriptor index is outside residency table");
+              "executeBlockingGhostRefreshExchange: receive row has no ghost-demand descriptor");
         }
         if (result.received_ghosts.entity_id[old_received_count + i] !=
-            local_ghost_descriptors[local_index].particle_id) {
+            descriptor->particle_id) {
           throw std::invalid_argument(
               "executeBlockingGhostRefreshExchange: received ghost entity_id does not match receive descriptor particle_id");
         }

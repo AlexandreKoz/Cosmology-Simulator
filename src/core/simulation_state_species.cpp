@@ -376,7 +376,10 @@ std::uint32_t ParticleSpeciesIndex::globalIndex(ParticleSpecies species, std::ui
 
 bool SimulationState::compactHomogeneousDmoMetadata(std::uint32_t local_rank) {
   const std::size_t count = particles.size();
-  if (cells.size() != 0U || star_particles.size() != 0U || black_holes.size() != 0U || tracers.size() != 0U ||
+  if (!particles.isConsistent() || !particle_sidecar.isConsistent() ||
+      particle_sidecar.particle_id.size() != count ||
+      (!particle_sidecar.sfc_key.empty() && particle_sidecar.sfc_key.size() != count) ||
+      cells.size() != 0U || star_particles.size() != 0U || black_holes.size() != 0U || tracers.size() != 0U ||
       particle_sidecar.species_tag.size() != count || particle_sidecar.particle_flags.size() != count ||
       particle_sidecar.owning_rank.size() != count || particles.time_bin.size() != count ||
       particle_sidecar.last_drift_time_code.size() != count || particle_sidecar.last_drift_scale_factor.size() != count) {

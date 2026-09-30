@@ -2212,10 +2212,10 @@ void attachSchedulerFieldsToParticleMigrationRecords(
           "attachSchedulerFieldsToParticleMigrationRecords: record particle_id does not match source particle index");
     }
     records[i].has_scheduler_fields = true;
-    records[i].scheduler_fields.bin_index = persistent.bin_index[particle_index];
-    records[i].scheduler_fields.next_activation_tick = persistent.next_activation_tick[particle_index];
-    records[i].scheduler_fields.pending_bin_index = persistent.pending_bin_index[particle_index];
-    records[i].time_bin = persistent.bin_index[particle_index];
+    records[i].scheduler_fields.bin_index = scheduler.binIndex(particle_index);
+    records[i].scheduler_fields.next_activation_tick = scheduler.nextActivationTick(particle_index);
+    records[i].scheduler_fields.pending_bin_index = scheduler.pendingBinIndex(particle_index);
+    records[i].time_bin = scheduler.binIndex(particle_index);
   }
 }
 
@@ -2612,7 +2612,9 @@ void debugAssertTimeBinMirrorAuthorityInvariant(
       requireGasCellIdentityMapCoversDenseRows(state, "debugAssertTimeBinMirrorAuthorityInvariant");
     }
     for (std::uint32_t i = 0; i < state.cells.size(); ++i) {
-      if (state.cells.time_bin[i] != hot.bin_index[i]) {
+      const std::uint32_t scheduler_index = checkedLocalCellRow(
+          i, "debugAssertTimeBinMirrorAuthorityInvariant cell row");
+      if (state.cells.time_bin[i] != scheduler.binIndex(scheduler_index)) {
         throw_cell(i);
       }
     }

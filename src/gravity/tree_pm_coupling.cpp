@@ -2825,7 +2825,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->pm_solve_count = perform_long_range_refresh ? 1U : 0U;
     diagnostics->pm_reuse_count = perform_long_range_refresh ? 0U : 1U;
     diagnostics->pm_halo_value_count = static_cast<std::uint64_t>(
-        m_last_pm_slab_halo_exchange.left_halo.size() + m_last_pm_slab_halo_exchange.right_halo.size());
+        2U * m_last_pm_slab_halo_exchange.halo_depth_x * m_shape.ny * m_shape.nz);
     diagnostics->pm_local_nx = static_cast<std::uint64_t>(m_grid.slabLayout().local_nx());
     diagnostics->pm_local_ny = static_cast<std::uint64_t>(m_shape.ny);
     diagnostics->pm_local_nz = static_cast<std::uint64_t>(m_shape.nz);

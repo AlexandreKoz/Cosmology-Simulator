@@ -201,6 +201,7 @@ struct ParticleDiagnosticsView {
   std::span<const double> velocity_z_peculiar;
   std::span<const double> mass_code;
   std::span<const std::uint32_t> species_tag;
+  bool homogeneous_dmo_species = false;
   std::span<const double> gravity_softening_comoving;
 };
 

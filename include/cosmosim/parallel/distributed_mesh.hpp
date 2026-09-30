@@ -391,6 +391,9 @@ struct AmrFluxExchangeStagingPlan {
     std::uint64_t exchange_sequence = 0);
 
 struct PmSlabHaloExchangeResult {
+  // Legacy materialized payload lanes. TreePM production receives directly
+  // into PmGridStorage's persistent force-halo cache, so these may be empty
+  // even when the logical exchange committed nonzero halo values.
   std::vector<double> left_halo;
   std::vector<double> right_halo;
   std::uint64_t sent_bytes = 0;
@@ -398,6 +401,8 @@ struct PmSlabHaloExchangeResult {
   std::size_t halo_depth_x = 0;
   int left_peer_rank = -1;
   int right_peer_rank = -1;
+  // Protocol generation for the logical exchange represented by this result.
+  std::uint64_t exchange_sequence = 0;
 };
 
 [[nodiscard]] PmSlabHaloExchangeResult executeBlockingPmSlabHaloExchange(

@@ -679,6 +679,10 @@ struct GhostLayerEpoch {
 };
 
 struct LocalGhostDescriptor {
+  // Explicit canonical row for demand-scaled descriptor sets. The sentinel
+  // preserves compatibility with legacy dense descriptor tables where the
+  // descriptor slot itself is the local row.
+  std::uint32_t local_index = std::numeric_limits<std::uint32_t>::max();
   LocalIndexResidency residency = LocalIndexResidency::kOwned;
   int owning_rank = 0;
   std::uint64_t particle_id = 0;

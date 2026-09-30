@@ -486,6 +486,7 @@ DiagnosticsStateView buildDiagnosticsStateView(
           .velocity_z_peculiar = state.particles.velocity_z_peculiar,
           .mass_code = state.particles.mass_code,
           .species_tag = state.particle_sidecar.species_tag,
+          .homogeneous_dmo_species = state.hasHomogeneousDmoMetadata(),
           .gravity_softening_comoving = state.particle_sidecar.gravity_softening_comoving,
       },
       .gas_cells = GasDiagnosticsView{
@@ -1137,7 +1138,9 @@ AngularMomentumBudget DiagnosticsEngine::computeAngularMomentumBudget(const Part
       budget.total_l_code[j] += l[j];
     }
 
-    const auto species = static_cast<core::ParticleSpecies>(particles.species_tag[i]);
+    const auto species = particles.homogeneous_dmo_species
+        ? core::ParticleSpecies::kDarkMatter
+        : static_cast<core::ParticleSpecies>(particles.species_tag[i]);
     std::array<double, 3>* target = nullptr;
     switch (species) {
       case core::ParticleSpecies::kDarkMatter:

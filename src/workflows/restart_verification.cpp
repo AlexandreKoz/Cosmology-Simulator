@@ -25,6 +25,26 @@ namespace {
   return true;
 }
 
+
+[[nodiscard]] bool logicalParticleMetadataEqualForRestart(
+    const core::SimulationState& lhs, const core::SimulationState& rhs) {
+  if (lhs.particles.size() != rhs.particles.size()) {
+    return false;
+  }
+  for (std::size_t row = 0; row < lhs.particles.size(); ++row) {
+    if (lhs.particleTimeBin(row) != rhs.particleTimeBin(row) ||
+        lhs.particleSfcKey(row) != rhs.particleSfcKey(row) ||
+        lhs.particleSpeciesTag(row) != rhs.particleSpeciesTag(row) ||
+        lhs.particleFlags(row) != rhs.particleFlags(row) ||
+        lhs.particleOwningRank(row) != rhs.particleOwningRank(row) ||
+        lhs.particleLastDriftTimeCode(row) != rhs.particleLastDriftTimeCode(row) ||
+        lhs.particleLastDriftScaleFactor(row) != rhs.particleLastDriftScaleFactor(row)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 [[nodiscard]] bool restartRuntimeStateExactlyEquivalentImpl(
     const core::SimulationState& restored,
     const core::SimulationState& reference) {
@@ -36,14 +56,8 @@ namespace {
       restored.particles.velocity_y_peculiar == reference.particles.velocity_y_peculiar &&
       restored.particles.velocity_z_peculiar == reference.particles.velocity_z_peculiar &&
       restored.particles.mass_code == reference.particles.mass_code &&
-      restored.particles.time_bin == reference.particles.time_bin &&
       restored.particle_sidecar.particle_id == reference.particle_sidecar.particle_id &&
-      restored.particle_sidecar.sfc_key == reference.particle_sidecar.sfc_key &&
-      restored.particle_sidecar.species_tag == reference.particle_sidecar.species_tag &&
-      restored.particle_sidecar.particle_flags == reference.particle_sidecar.particle_flags &&
-      restored.particle_sidecar.owning_rank == reference.particle_sidecar.owning_rank &&
-      restored.particle_sidecar.last_drift_time_code == reference.particle_sidecar.last_drift_time_code &&
-      restored.particle_sidecar.last_drift_scale_factor == reference.particle_sidecar.last_drift_scale_factor &&
+      logicalParticleMetadataEqualForRestart(restored, reference) &&
       restored.particle_sidecar.gravity_softening_comoving == reference.particle_sidecar.gravity_softening_comoving &&
       restored.particle_sidecar.has_gravity_softening_override == reference.particle_sidecar.has_gravity_softening_override &&
       restored.cells.center_x_comoving == reference.cells.center_x_comoving &&

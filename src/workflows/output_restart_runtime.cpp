@@ -863,9 +863,10 @@ bool maybeWriteOutputs(
         config,
         integrator_state,
         static_cast<std::uint32_t>(std::max(gravity_state.runtimeTopology().world_rank, 0)));
-    restart_payload.distributed_gravity_state.owning_rank_by_item.reserve(state.particle_sidecar.owning_rank.size());
-    for (const std::uint32_t owner : state.particle_sidecar.owning_rank) {
-      restart_payload.distributed_gravity_state.owning_rank_by_item.push_back(static_cast<int>(owner));
+    restart_payload.distributed_gravity_state.owning_rank_by_item.reserve(state.particles.size());
+    for (std::size_t row = 0; row < state.particles.size(); ++row) {
+      restart_payload.distributed_gravity_state.owning_rank_by_item.push_back(
+          static_cast<int>(state.particleOwningRank(row)));
     }
     const std::size_t world_size = static_cast<std::size_t>(gravity_state.runtimeTopology().world_size);
     restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank.resize(world_size, 0);
@@ -924,7 +925,7 @@ bool maybeWriteOutputs(
         restart_read.scheduler_state.current_tick == scheduler.currentTick() &&
         restart_read.distributed_gravity_state.decomposition_epoch ==
             restart_payload.distributed_gravity_state.decomposition_epoch &&
-        restart_read.distributed_gravity_state.owning_rank_by_item.size() == state.particle_sidecar.owning_rank.size() &&
+        restart_read.distributed_gravity_state.owning_rank_by_item.size() == state.particles.size() &&
         restart_read.distributed_gravity_state.owning_rank_by_item == restart_payload.distributed_gravity_state.owning_rank_by_item &&
         restart_read.distributed_gravity_state.pm_slab_begin_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank &&
         restart_read.distributed_gravity_state.pm_slab_end_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank &&
@@ -1112,14 +1113,14 @@ void validateRestartResumeTopologyOrThrowImpl(
         ": " + joinRestartCompatibilityMessages(compatibility.mismatch_messages));
   }
   if (restart.distributed_gravity_state.owning_rank_by_item.size() !=
-      restart.state.particle_sidecar.owning_rank.size()) {
+      restart.state.particles.size()) {
     throw std::runtime_error(
         "ReferenceWorkflow restart topology validation failed: /distributed_gravity owning_rank_by_item count " +
         std::to_string(restart.distributed_gravity_state.owning_rank_by_item.size()) +
         " does not match local particle rows " +
-        std::to_string(restart.state.particle_sidecar.owning_rank.size()));
+        std::to_string(restart.state.particles.size()));
   }
-  for (std::size_t row = 0; row < restart.state.particle_sidecar.owning_rank.size(); ++row) {
+  for (std::size_t row = 0; row < restart.state.particles.size(); ++row) {
     const int observed_owner = static_cast<int>(restart.state.particleOwningRank(row));
     const int restart_owner = restart.distributed_gravity_state.owning_rank_by_item[row];
     if (observed_owner != restart_owner) {

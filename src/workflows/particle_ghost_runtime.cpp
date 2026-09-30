@@ -65,12 +65,15 @@ namespace {
     int world_rank,
     const parallel::GhostLayerEpoch& epoch) {
   std::vector<parallel::LocalGhostDescriptor> descriptors;
-  descriptors.reserve(state.particles.size());
   for (std::size_t particle_index = 0; particle_index < state.particles.size(); ++particle_index) {
     const int owner_rank = static_cast<int>(state.particleOwningRank(particle_index));
+    if (owner_rank == world_rank) {
+      continue;
+    }
     descriptors.push_back(parallel::LocalGhostDescriptor{
-        .residency = (owner_rank == world_rank) ? parallel::LocalIndexResidency::kOwned
-                                                : parallel::LocalIndexResidency::kGhost,
+        .local_index = core::checkedIntegralNarrow<std::uint32_t>(
+            particle_index, "particle ghost demand local index"),
+        .residency = parallel::LocalIndexResidency::kGhost,
         .owning_rank = owner_rank,
         .particle_id = state.particle_sidecar.particle_id[particle_index],
         .epoch = epoch,
@@ -150,10 +153,17 @@ namespace {
   for (std::size_t slot = 0; slot < plan.recv_local_indices_by_neighbor.size(); ++slot) {
     const int peer_rank = plan.neighbor_ranks[slot];
     for (const std::uint32_t local_index : plan.recv_local_indices_by_neighbor[slot]) {
-      if (local_index >= descriptors.size() || local_index >= state.particles.size()) {
+      if (local_index >= state.particles.size()) {
         throw std::out_of_range("particle ghost commit target row is outside local state");
       }
-      const auto& descriptor = descriptors[local_index];
+      const auto descriptor_it = std::find_if(
+          descriptors.begin(), descriptors.end(), [&](const parallel::LocalGhostDescriptor& descriptor) {
+            return descriptor.local_index == local_index;
+          });
+      if (descriptor_it == descriptors.end()) {
+        throw std::invalid_argument("particle ghost commit target has no matching ghost demand descriptor");
+      }
+      const auto& descriptor = *descriptor_it;
       if (descriptor.residency != parallel::LocalIndexResidency::kGhost ||
           descriptor.owning_rank != peer_rank || descriptor.owning_rank == world_rank) {
         throw std::invalid_argument("particle ghost commit target does not match remote ownership plan");

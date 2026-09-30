@@ -578,18 +578,44 @@ void validateGhostTransferAgainstResidency(
   if (world_rank < 0) {
     throw std::invalid_argument("world_rank must be non-negative");
   }
-  for (const std::uint32_t local_index : descriptor.local_indices) {
-    if (local_index >= local_ghost_descriptors.size()) {
-      throw std::out_of_range("ghost transfer descriptor local index out of residency table range");
+  const bool sparse_demand_descriptors = std::any_of(
+      local_ghost_descriptors.begin(), local_ghost_descriptors.end(),
+      [](const LocalGhostDescriptor& local) {
+        return local.local_index != std::numeric_limits<std::uint32_t>::max();
+      });
+  const auto find_descriptor = [&](std::uint32_t local_index) -> const LocalGhostDescriptor* {
+    if (!sparse_demand_descriptors) {
+      return local_index < local_ghost_descriptors.size()
+          ? &local_ghost_descriptors[local_index]
+          : nullptr;
     }
-    const LocalGhostDescriptor local = local_ghost_descriptors[local_index];
+    const auto it = std::find_if(
+        local_ghost_descriptors.begin(), local_ghost_descriptors.end(),
+        [local_index](const LocalGhostDescriptor& local) {
+          return local.local_index == local_index;
+        });
+    return it == local_ghost_descriptors.end() ? nullptr : &*it;
+  };
+
+  for (const std::uint32_t local_index : descriptor.local_indices) {
+    const LocalGhostDescriptor* local = find_descriptor(local_index);
     if (descriptor.role == GhostTransferRole::kOutboundSend) {
-      if (local.residency != LocalIndexResidency::kOwned || local.owning_rank != world_rank) {
+      // In demand-scaled mode descriptors exist only for remote-owned ghost
+      // rows, so an absent descriptor proves this canonical row is locally
+      // authoritative. Legacy dense tables retain their explicit owned row.
+      if (local == nullptr) {
+        if (sparse_demand_descriptors) {
+          continue;
+        }
+        throw std::out_of_range("ghost transfer descriptor local index out of residency table range");
+      }
+      if (local->residency != LocalIndexResidency::kOwned || local->owning_rank != world_rank) {
         throw std::invalid_argument("outbound ghost or migration payload must be packed from authoritative local state");
       }
     } else {
       if (descriptor.intent == GhostTransferIntent::kGhostRefreshReceiveStaging) {
-        if (local.residency != LocalIndexResidency::kGhost || local.owning_rank == world_rank) {
+        if (local == nullptr || local->residency != LocalIndexResidency::kGhost ||
+            local->owning_rank == world_rank) {
           throw std::invalid_argument("ghost refresh receive staging must unpack into remote-owned ghost slots");
         }
       } else if (descriptor.intent == GhostTransferIntent::kOwnershipMigrationReceiveStaging) {
