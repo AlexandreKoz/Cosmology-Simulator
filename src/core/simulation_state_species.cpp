@@ -48,6 +48,84 @@ void appendModuleRowPayload(ModuleSidecarBlock* block, std::uint64_t particle_id
   block->payload.insert(block->payload.end(), payload.begin(), payload.end());
 }
 
+[[nodiscard]] ParticleIdValidationResult validateParticleIdsBoundedExactImpl(
+    std::span<const std::uint64_t> particle_ids,
+    OwnershipValidationWorkspace& scratch) {
+  ParticleIdValidationResult result;
+  for (const std::uint64_t id : particle_ids) {
+    result.nonzero = result.nonzero && id != 0U;
+  }
+  if (particle_ids.size() < 2U) {
+    return result;
+  }
+
+  const std::size_t bucket_capacity = static_cast<std::size_t>(
+      OwnershipValidationWorkspace::k_id_validation_workspace_limit_bytes /
+      sizeof(std::uint64_t));
+  if (bucket_capacity < 2U) {
+    throw std::logic_error("particle-ID validation workspace is too small");
+  }
+  scratch.id_bucket.clear();
+  if (scratch.id_bucket.capacity() > bucket_capacity) {
+    std::vector<std::uint64_t>{}.swap(scratch.id_bucket);
+  }
+  scratch.id_bucket.reserve(std::min(bucket_capacity, particle_ids.size()));
+
+  struct Prefix {
+    std::uint8_t bits = 0U;
+    std::uint64_t value = 0U;
+  };
+  std::array<Prefix, 65U> pending{};
+  std::size_t pending_size = 1U;
+  pending[0] = Prefix{};
+
+  const auto matches = [](std::uint64_t id, const Prefix& prefix) noexcept {
+    if (prefix.bits == 0U) return true;
+    if (prefix.bits == 64U) return id == prefix.value;
+    const std::uint64_t mask = (1ULL << prefix.bits) - 1ULL;
+    return (id & mask) == prefix.value;
+  };
+
+  while (pending_size != 0U) {
+    const Prefix prefix = pending[--pending_size];
+    std::size_t count = 0U;
+    for (const std::uint64_t id : particle_ids) {
+      if (matches(id, prefix)) {
+        ++count;
+        if (count > bucket_capacity) break;
+      }
+    }
+    if (count > bucket_capacity) {
+      if (prefix.bits == 64U) {
+        result.unique = false;
+        scratch.id_bucket.clear();
+        return result;
+      }
+      if (pending_size + 2U > pending.size()) {
+        throw std::logic_error("particle-ID validation prefix stack overflow");
+      }
+      const std::uint8_t child_bits = static_cast<std::uint8_t>(prefix.bits + 1U);
+      pending[pending_size++] = Prefix{child_bits, prefix.value | (1ULL << prefix.bits)};
+      pending[pending_size++] = Prefix{child_bits, prefix.value};
+      continue;
+    }
+
+    scratch.id_bucket.clear();
+    for (const std::uint64_t id : particle_ids) {
+      if (matches(id, prefix)) scratch.id_bucket.push_back(id);
+    }
+    std::sort(scratch.id_bucket.begin(), scratch.id_bucket.end());
+    if (std::adjacent_find(scratch.id_bucket.begin(), scratch.id_bucket.end()) !=
+        scratch.id_bucket.end()) {
+      result.unique = false;
+      scratch.id_bucket.clear();
+      return result;
+    }
+  }
+  scratch.id_bucket.clear();
+  return result;
+}
+
 [[nodiscard]] ParticleSpecies speciesFromTagOrThrow(std::uint32_t species_tag, const char* caller) {
   if (!isValidParticleSpeciesTag(species_tag)) {
     throw std::invalid_argument(std::string(caller) + ": invalid species tag");
@@ -281,6 +359,12 @@ void writePatchFieldsToRow(
 }
 }  // namespace
 
+ParticleIdValidationResult validateParticleIdsExact(
+    std::span<const std::uint64_t> particle_ids,
+    OwnershipValidationWorkspace& scratch) {
+  return validateParticleIdsBoundedExactImpl(particle_ids, scratch);
+}
+
 std::uint64_t SpeciesContainer::totalCount() const noexcept {
   std::uint64_t total = 0;
   for (const auto count : count_by_species) {
@@ -459,7 +543,8 @@ void SimulationState::commitCompactHomogeneousDmoCandidate(
     std::uint32_t local_rank,
     std::uint32_t uniform_particle_flags,
     double common_last_drift_time_code,
-    double common_last_drift_scale_factor) {
+    double common_last_drift_scale_factor,
+    bool persistent_particle_ids_certified) {
   const std::size_t count = candidate_particles.size();
   if (!hasHomogeneousDmoMetadata() || cells.size() != 0U || star_particles.size() != 0U ||
       black_holes.size() != 0U || tracers.size() != 0U || !candidate_particles.isConsistent() ||
@@ -499,6 +584,15 @@ void SimulationState::commitCompactHomogeneousDmoCandidate(
       checkedIntegralNarrow<std::uint32_t>(count, "commitCompactHomogeneousDmoCandidate particle count"));
   species.count_by_species.fill(0U);
   species.count_by_species[particleSpeciesIndex(ParticleSpecies::kDarkMatter)] = count;
+  bumpParticleIdentityGeneration();
+  if (persistent_particle_ids_certified) {
+    m_particle_identity_validation_certificate = ParticleIdentityValidationCertificate{
+        .identity_generation = m_particle_identity_generation,
+        .particle_count = particle_sidecar.particle_id.size(),
+        .local_uniqueness_proven = true,
+        .nonzero_ids_proven = true,
+    };
+  }
   bumpParticleIndexGeneration();
   bumpGravitySourceGeneration();
 }
@@ -576,34 +670,44 @@ void SimulationState::rebuildSpeciesIndex() {
 }
 
 bool SimulationState::validateUniqueParticleIds() const {
-  std::unordered_set<std::uint64_t> ids;
-  ids.reserve(particle_sidecar.particle_id.size());
-  for (const auto id : particle_sidecar.particle_id) {
-    if (!ids.insert(id).second) {
-      return false;
-    }
-  }
-  return true;
+  if (hasCertifiedUniqueParticleIds()) return true;
+  OwnershipValidationWorkspace scratch;
+  return validateUniqueParticleIds(scratch);
 }
 
 bool SimulationState::validateUniqueParticleIds(
     OwnershipValidationWorkspace& scratch) const {
-  scratch.particle_ids.resize(particle_sidecar.particle_id.size());
-  std::copy(particle_sidecar.particle_id.begin(), particle_sidecar.particle_id.end(),
-            scratch.particle_ids.begin());
-  std::sort(scratch.particle_ids.begin(), scratch.particle_ids.end());
-  return std::adjacent_find(scratch.particle_ids.begin(), scratch.particle_ids.end()) ==
-      scratch.particle_ids.end();
+  if (hasCertifiedUniqueParticleIds()) return true;
+  const ParticleIdValidationResult validation =
+      validateParticleIdsExact(particle_sidecar.particle_id, scratch);
+  if (!validation.unique) return false;
+  m_particle_identity_validation_certificate = ParticleIdentityValidationCertificate{
+      .identity_generation = m_particle_identity_generation,
+      .particle_count = particle_sidecar.particle_id.size(),
+      .local_uniqueness_proven = true,
+      .nonzero_ids_proven = validation.nonzero,
+  };
+  return true;
 }
 
 bool SimulationState::validatePersistentParticleIds() const {
-  std::unordered_set<std::uint64_t> ids;
-  ids.reserve(particle_sidecar.particle_id.size());
-  for (const auto id : particle_sidecar.particle_id) {
-    if (id == 0U || !ids.insert(id).second) {
-      return false;
-    }
-  }
+  if (hasCertifiedPersistentParticleIds()) return true;
+  OwnershipValidationWorkspace scratch;
+  return validatePersistentParticleIds(scratch);
+}
+
+bool SimulationState::validatePersistentParticleIds(
+    OwnershipValidationWorkspace& scratch) const {
+  if (hasCertifiedPersistentParticleIds()) return true;
+  const ParticleIdValidationResult validation =
+      validateParticleIdsExact(particle_sidecar.particle_id, scratch);
+  if (!validation.unique || !validation.nonzero) return false;
+  m_particle_identity_validation_certificate = ParticleIdentityValidationCertificate{
+      .identity_generation = m_particle_identity_generation,
+      .particle_count = particle_sidecar.particle_id.size(),
+      .local_uniqueness_proven = true,
+      .nonzero_ids_proven = true,
+  };
   return true;
 }
 
@@ -635,10 +739,10 @@ ParticleTransferPacket SimulationState::packSpeciesTransferPacket(ParticleSpecie
     packet.velocity_y_peculiar[i] = particles.velocity_y_peculiar[source];
     packet.velocity_z_peculiar[i] = particles.velocity_z_peculiar[source];
     packet.mass_code[i] = particles.mass_code[source];
-    packet.time_bin[i] = particles.time_bin[source];
-    packet.owning_rank[i] = particle_sidecar.owning_rank[source];
-    packet.last_drift_time_code[i] = particle_sidecar.last_drift_time_code[source];
-    packet.last_drift_scale_factor[i] = particle_sidecar.last_drift_scale_factor[source];
+    packet.time_bin[i] = particleTimeBin(source);
+    packet.owning_rank[i] = particleOwningRank(source);
+    packet.last_drift_time_code[i] = particleLastDriftTimeCode(source);
+    packet.last_drift_scale_factor[i] = particleLastDriftScaleFactor(source);
   }
 
   return packet;
@@ -660,12 +764,12 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
   for (const auto index : local_indices) {
     ParticleMigrationRecord record;
     record.particle_id = particle_sidecar.particle_id[index];
-    record.sfc_key = particle_sidecar.sfc_key[index];
-    record.species_tag = particle_sidecar.species_tag[index];
-    record.particle_flags = particle_sidecar.particle_flags[index];
-    record.owning_rank = particle_sidecar.owning_rank[index];
-    record.last_drift_time_code = particle_sidecar.last_drift_time_code[index];
-    record.last_drift_scale_factor = particle_sidecar.last_drift_scale_factor[index];
+    record.sfc_key = particleSfcKey(index);
+    record.species_tag = particleSpeciesTag(index);
+    record.particle_flags = particleFlags(index);
+    record.owning_rank = particleOwningRank(index);
+    record.last_drift_time_code = particleLastDriftTimeCode(index);
+    record.last_drift_scale_factor = particleLastDriftScaleFactor(index);
     record.position_x_comoving = particles.position_x_comoving[index];
     record.position_y_comoving = particles.position_y_comoving[index];
     record.position_z_comoving = particles.position_z_comoving[index];
@@ -673,7 +777,7 @@ std::vector<ParticleMigrationRecord> SimulationState::packParticleMigrationRecor
     record.velocity_y_peculiar = particles.velocity_y_peculiar[index];
     record.velocity_z_peculiar = particles.velocity_z_peculiar[index];
     record.mass_code = particles.mass_code[index];
-    record.time_bin = particles.time_bin[index];
+    record.time_bin = particleTimeBin(index);
     if (!particle_sidecar.gravity_softening_comoving.empty()) {
       record.has_gravity_softening_value = true;
       record.gravity_softening_comoving = particle_sidecar.gravity_softening_comoving[index];
@@ -895,6 +999,9 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     if (remove_mask[i] != 0U) {
       continue;
     }
+    if (particle_sidecar.particle_id[i] == 0U) {
+      throw std::invalid_argument("commitParticleMigration: kept particle has zero persistent ID");
+    }
     if (!final_particle_ids.insert(particle_sidecar.particle_id[i]).second) {
       throw std::invalid_argument("commitParticleMigration: kept particles contain duplicate IDs");
     }
@@ -905,6 +1012,9 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     require_inbound_sidecar_contract(inbound);
     if (inbound.owning_rank != static_cast<std::uint32_t>(commit.world_rank)) {
       throw std::invalid_argument("commitParticleMigration: inbound record ownership must equal commit world rank");
+    }
+    if (inbound.particle_id == 0U) {
+      throw std::invalid_argument("commitParticleMigration: inbound record has zero persistent particle ID");
     }
     if (!final_particle_ids.insert(inbound.particle_id).second) {
       throw std::invalid_argument("commitParticleMigration: inbound record would create duplicate particle ID");
@@ -1462,6 +1572,13 @@ void SimulationState::commitParticleMigration(const ParticleMigrationCommit& com
     ++species.count_by_species[tag];
   }
   rebuildSpeciesIndex();
+  bumpParticleIdentityGeneration();
+  m_particle_identity_validation_certificate = ParticleIdentityValidationCertificate{
+      .identity_generation = m_particle_identity_generation,
+      .particle_count = particle_sidecar.particle_id.size(),
+      .local_uniqueness_proven = true,
+      .nonzero_ids_proven = true,
+  };
   bumpParticleIndexGeneration();
 }
 

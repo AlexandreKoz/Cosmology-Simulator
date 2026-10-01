@@ -1680,7 +1680,8 @@ struct MigrationAdmissionPlan {
     const core::SimulationState& state,
     const parallel::MpiContext& mpi_context) {
   const parallel::LocalOwnershipIdentitySummary local =
-      parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+      parallel::summarizeLocalOwnedParticleIds(
+          state.particle_sidecar.particle_id, state.validateUniqueParticleIds());
   const std::uint64_t unique_rank_count =
       mpi_context.allreduceSumUint64(local.local_particle_ids_unique ? 1ULL : 0ULL);
   return parallel::LocalOwnershipIdentitySummary{
@@ -1905,6 +1906,10 @@ struct CompactDmoMigrationCommitResult {
   if (plan.representation != MigrationTransactionRepresentation::kCompactHomogeneousDmo) {
     throw std::logic_error("compact DMO transaction invoked with generic admission plan");
   }
+  const bool transfer_persistent_id_certificate =
+      mpi_context.allreduceSumUint64(
+          state.hasCertifiedPersistentParticleIds() ? 1ULL : 0ULL) ==
+      static_cast<std::uint64_t>(mpi_context.worldSize());
   const std::size_t rank_count = static_cast<std::size_t>(mpi_context.worldSize());
   std::vector<std::vector<std::uint32_t>> selections_by_rank;
   std::vector<std::uint32_t> outbound_rows;
@@ -2052,7 +2057,7 @@ struct CompactDmoMigrationCommitResult {
   state.commitCompactHomogeneousDmoCandidate(
       std::move(candidate_particles), std::move(candidate_sidecar),
       static_cast<std::uint32_t>(world_rank), uniform_flags,
-      drift_time_code, drift_scale_factor);
+      drift_time_code, drift_scale_factor, transfer_persistent_id_certificate);
   scheduler = std::move(*candidate_scheduler);
   return CompactDmoMigrationCommitResult{
       .exchange_stats = exchange.stats,

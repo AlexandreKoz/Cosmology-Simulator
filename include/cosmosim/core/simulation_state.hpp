@@ -854,20 +854,56 @@ struct ParticleMigrationCommit {
   bool preserve_gas_cell_state = false;
 };
 
-// Reusable scratch for full ownership/ID validation. It is not persistent
-// state and must be admitted before resizing on a governed production path.
+struct ParticleIdValidationResult {
+  bool unique = true;
+  bool nonzero = true;
+};
+
+struct ParticleIdentityValidationCertificate {
+  std::uint64_t identity_generation = std::numeric_limits<std::uint64_t>::max();
+  std::size_t particle_count = 0U;
+  bool local_uniqueness_proven = false;
+  bool nonzero_ids_proven = false;
+
+  [[nodiscard]] bool validFor(
+      std::uint64_t generation, std::size_t count, bool require_nonzero) const noexcept {
+    return identity_generation == generation && particle_count == count &&
+        local_uniqueness_proven && (!require_nonzero || nonzero_ids_proven);
+  }
+};
+
+// Reusable scratch for exact ownership/ID validation. Particle identity uses a
+// fixed-capacity radix bucket rather than population-sized scratch. Cold
+// sidecar marker lanes are allocated only when the corresponding sidecar is
+// present, and cell_owner exists only when AMR patch ownership must be checked.
 struct OwnershipValidationWorkspace {
-  std::vector<std::uint64_t> particle_ids;
+  static constexpr std::uint64_t k_id_validation_workspace_limit_bytes =
+      32ULL * 1024ULL * 1024ULL;
+
+  std::vector<std::uint64_t> id_bucket;
   std::vector<std::uint8_t> star_rows;
   std::vector<std::uint8_t> bh_rows;
   std::vector<std::uint8_t> tracer_rows;
   std::vector<std::uint32_t> cell_owner;
 
-  void resize(std::size_t particle_count, std::size_t cell_count);
+  void resize(
+      std::size_t particle_count, std::size_t cell_count,
+      bool need_star_rows = false, bool need_bh_rows = false,
+      bool need_tracer_rows = false, bool need_cell_owner = false);
   [[nodiscard]] std::uint64_t ownedCapacityBytes() const;
   [[nodiscard]] static std::uint64_t requiredBytes(
-      std::size_t particle_count, std::size_t cell_count);
+      std::size_t particle_count, std::size_t cell_count,
+      bool need_star_rows = false, bool need_bh_rows = false,
+      bool need_tracer_rows = false, bool need_cell_owner = false,
+      bool include_id_validation_workspace = true);
 };
+
+// Exact, deterministic particle-ID validation with a population-independent
+// CHUI-owned workspace. Callers that already hold a valid identity certificate
+// should reuse that evidence instead of invoking this fallback.
+[[nodiscard]] ParticleIdValidationResult validateParticleIdsExact(
+    std::span<const std::uint64_t> particle_ids,
+    OwnershipValidationWorkspace& scratch);
 
 class SimulationState {
  public:
@@ -903,6 +939,19 @@ class SimulationState {
   [[nodiscard]] bool validateUniqueParticleIds() const;
   [[nodiscard]] bool validateUniqueParticleIds(OwnershipValidationWorkspace& scratch) const;
   [[nodiscard]] bool validatePersistentParticleIds() const;
+  [[nodiscard]] bool validatePersistentParticleIds(OwnershipValidationWorkspace& scratch) const;
+  [[nodiscard]] const ParticleIdentityValidationCertificate&
+  particleIdentityValidationCertificate() const noexcept {
+    return m_particle_identity_validation_certificate;
+  }
+  [[nodiscard]] bool hasCertifiedUniqueParticleIds() const noexcept {
+    return m_particle_identity_validation_certificate.validFor(
+        m_particle_identity_generation, particles.size(), false);
+  }
+  [[nodiscard]] bool hasCertifiedPersistentParticleIds() const noexcept {
+    return m_particle_identity_validation_certificate.validFor(
+        m_particle_identity_generation, particles.size(), true);
+  }
   void rebuildSpeciesIndex();
   [[nodiscard]] ParticleMetadataRepresentation particleMetadataRepresentation() const noexcept { return m_particle_metadata_representation; }
   [[nodiscard]] bool hasHomogeneousDmoMetadata() const noexcept { return m_particle_metadata_representation == ParticleMetadataRepresentation::kHomogeneousDmo; }
@@ -921,7 +970,8 @@ class SimulationState {
       std::uint32_t local_rank,
       std::uint32_t uniform_particle_flags,
       double common_last_drift_time_code,
-      double common_last_drift_scale_factor);
+      double common_last_drift_scale_factor,
+      bool persistent_particle_ids_certified = false);
   [[nodiscard]] std::uint32_t particleSpeciesTag(std::size_t particle_index) const;
   [[nodiscard]] std::uint32_t particleFlags(std::size_t particle_index) const;
   [[nodiscard]] std::uint32_t particleOwningRank(std::size_t particle_index) const;
@@ -1006,9 +1056,13 @@ class SimulationState {
   bool m_sfc_key_is_uniform = false;
   double m_common_last_drift_time_code = 0.0;
   double m_common_last_drift_scale_factor = 1.0;
+  void bumpParticleIdentityGeneration() noexcept;
+
   std::uint64_t m_particle_index_generation = 0;
+  std::uint64_t m_particle_identity_generation = 1;
   std::uint64_t m_cell_index_generation = 0;
   std::uint64_t m_gravity_source_generation = 1;
+  mutable ParticleIdentityValidationCertificate m_particle_identity_validation_certificate{};
 };
 
 template <typename T>

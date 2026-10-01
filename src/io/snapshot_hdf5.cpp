@@ -30,6 +30,7 @@
 #include "io/internal/snapshot_set_internal.hpp"
 #include "io/internal/transactional_file.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/governed_scratch_arena.hpp"
 #include "io/internal/sidecar_row_lookup.hpp"
 #include "core/internal/sha256.hpp"
@@ -996,7 +997,23 @@ void writeScienceSnapshotHdf5(
         "snapshot writer: CellSoa and GasCellSidecar row counts must match");
   }
 
-  if (!state.validatePersistentParticleIds()) {
+  if (!state.hasCertifiedPersistentParticleIds()) {
+    core::MemoryReservation particle_id_validation_reservation;
+    if (payload.memory_governor != nullptr) {
+      particle_id_validation_reservation = payload.memory_governor->reserve(
+          core::MemoryClass::kDiagnostic,
+          core::OwnershipValidationWorkspace::k_id_validation_workspace_limit_bytes,
+          "io.snapshot.particle_id_validation");
+      particle_id_validation_reservation.commit();
+    }
+    {
+      core::OwnershipValidationWorkspace particle_id_validation_scratch;
+      if (!state.validatePersistentParticleIds(particle_id_validation_scratch)) {
+        throw std::runtime_error(
+            "snapshot writer: persistent particle IDs must be nonzero and unique");
+      }
+    }
+  } else if (!state.validatePersistentParticleIds()) {
     throw std::runtime_error(
         "snapshot writer: persistent particle IDs must be nonzero and unique");
   }

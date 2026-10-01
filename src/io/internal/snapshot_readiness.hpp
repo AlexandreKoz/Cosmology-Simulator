@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -32,21 +33,37 @@ inline void updateSnapshotReadiness(
     reject("SimulationState ownership/sidecar invariants are not satisfied");
   }
 
+  const auto gas_identity_records = state.gas_cell_identity.records();
+  const bool needs_particle_lookup = std::any_of(
+      gas_identity_records.begin(), gas_identity_records.end(),
+      [](const core::GasCellIdentityRecord& record) {
+        return record.parent_particle_id.has_value();
+      });
+  const bool needs_patch_lookup = std::any_of(
+      gas_identity_records.begin(), gas_identity_records.end(),
+      [](const core::GasCellIdentityRecord& record) {
+        return record.owning_patch_id != 0U;
+      });
+
   std::unordered_map<std::uint64_t, std::size_t> particle_row_by_id;
-  particle_row_by_id.reserve(state.particle_sidecar.particle_id.size());
-  for (std::size_t row = 0; row < state.particle_sidecar.particle_id.size(); ++row) {
-    particle_row_by_id.emplace(state.particle_sidecar.particle_id[row], row);
+  if (needs_particle_lookup) {
+    particle_row_by_id.reserve(state.particle_sidecar.particle_id.size());
+    for (std::size_t row = 0; row < state.particle_sidecar.particle_id.size(); ++row) {
+      particle_row_by_id.emplace(state.particle_sidecar.particle_id[row], row);
+    }
   }
   std::unordered_map<std::uint64_t, std::size_t> patch_row_by_id;
-  patch_row_by_id.reserve(state.patches.patch_id.size());
-  for (std::size_t row = 0; row < state.patches.patch_id.size(); ++row) {
-    if (state.patches.patch_id[row] != 0U) {
-      patch_row_by_id.emplace(state.patches.patch_id[row], row);
+  if (needs_patch_lookup) {
+    patch_row_by_id.reserve(state.patches.patch_id.size());
+    for (std::size_t row = 0; row < state.patches.patch_id.size(); ++row) {
+      if (state.patches.patch_id[row] != 0U) {
+        patch_row_by_id.emplace(state.patches.patch_id[row], row);
+      }
     }
   }
 
   bool gas_owner_failure = false;
-  for (const core::GasCellIdentityRecord& record : state.gas_cell_identity.records()) {
+  for (const core::GasCellIdentityRecord& record : gas_identity_records) {
     if (record.gas_cell_id == 0U || record.local_cell_row >= state.cells.size()) {
       gas_owner_failure = true;
       break;

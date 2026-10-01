@@ -20,6 +20,7 @@
 namespace cosmosim::core {
 
 class SimulationState;
+class MemoryGovernor;
 
 }  // namespace cosmosim::core
 
@@ -812,11 +813,15 @@ inline constexpr std::uint64_t k_exact_ownership_validation_workspace_limit_byte
 
 [[nodiscard]] LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(
     std::span<const std::uint64_t> local_particle_ids);
+[[nodiscard]] LocalOwnershipIdentitySummary summarizeLocalOwnedParticleIds(
+    std::span<const std::uint64_t> local_particle_ids,
+    bool local_particle_ids_unique);
 
 [[nodiscard]] ExactOwnershipPartitionReport validateExactGlobalOwnershipPartition(
     const MpiContext& mpi_context,
     std::span<const std::uint64_t> local_owned_particle_ids,
-    std::span<const std::uint64_t> expected_local_reference_particle_ids);
+    std::span<const std::uint64_t> expected_local_reference_particle_ids,
+    core::MemoryGovernor* memory_governor = nullptr);
 
 [[nodiscard]] bool partitionIdentityMatchesGeneratedSet(
     const LocalOwnershipIdentitySummary& reduced_global_summary,
@@ -979,13 +984,21 @@ struct DistributedRestartState {
   std::uint64_t long_range_field_built_step_index = 0;
   double long_range_field_built_scale_factor = 1.0;
   std::string long_range_restart_policy = "deterministic_rebuild";
+  // Owning readback representation retained for restart restore. Production
+  // writers may instead borrow logical ownership directly from SimulationState
+  // through owning_rank_write_source, avoiding int[N] staging. Exactly one
+  // representation is authoritative for serialization at a time.
   std::vector<int> owning_rank_by_item;
+  const core::SimulationState* owning_rank_write_source = nullptr;
   std::vector<std::size_t> pm_slab_begin_x_by_rank;
   std::vector<std::size_t> pm_slab_end_x_by_rank;
 
   // The stream path preserves the historical text representation without a
   // second population-sized string. serialize() performs a checked counting
   // pass and one exact-size destination allocation.
+  void borrowOwningRanksForWrite(const core::SimulationState& state);
+  [[nodiscard]] std::size_t owningRankItemCount() const;
+  [[nodiscard]] int owningRankAt(std::size_t item_index) const;
   void serializeTo(std::ostream& stream) const;
   [[nodiscard]] std::size_t serializedSizeBytes() const;
   [[nodiscard]] std::string serialize() const;

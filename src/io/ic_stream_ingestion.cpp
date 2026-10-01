@@ -923,12 +923,9 @@ void validateSerialCountsAndIds(
     throw std::runtime_error("IC import particle count mismatch");
   }
 
-  std::vector<std::uint64_t> ids(
-      state.particle_sidecar.particle_id.begin(),
-      state.particle_sidecar.particle_id.end());
-  std::sort(ids.begin(), ids.end());
-  if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) {
-    throw std::runtime_error("IC import contains duplicate particle IDs");
+  if (!state.validatePersistentParticleIds()) {
+    throw std::runtime_error(
+        "IC import contains duplicate or zero persistent particle IDs");
   }
 }
 

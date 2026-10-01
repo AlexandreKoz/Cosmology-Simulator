@@ -1244,7 +1244,11 @@ std::uint64_t DiagnosticsEngine::estimateBundleIncrementalBytes(
         static_cast<std::size_t>(core::openMpMaximumThreads())).owned_peak_bytes);
   }
   bytes = add(bytes, core::OwnershipValidationWorkspace::requiredBytes(
-      state.particles.size(), state.cells.size()));
+      state.particles.size(), state.cells.size(),
+      state.star_particles.size() != 0U, state.black_holes.size() != 0U,
+      state.tracers.size() != 0U,
+      state.patches.size() != 0U && state.cells.size() != 0U,
+      !state.hasCertifiedUniqueParticleIds()));
   return bytes;
 }
 

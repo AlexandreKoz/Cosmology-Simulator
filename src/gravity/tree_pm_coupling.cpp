@@ -1603,21 +1603,40 @@ class TopLevelDomainHierarchy {
     }
   }
 
+  struct QueryScratch {
+    std::vector<int> owners;
+    std::vector<std::size_t> stack;
+    std::vector<std::uint8_t> owner_seen;
+
+    void prepare(std::size_t node_count, std::size_t owner_capacity) {
+      owners.clear();
+      stack.clear();
+      owner_seen.assign(owner_capacity, 0U);
+      owners.reserve(owner_capacity);
+      stack.reserve(node_count);
+    }
+  };
+
   [[nodiscard]] std::size_t nodeCount() const noexcept { return m_nodes.size(); }
 
-  [[nodiscard]] std::vector<int> ownersWithinCutoff(
+  [[nodiscard]] std::span<const int> ownersWithinCutoff(
       double px, double py, double pz,
       double cutoff_radius_comoving,
       const PeriodicBoxLengths& box_lengths,
-      int excluded_rank) const {
-    std::vector<int> owners;
-    if (m_nodes.empty()) {
-      return owners;
+      int excluded_rank,
+      QueryScratch& scratch) const {
+    for (const int owner : scratch.owners) {
+      scratch.owner_seen[static_cast<std::size_t>(owner)] = 0U;
     }
-    std::vector<std::size_t> stack{0U};
-    while (!stack.empty()) {
-      const std::size_t node_index = stack.back();
-      stack.pop_back();
+    scratch.owners.clear();
+    scratch.stack.clear();
+    if (m_nodes.empty()) {
+      return scratch.owners;
+    }
+    scratch.stack.push_back(0U);
+    while (!scratch.stack.empty()) {
+      const std::size_t node_index = scratch.stack.back();
+      scratch.stack.pop_back();
       const Node& node = m_nodes[node_index];
       if (minimumDistanceToPeriodicBounds(
               px, py, pz, node.bounds, box_lengths) > cutoff_radius_comoving) {
@@ -1634,17 +1653,28 @@ class TopLevelDomainHierarchy {
           if (minimumDistanceToPeriodicBounds(
                   px, py, pz, boundsFromTreePseudoParticlePacket(leaf),
                   box_lengths) <= cutoff_radius_comoving) {
-            owners.push_back(leaf.descriptor.source_rank);
+            const std::size_t owner_index =
+                static_cast<std::size_t>(leaf.descriptor.source_rank);
+            if (owner_index >= scratch.owner_seen.size()) {
+              throw std::logic_error(
+                  "TreePM top-level owner query encountered a rank outside prepared scratch");
+            }
+            if (scratch.owner_seen[owner_index] == 0U) {
+              scratch.owner_seen[owner_index] = 1U;
+              scratch.owners.push_back(leaf.descriptor.source_rank);
+            }
           }
         }
       } else {
-        stack.push_back(node.left);
-        stack.push_back(node.right);
+        scratch.stack.push_back(node.left);
+        scratch.stack.push_back(node.right);
       }
     }
-    std::sort(owners.begin(), owners.end());
-    owners.erase(std::unique(owners.begin(), owners.end()), owners.end());
-    return owners;
+    std::sort(scratch.owners.begin(), scratch.owners.end());
+    scratch.owners.erase(
+        std::unique(scratch.owners.begin(), scratch.owners.end()),
+        scratch.owners.end());
+    return scratch.owners;
   }
 
  private:
@@ -3841,6 +3871,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       transient_domain_hierarchy = std::make_unique<TopLevelDomainHierarchy>(peer_pseudo_packets);
       top_level_domain_hierarchy = transient_domain_hierarchy.get();
     }
+    TopLevelDomainHierarchy::QueryScratch owner_query_scratch;
+    owner_query_scratch.prepare(
+        top_level_domain_hierarchy->nodeCount(),
+        static_cast<std::size_t>(mpi_world_size));
     SparsePeerGraph* sparse_peer_graph = nullptr;
     std::exception_ptr peer_domain_failure;
     const auto let_discovery_start = std::chrono::steady_clock::now();
@@ -3862,13 +3896,14 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           static_cast<std::size_t>(mpi_world_size), 0U,
           std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
       for (std::size_t active_i = 0; active_i < accumulator.active_particle_index.size(); ++active_i) {
-        const std::vector<int> owners = top_level_domain_hierarchy->ownersWithinCutoff(
+        const std::span<const int> owners = top_level_domain_hierarchy->ownersWithinCutoff(
             target_x(active_i),
             target_y(active_i),
             target_z(active_i),
             cutoff_radius_comoving,
             box_lengths,
-            mpi_world_rank);
+            mpi_world_rank,
+            owner_query_scratch);
         for (const int peer : owners) {
           peer_needed[static_cast<std::size_t>(peer)] = 1U;
         }
@@ -4070,8 +4105,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         const double previous_acceleration_magnitude_code = previous_acceleration_available
             ? accumulator.previous_acceleration_magnitude_code[batch_begin + batch_slot]
             : 0.0;
-        const std::vector<int> target_peers = top_level_domain_hierarchy->ownersWithinCutoff(
-            px, py, pz, cutoff_radius_comoving, box_lengths, mpi_world_rank);
+        const std::span<const int> target_peers = top_level_domain_hierarchy->ownersWithinCutoff(
+            px, py, pz, cutoff_radius_comoving, box_lengths, mpi_world_rank,
+            owner_query_scratch);
         if (sparse_peer_graph->outgoing_peers.size() > target_peers.size()) {
           m_last_residual_stats.remote_pairs_pruned_by_bounds +=
               static_cast<std::uint64_t>(

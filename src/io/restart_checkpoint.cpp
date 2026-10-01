@@ -2697,9 +2697,10 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   if (payload.distributed_gravity_state.world_size <= 0) {
     throw std::invalid_argument("restart payload distributed_gravity_state.world_size must be positive");
   }
-  if (payload.distributed_gravity_state.owning_rank_by_item.size() != payload.persistent_state.simulation_state->particles.size()) {
+  if (payload.distributed_gravity_state.owningRankItemCount() !=
+      payload.persistent_state.simulation_state->particles.size()) {
     throw std::invalid_argument(
-        "restart payload distributed_gravity_state.owning_rank_by_item must match particle count");
+        "restart payload distributed_gravity_state logical ownership count must match particle count");
   }
   if (payload.distributed_gravity_state.pm_slab_begin_x_by_rank.size() !=
           static_cast<std::size_t>(payload.distributed_gravity_state.world_size) ||

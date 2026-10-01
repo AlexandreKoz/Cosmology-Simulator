@@ -8,28 +8,60 @@
 namespace cosmosim::core {
 
 std::uint64_t OwnershipValidationWorkspace::requiredBytes(
-    std::size_t particle_count, std::size_t cell_count) {
+    std::size_t particle_count, std::size_t cell_count,
+    bool need_star_rows, bool need_bh_rows, bool need_tracer_rows,
+    bool need_cell_owner, bool include_id_validation_workspace) {
   const auto mul = [](std::uint64_t count, std::uint64_t width) {
     if (count != 0U && width > std::numeric_limits<std::uint64_t>::max() / count) {
       throw std::overflow_error("ownership validation scratch byte overflow");
     }
     return count * width;
   };
-  return checkedMemoryBytesAdd(
-      mul(static_cast<std::uint64_t>(particle_count),
-          sizeof(std::uint64_t) + 3U * sizeof(std::uint8_t)),
-      mul(static_cast<std::uint64_t>(cell_count), sizeof(std::uint32_t)),
-      "ownership validation scratch");
+  std::uint64_t bytes = include_id_validation_workspace
+      ? k_id_validation_workspace_limit_bytes : 0U;
+  const std::uint64_t particles_u64 = static_cast<std::uint64_t>(particle_count);
+  if (need_star_rows) {
+    bytes = checkedMemoryBytesAdd(bytes, mul(particles_u64, sizeof(std::uint8_t)),
+                                  "ownership validation star markers");
+  }
+  if (need_bh_rows) {
+    bytes = checkedMemoryBytesAdd(bytes, mul(particles_u64, sizeof(std::uint8_t)),
+                                  "ownership validation BH markers");
+  }
+  if (need_tracer_rows) {
+    bytes = checkedMemoryBytesAdd(bytes, mul(particles_u64, sizeof(std::uint8_t)),
+                                  "ownership validation tracer markers");
+  }
+  if (need_cell_owner) {
+    bytes = checkedMemoryBytesAdd(
+        bytes, mul(static_cast<std::uint64_t>(cell_count), sizeof(std::uint32_t)),
+        "ownership validation cell ownership");
+  }
+  return bytes;
 }
 
 void OwnershipValidationWorkspace::resize(
-    std::size_t particle_count, std::size_t cell_count) {
-  (void)requiredBytes(particle_count, cell_count);
-  particle_ids.resize(particle_count);
-  star_rows.assign(particle_count, 0U);
-  bh_rows.assign(particle_count, 0U);
-  tracer_rows.assign(particle_count, 0U);
-  cell_owner.resize(cell_count);
+    std::size_t particle_count, std::size_t cell_count,
+    bool need_star_rows, bool need_bh_rows, bool need_tracer_rows,
+    bool need_cell_owner) {
+  (void)requiredBytes(
+      particle_count, cell_count, need_star_rows, need_bh_rows,
+      need_tracer_rows, need_cell_owner, false);
+  const auto resize_marker = [particle_count](std::vector<std::uint8_t>& lane, bool needed) {
+    if (needed) {
+      lane.assign(particle_count, 0U);
+    } else {
+      std::vector<std::uint8_t>{}.swap(lane);
+    }
+  };
+  resize_marker(star_rows, need_star_rows);
+  resize_marker(bh_rows, need_bh_rows);
+  resize_marker(tracer_rows, need_tracer_rows);
+  if (need_cell_owner) {
+    cell_owner.resize(cell_count);
+  } else {
+    std::vector<std::uint32_t>{}.swap(cell_owner);
+  }
 }
 
 std::uint64_t OwnershipValidationWorkspace::ownedCapacityBytes() const {
@@ -41,7 +73,7 @@ std::uint64_t OwnershipValidationWorkspace::ownedCapacityBytes() const {
     bytes = checkedMemoryBytesAdd(bytes, count * width,
                                   "ownership validation retained capacity");
   };
-  add(static_cast<std::uint64_t>(particle_ids.capacity()), sizeof(std::uint64_t));
+  add(static_cast<std::uint64_t>(id_bucket.capacity()), sizeof(std::uint64_t));
   add(static_cast<std::uint64_t>(star_rows.capacity()), sizeof(std::uint8_t));
   add(static_cast<std::uint64_t>(bh_rows.capacity()), sizeof(std::uint8_t));
   add(static_cast<std::uint64_t>(tracer_rows.capacity()), sizeof(std::uint8_t));
@@ -60,6 +92,7 @@ void SimulationState::resizeParticles(std::size_t count) {
   }
   particles.resize(count);
   particle_sidecar.resize(count);
+  bumpParticleIdentityGeneration();
   bumpParticleIndexGeneration();
 }
 
@@ -116,7 +149,13 @@ bool SimulationState::validateOwnershipInvariantsImpl(
     }
   }
 
-  scratch.resize(particles.size(), cells.size());
+  const bool need_star_rows = star_particles.size() != 0U;
+  const bool need_bh_rows = black_holes.size() != 0U;
+  const bool need_tracer_rows = tracers.size() != 0U;
+  const bool need_cell_owner = patches.size() != 0U && cells.size() != 0U;
+  scratch.resize(
+      particles.size(), cells.size(), need_star_rows, need_bh_rows,
+      need_tracer_rows, need_cell_owner);
   if (!(use_bounded_id_scratch
             ? validateUniqueParticleIds(scratch) : validateUniqueParticleIds())) {
     return false;
@@ -226,9 +265,9 @@ bool SimulationState::validateOwnershipInvariantsImpl(
 
   for (std::size_t particle_index = 0; particle_index < particles.size(); ++particle_index) {
     const auto species_tag = particleSpeciesTag(particle_index);
-    const bool has_star_row = star_rows_by_particle[particle_index] == 1;
-    const bool has_bh_row = bh_rows_by_particle[particle_index] == 1;
-    const bool has_tracer_row = tracer_rows_by_particle[particle_index] == 1;
+    const bool has_star_row = !star_rows_by_particle.empty() && star_rows_by_particle[particle_index] == 1;
+    const bool has_bh_row = !bh_rows_by_particle.empty() && bh_rows_by_particle[particle_index] == 1;
+    const bool has_tracer_row = !tracer_rows_by_particle.empty() && tracer_rows_by_particle[particle_index] == 1;
 
     if (species_tag == static_cast<std::uint32_t>(ParticleSpecies::kStar)) {
       if (!has_star_row || has_bh_row || has_tracer_row) {
@@ -270,6 +309,13 @@ void SimulationState::bumpGravitySourceGeneration() noexcept {
 
 void SimulationState::bumpParticleIndexGeneration() noexcept {
   ++m_particle_index_generation;
+}
+
+void SimulationState::bumpParticleIdentityGeneration() noexcept {
+  if (m_particle_identity_generation != std::numeric_limits<std::uint64_t>::max()) {
+    ++m_particle_identity_generation;
+  }
+  m_particle_identity_validation_certificate = {};
 }
 
 void SimulationState::bumpCellIndexGeneration() noexcept {

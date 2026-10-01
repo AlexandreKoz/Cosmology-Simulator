@@ -767,11 +767,7 @@ bool maybeWriteOutputs(
         config,
         integrator_state,
         static_cast<std::uint32_t>(std::max(gravity_state.runtimeTopology().world_rank, 0)));
-    restart_payload.distributed_gravity_state.owning_rank_by_item.reserve(state.particles.size());
-    for (std::size_t row = 0; row < state.particles.size(); ++row) {
-      restart_payload.distributed_gravity_state.owning_rank_by_item.push_back(
-          static_cast<int>(state.particleOwningRank(row)));
-    }
+    restart_payload.distributed_gravity_state.borrowOwningRanksForWrite(state);
     const std::size_t world_size = static_cast<std::size_t>(gravity_state.runtimeTopology().world_size);
     restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank.resize(world_size, 0);
     restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank.resize(world_size, 0);
@@ -913,7 +909,8 @@ bool maybeWriteOutputs(
     const core::SimulationState& state,
     const parallel::MpiContext& mpi_context) {
   const parallel::LocalOwnershipIdentitySummary local =
-      parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+      parallel::summarizeLocalOwnedParticleIds(
+          state.particle_sidecar.particle_id, state.validateUniqueParticleIds());
   const std::uint64_t unique_rank_count =
       mpi_context.allreduceSumUint64(local.local_particle_ids_unique ? 1ULL : 0ULL);
   return parallel::LocalOwnershipIdentitySummary{

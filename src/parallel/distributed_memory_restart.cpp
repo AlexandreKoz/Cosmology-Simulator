@@ -85,6 +85,43 @@ class RestartStringStreambuf final : public std::streambuf {
 
 }  // namespace
 
+void DistributedRestartState::borrowOwningRanksForWrite(
+    const core::SimulationState& state) {
+  owning_rank_by_item.clear();
+  owning_rank_by_item.shrink_to_fit();
+  owning_rank_write_source = &state;
+}
+
+std::size_t DistributedRestartState::owningRankItemCount() const {
+  if (owning_rank_write_source != nullptr) {
+    if (!owning_rank_by_item.empty()) {
+      throw std::logic_error(
+          "distributed restart ownership cannot be both borrowed and materialized");
+    }
+    return owning_rank_write_source->particles.size();
+  }
+  return owning_rank_by_item.size();
+}
+
+int DistributedRestartState::owningRankAt(std::size_t item_index) const {
+  if (owning_rank_write_source != nullptr) {
+    if (!owning_rank_by_item.empty()) {
+      throw std::logic_error(
+          "distributed restart ownership cannot be both borrowed and materialized");
+    }
+    if (item_index >= owning_rank_write_source->particles.size()) {
+      throw std::out_of_range("distributed restart borrowed ownership index out of range");
+    }
+    return core::checkedIntegralNarrow<int>(
+        owning_rank_write_source->particleOwningRank(item_index),
+        "distributed restart borrowed owning rank");
+  }
+  if (item_index >= owning_rank_by_item.size()) {
+    throw std::out_of_range("distributed restart ownership index out of range");
+  }
+  return owning_rank_by_item[item_index];
+}
+
 void DistributedRestartState::serializeTo(std::ostream& stream) const {
   if (pm_slab_begin_x_by_rank.size() != pm_slab_end_x_by_rank.size()) {
     throw std::invalid_argument("distributed restart PM slab table extents differ");
@@ -104,9 +141,10 @@ void DistributedRestartState::serializeTo(std::ostream& stream) const {
   stream << "long_range_field_built_step_index=" << long_range_field_built_step_index << '\n';
   stream << "long_range_field_built_scale_factor=" << long_range_field_built_scale_factor << '\n';
   stream << "long_range_restart_policy=" << long_range_restart_policy << '\n';
-  stream << "item_count=" << owning_rank_by_item.size() << '\n';
-  for (std::size_t i = 0; i < owning_rank_by_item.size(); ++i) {
-    stream << "rank[" << i << "]=" << owning_rank_by_item[i] << '\n';
+  const std::size_t item_count = owningRankItemCount();
+  stream << "item_count=" << item_count << '\n';
+  for (std::size_t i = 0; i < item_count; ++i) {
+    stream << "rank[" << i << "]=" << owningRankAt(i) << '\n';
   }
   stream << "pm_slab_rank_count=" << pm_slab_begin_x_by_rank.size() << '\n';
   for (std::size_t rank = 0; rank < pm_slab_begin_x_by_rank.size(); ++rank) {

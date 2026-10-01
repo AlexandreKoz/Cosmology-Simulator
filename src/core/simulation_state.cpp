@@ -474,12 +474,12 @@ ParticleReorderMap buildParticleReorderMap(const SimulationState& state, Particl
           "use buildParticleReorderMapByScheduler(state, scheduler) instead of derived time_bin mirrors");
     }
     if (mode == ParticleReorderMode::kBySfcKey) {
-      const auto lhs_key = state.particle_sidecar.sfc_key[lhs];
-      const auto rhs_key = state.particle_sidecar.sfc_key[rhs];
+      const auto lhs_key = state.particleSfcKey(lhs);
+      const auto rhs_key = state.particleSfcKey(rhs);
       return std::tuple{lhs_key, lhs} < std::tuple{rhs_key, rhs};
     }
-    const auto lhs_key = state.particle_sidecar.species_tag[lhs];
-    const auto rhs_key = state.particle_sidecar.species_tag[rhs];
+    const auto lhs_key = state.particleSpeciesTag(lhs);
+    const auto rhs_key = state.particleSpeciesTag(rhs);
     return std::tuple{lhs_key, lhs} < std::tuple{rhs_key, rhs};
   };
 
@@ -684,15 +684,15 @@ void reorderParticles(
   reorderAlignedVector(state.particles.velocity_y_peculiar, new_to_old_index);
   reorderAlignedVector(state.particles.velocity_z_peculiar, new_to_old_index);
   reorderAlignedVector(state.particles.mass_code, new_to_old_index);
-  reorderAlignedVector(state.particles.time_bin, new_to_old_index);
+  reorderOptionalParentLane(state.particles.time_bin, new_to_old_index);
 
   reorderAlignedVector(state.particle_sidecar.particle_id, new_to_old_index);
-  reorderAlignedVector(state.particle_sidecar.sfc_key, new_to_old_index);
-  reorderAlignedVector(state.particle_sidecar.species_tag, new_to_old_index);
-  reorderAlignedVector(state.particle_sidecar.particle_flags, new_to_old_index);
-  reorderAlignedVector(state.particle_sidecar.owning_rank, new_to_old_index);
-  reorderAlignedVector(state.particle_sidecar.last_drift_time_code, new_to_old_index);
-  reorderAlignedVector(state.particle_sidecar.last_drift_scale_factor, new_to_old_index);
+  reorderOptionalParentLane(state.particle_sidecar.sfc_key, new_to_old_index);
+  reorderOptionalParentLane(state.particle_sidecar.species_tag, new_to_old_index);
+  reorderOptionalParentLane(state.particle_sidecar.particle_flags, new_to_old_index);
+  reorderOptionalParentLane(state.particle_sidecar.owning_rank, new_to_old_index);
+  reorderOptionalParentLane(state.particle_sidecar.last_drift_time_code, new_to_old_index);
+  reorderOptionalParentLane(state.particle_sidecar.last_drift_scale_factor, new_to_old_index);
   reorderOptionalParentLane(state.particle_sidecar.gravity_softening_comoving, new_to_old_index);
   reorderOptionalParentLane(state.particle_sidecar.has_gravity_softening_override, new_to_old_index);
 

@@ -277,23 +277,6 @@ void fnv1aMix(std::uint64_t& hash, std::uint64_t value) { fnv1aMix(hash, &value,
   return value;
 }
 
-[[nodiscard]] parallel::LocalOwnershipIdentitySummary reduceParticleIdentity(
-    std::span<const std::uint64_t> local_particle_ids,
-    const parallel::MpiContext& mpi_context) {
-  const parallel::LocalOwnershipIdentitySummary local =
-      parallel::summarizeLocalOwnedParticleIds(local_particle_ids);
-  const std::uint64_t unique_rank_count = mpi_context.allreduceSumUint64(
-      local.local_particle_ids_unique ? 1ULL : 0ULL);
-  return parallel::LocalOwnershipIdentitySummary{
-      .local_owned_count = mpi_context.allreduceSumUint64(local.local_owned_count),
-      .local_particle_id_sum = mpi_context.allreduceSumUint64(local.local_particle_id_sum),
-      .local_particle_id_square_sum =
-          mpi_context.allreduceSumUint64(local.local_particle_id_square_sum),
-      .local_particle_id_xor = mpi_context.allreduceXorUint64(local.local_particle_id_xor),
-      .local_particle_ids_unique =
-          unique_rank_count == static_cast<std::uint64_t>(mpi_context.worldSize()),
-  };
-}
 
 void ensureRunDirectory(const std::filesystem::path& run_directory) {
   std::filesystem::create_directories(run_directory);
@@ -525,6 +508,28 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     } else if (!startup.already_partitioned) {
       migration_balance.initializeOwnership(state);
     }
+
+    std::exception_ptr local_identity_validation_failure;
+    try {
+      if (!state.hasCertifiedPersistentParticleIds()) {
+        core::MemoryReservation identity_validation_reservation =
+            memory_governor.reserve(
+                core::MemoryClass::kDiagnostic,
+                core::OwnershipValidationWorkspace::k_id_validation_workspace_limit_bytes,
+                "core.startup.particle_id_validation");
+        identity_validation_reservation.commit();
+        core::OwnershipValidationWorkspace identity_validation_scratch;
+        if (!state.validatePersistentParticleIds(identity_validation_scratch)) {
+          throw std::runtime_error(
+              "startup authoritative state contains duplicate or zero persistent particle IDs");
+        }
+      }
+    } catch (...) {
+      local_identity_validation_failure = std::current_exception();
+    }
+    failure_coordinator.rethrowCollectiveFailure(
+        local_identity_validation_failure, "startup particle-ID validation");
+
     const parallel::LocalOwnershipIdentitySummary expected_global_identity =
         migration_balance.reduceIdentity(state);
     std::vector<std::uint64_t> expected_global_particle_ids(
@@ -535,7 +540,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     report.local_particle_id_sum = computeParticleIdSum(state);
     const std::uint64_t local_particle_id_square_sum = computeParticleIdSquareSum(state);
     report.local_particle_id_xor = computeParticleIdXor(state);
-    const auto local_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+    const auto local_identity = parallel::summarizeLocalOwnedParticleIds(
+        state.particle_sidecar.particle_id, state.validateUniqueParticleIds());
     report.local_particle_ids_unique = local_identity.local_particle_ids_unique;
     report.global_particle_count = mpi_context.allreduceSumUint64(report.local_particle_count);
     report.global_cell_count = mpi_context.allreduceSumUint64(report.local_cell_count);
@@ -861,7 +867,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     report.local_particle_id_sum = computeParticleIdSum(state);
     const std::uint64_t final_local_particle_id_square_sum = computeParticleIdSquareSum(state);
     report.local_particle_id_xor = computeParticleIdXor(state);
-    const auto final_local_identity = parallel::summarizeLocalOwnedParticleIds(state.particle_sidecar.particle_id);
+    const auto final_local_identity = parallel::summarizeLocalOwnedParticleIds(
+        state.particle_sidecar.particle_id, state.validateUniqueParticleIds());
     report.local_particle_ids_unique = final_local_identity.local_particle_ids_unique;
     report.global_particle_count = mpi_context.allreduceSumUint64(report.local_particle_count);
     report.global_cell_count = mpi_context.allreduceSumUint64(report.local_cell_count);
@@ -879,8 +886,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         .local_particle_id_xor = report.global_particle_id_xor,
         .local_particle_ids_unique = final_all_ranks_have_unique_local_ids,
     };
-    const parallel::LocalOwnershipIdentitySummary final_expected_global_identity =
-        reduceParticleIdentity(expected_global_particle_ids, mpi_context);
+    const parallel::LocalOwnershipIdentitySummary& final_expected_global_identity =
+        expected_global_identity;
     std::vector<std::uint64_t> final_generic_local_owned_particle_ids;
     std::span<const std::uint64_t> final_local_owned_particle_ids = state.particle_sidecar.particle_id;
     if (!state.hasHomogeneousDmoMetadata()) {
@@ -896,7 +903,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     }
     const parallel::ExactOwnershipPartitionReport exact_partition =
         parallel::validateExactGlobalOwnershipPartition(
-            mpi_context, final_local_owned_particle_ids, expected_global_particle_ids);
+            mpi_context, final_local_owned_particle_ids, expected_global_particle_ids,
+            &memory_governor);
     report.global_particle_partition_identity_match = exact_partition.valid() &&
         parallel::partitionIdentityMatchesGeneratedSet(
             final_reduced_identity,
