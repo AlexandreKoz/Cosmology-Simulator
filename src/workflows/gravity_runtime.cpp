@@ -959,6 +959,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
                 .local_particle_count = static_cast<std::uint64_t>(particle_count),
                 .local_cell_count = static_cast<std::uint64_t>(cell_count),
                 .source_representation = representation,
+                .source_softening_uniform =
+                    representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo,
+                .periodic_fft_backed_density =
+                    m_tree_pm_options.pm_options.boundary_condition ==
+                        gravity::PmBoundaryCondition::kPeriodic &&
+                    !m_runtime_topology.usesCuda(),
                 .relative_force_mac_enabled =
                     m_tree_pm_options.tree_options.opening_criterion ==
                     gravity::TreeOpeningCriterion::kRelativeForceError,
@@ -1283,6 +1289,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
             .source_representation = borrowed_homogeneous_dmo_preflight
                 ? gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
                 : gravity::GravitySourceRepresentation::kMaterializedGeneric,
+            .source_softening_uniform = borrowed_homogeneous_dmo_preflight,
+            .periodic_fft_backed_density =
+                m_tree_pm_options.pm_options.boundary_condition ==
+                    gravity::PmBoundaryCondition::kPeriodic &&
+                !m_runtime_topology.usesCuda(),
             .relative_force_mac_enabled =
                 m_tree_pm_options.tree_options.opening_criterion ==
                 gravity::TreeOpeningCriterion::kRelativeForceError,

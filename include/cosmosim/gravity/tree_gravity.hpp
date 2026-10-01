@@ -167,9 +167,13 @@ class TreeGravitySolver {
   [[nodiscard]] const TreeNodeSoa& nodes() const;
   [[nodiscard]] const TreeMortonOrdering& ordering() const;
   [[nodiscard]] TreeBuildGeneration treeBuildGeneration() const noexcept;
-  // Build-time resolved source softening. Worker-safe residual evaluation must
-  // read these prevalidated values instead of re-entering throwing resolvers
-  // on the hot path.
+  // Build-time resolved source softening. Uniform source populations retain
+  // one scalar; heterogeneous policies retain the exact materialized lane.
+  // Worker-safe residual evaluation consumes this representation-aware view
+  // instead of re-entering throwing resolvers on the hot path.
+  [[nodiscard]] ResolvedSourceSofteningView resolvedSourceSoftening() const noexcept;
+  // Compatibility view for callers that specifically inspect the materialized
+  // lane. It is empty when the build-time representation is uniform.
   [[nodiscard]] std::span<const double> resolvedSourceSofteningEpsilon() const noexcept;
   // Maximum octree depth recorded at build. Used to size bounded residual
   // traversal stacks as S = 1 + 7 * depth without per-target growth.
@@ -211,6 +215,9 @@ class TreeGravitySolver {
   TreeNodeSoa m_nodes;
   TreeMortonOrdering m_ordering;
   std::vector<std::uint64_t> m_morton_key_scratch;
+  ResolvedSourceSofteningRepresentation m_source_softening_representation =
+      ResolvedSourceSofteningRepresentation::kUniform;
+  double m_uniform_source_softening_epsilon_comoving = 0.0;
   std::vector<double> m_source_softening_epsilon_comoving;
   std::vector<TreeLocalIndex> m_construction_index_scratch;
   std::size_t m_build_source_count = 0;

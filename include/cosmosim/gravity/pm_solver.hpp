@@ -93,7 +93,10 @@ struct PmGridShape {
 struct PmPlanResourcesMemoryEstimate {
   std::uint64_t real_array_bytes = 0U;
   std::uint64_t complex_spectral_array_bytes = 0U;
+  // Full scalar spectral operators are not retained after M48-09. This field
+  // remains for source compatibility and is always zero.
   std::uint64_t scalar_spectral_array_bytes = 0U;
+  std::uint64_t spectral_axis_metadata_bytes = 0U;
   std::uint64_t total_owned_bytes = 0U;
   std::uint64_t logical_local_complex_cells = 0U;
   std::uint64_t allocated_local_complex_cells = 0U;
@@ -234,7 +237,8 @@ struct PmProfileEvent {
   std::uint64_t routed_combined_buffer_high_water_bytes = 0;
   std::uint64_t routed_workspace_high_water_bytes = 0;
   std::uint64_t force_halo_cache_hits = 0;
-  // Counts reconstruction of cached scale-free Poisson/deconvolution/split operator state.
+  // Counts rebuilds of the small O(nx+ny+nz) wave-number/window metadata
+  // used to derive spectral operators. No full spectral scalar kernel is cached.
   std::uint64_t spectral_operator_rebuilds = 0;
   std::uint64_t isolated_open_root_workspace_estimate_bytes = 0;
   std::uint64_t isolated_open_root_workspace_limit_bytes = 0;
@@ -278,9 +282,15 @@ class PmGridStorage {
   [[nodiscard]] const parallel::PmSlabLayout& slabLayout() const;
   [[nodiscard]] bool ownsFullDomain() const noexcept;
   [[nodiscard]] std::size_t localCellCount() const;
+  [[nodiscard]] std::uint64_t storageGeneration() const noexcept;
 
+  // Non-const density access is the explicit compatibility materialization
+  // boundary for compact physical-cell storage. Const access never allocates
+  // and returns an empty span until compact density has been materialized.
   [[nodiscard]] std::span<double> density();
   [[nodiscard]] std::span<const double> density() const;
+  [[nodiscard]] bool hasDensityStorage() const noexcept;
+  void ensureDensityStorage();
 
   // Non-const access is the explicit compatibility materialization boundary for
   // real-space potential storage. Const access never allocates and returns an
@@ -330,6 +340,12 @@ class PmGridStorage {
   void appendMemoryReport(core::MemoryReportBuilder& builder) const;
 
  private:
+  friend class PmSolver;
+
+  // M48-09 specialization boundary: periodic FFT-backed production must not
+  // retain an earlier compatibility density allocation.
+  void releaseDensityStorage();
+
   struct ForceHaloCache {
     std::vector<double> left_force_x;
     std::vector<double> left_force_y;
@@ -352,6 +368,7 @@ class PmGridStorage {
   std::vector<double> m_force_y;
   std::vector<double> m_force_z;
   ForceHaloCache m_force_halo_cache;
+  std::uint64_t m_storage_generation = 1U;
 };
 
 class PmSolver {
@@ -506,6 +523,23 @@ class PmSolver {
   void attachCommunicationArena(GravityCommunicationArena* arena) const;
   void detachCommunicationArena() const noexcept;
 
+  void assignDensityPeriodicFftBacked(
+      PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<const double> mass,
+      const PmSolveOptions& options,
+      PmProfileEvent* profile = nullptr) const;
+  void assignDensityImpl(
+      PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<const double> mass,
+      const PmSolveOptions& options,
+      bool periodic_fft_backed,
+      PmProfileEvent* profile) const;
   void solvePoissonPeriodicImpl(
       PmGridStorage& grid,
       const PmSolveOptions& options,

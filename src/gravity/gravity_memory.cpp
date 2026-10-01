@@ -357,9 +357,12 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
             5U * sizeof(std::uint32_t) + 2U * sizeof(double) +
                 sizeof(std::uint8_t) + zoom_mask_bytes_per_target,
             "gravity target view estimate overflow");
+  const bool uniform_source_softening =
+      borrowed_homogeneous_dmo || input.source_softening_uniform;
   const std::uint64_t tree_construction_bytes = checkedMul(
       input.local_source_count,
-      2U * sizeof(std::uint64_t) + 2U * sizeof(TreeLocalIndex) + sizeof(double),
+      2U * sizeof(std::uint64_t) + 2U * sizeof(TreeLocalIndex) +
+          (uniform_source_softening ? 0U : sizeof(double)),
       "gravity tree construction estimate overflow");
   const std::uint64_t acceleration_bytes = checkedMul(
       input.local_target_count,
@@ -412,10 +415,14 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       input.mpi_world_rank);
   const std::uint64_t local_pm_cells =
       static_cast<std::uint64_t>(pm_layout.localCellCount());
-  // Production periodic TreePM owns density plus three force components.
-  // Real-space potential is demand-driven and is not materialized by this path.
+  // Production periodic TreePM can place density directly in the FFT real
+  // owner, leaving PmGridStorage with only the three force components. Generic
+  // compatibility/isolated paths retain compact density explicitly.
+  const std::uint64_t pm_grid_components =
+      input.periodic_fft_backed_density ? 3U : 4U;
   const std::uint64_t pm_owned_bytes = checkedMul(
-      local_pm_cells, 4U * sizeof(double), "gravity PM owned estimate overflow");
+      local_pm_cells, pm_grid_components * sizeof(double),
+      "gravity PM owned estimate overflow");
   const PmPlanResourcesMemoryEstimate pm_plan_memory =
       estimatePmPlanResourcesMemory(input.pm_shape, pm_layout, input.decomposition_mode);
   const std::uint64_t zoom_cells = input.zoom_enabled
@@ -534,16 +541,20 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
               "leaf-derived estimate; dynamic growth remains possible for adversarial geometry");
   addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
               "gravity.estimate.tree_construction_ownership", tree_construction_bytes,
-              "final TreeLocalIndex permutation + resolved double source epsilon + shared uint64 key primary/key scratch + TreeLocalIndex radix/partition scratch");
+              uniform_source_softening
+                  ? "final TreeLocalIndex permutation + scalar source epsilon + shared uint64 key primary/key scratch + TreeLocalIndex radix/partition scratch"
+                  : "final TreeLocalIndex permutation + materialized double source epsilon + shared uint64 key primary/key scratch + TreeLocalIndex radix/partition scratch");
   addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kTransient,
               "gravity.estimate.pm_owned_fields", pm_owned_bytes,
-              "periodic TreePM force-only grid: density plus three force fields; real potential is demand-driven");
+              input.periodic_fft_backed_density
+                  ? "periodic TreePM force-only grid: three force fields; density is owned once by the FFT real plan allocation"
+                  : "generic PM grid: compact density plus three force fields; real potential is demand-driven");
   addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
               "gravity.estimate.pm_plan_resources_owned_arrays",
               pm_plan_memory.total_owned_bytes,
               pm_plan_memory.used_backend_allocation_query
-                  ? "CHUI-owned FFT/Poisson PlanResources arrays sized from the active FFTW MPI allocation query; backend plan internals excluded"
-                  : "CHUI-owned FFT/Poisson PlanResources arrays sized from conservative PM decomposition geometry; backend plan internals excluded");
+                  ? "CHUI-owned FFT real/fourier/potential_k arrays plus O(nx+ny+nz) spectral axis metadata sized from the active FFTW MPI allocation query; backend plan internals excluded"
+                  : "CHUI-owned FFT real/fourier/potential_k arrays plus O(nx+ny+nz) spectral axis metadata sized from conservative PM decomposition geometry; backend plan internals excluded");
   if (zoom_bytes > 0U) {
     addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kTransient,
                 "gravity.estimate.zoom_pm_owned_fields", zoom_bytes,

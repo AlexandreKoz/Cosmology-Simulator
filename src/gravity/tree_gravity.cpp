@@ -79,6 +79,20 @@ void validateInputSpans(
   }
 }
 
+[[nodiscard]] bool sourceSofteningIsProvablyUniform(
+    const TreeSofteningView& softening_view) noexcept {
+  // Eligibility is deliberately structural and conservative: an explicit
+  // source epsilon lane or override mask keeps the exact materialized path,
+  // even if a particular mask happens to contain no active overrides. Species
+  // softening has effect only when source species tags are present. The
+  // borrowed homogeneous-DMO path supplies none of these population lanes, so
+  // uniformity is established without an O(N) discovery scan.
+  return softening_view.source_particle_epsilon_comoving.empty() &&
+      softening_view.source_particle_epsilon_override_mask.empty() &&
+      (!softening_view.species_policy.enabled ||
+       softening_view.source_species_tag.empty());
+}
+
 void validateOptions(const TreeGravityOptions& options) {
   if (!std::isfinite(options.opening_theta) || options.opening_theta <= 0.0 ||
       !std::isfinite(options.relative_force_tolerance) || options.relative_force_tolerance <= 0.0 ||
@@ -375,10 +389,24 @@ void TreeGravitySolver::build(
   m_build_max_leaf_size = options.max_leaf_size;
   m_build_softening = options.softening;
 
-  m_source_softening_epsilon_comoving.clear();
-  m_source_softening_epsilon_comoving.resize(pos_x_comoving.size(), options.softening.epsilon_comoving);
-  for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
-    m_source_softening_epsilon_comoving[i] = resolveSourceSofteningEpsilon(i, options.softening, softening_view);
+  if (sourceSofteningIsProvablyUniform(softening_view)) {
+    m_source_softening_representation =
+        ResolvedSourceSofteningRepresentation::kUniform;
+    m_uniform_source_softening_epsilon_comoving =
+        validatedSofteningEpsilon(
+            options.softening.epsilon_comoving,
+            "uniform source softening");
+    // Uniform mode must physically release any population-sized lane retained
+    // by a previous heterogeneous build. swap() guarantees capacity == 0.
+    std::vector<double>{}.swap(m_source_softening_epsilon_comoving);
+  } else {
+    m_source_softening_representation =
+        ResolvedSourceSofteningRepresentation::kMaterialized;
+    m_source_softening_epsilon_comoving.resize(pos_x_comoving.size());
+    for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
+      m_source_softening_epsilon_comoving[i] =
+          resolveSourceSofteningEpsilon(i, options.softening, softening_view);
+    }
   }
   const auto ordering_start = std::chrono::steady_clock::now();
   buildMortonOrderingInPlace(
@@ -532,14 +560,31 @@ void TreeGravitySolver::evaluateActiveSet(
       throw std::invalid_argument(
           "Tree traversal source content differs from the legacy source state used to build the tree");
     }
-    // Legacy callers without a generation token pay an O(N) identity check.
-    // Include resolved source softening so a same-sized sidecar/policy mutation
-    // cannot silently traverse a tree whose cached pair softenings are stale.
-    for (std::size_t source_index = 0; source_index < pos_x_comoving.size(); ++source_index) {
-      if (resolveSourceSofteningEpsilon(source_index, options.softening, softening_view) !=
-          m_source_softening_epsilon_comoving[source_index]) {
+    // Legacy callers without a generation token pay an O(N) identity check
+    // only when the current policy cannot prove the same uniform scalar.
+    // This preserves stale-build detection without recreating epsilon[N].
+    if (m_source_softening_representation ==
+        ResolvedSourceSofteningRepresentation::kUniform &&
+        sourceSofteningIsProvablyUniform(softening_view)) {
+      if (validatedSofteningEpsilon(
+              options.softening.epsilon_comoving,
+              "legacy uniform source softening") !=
+          m_uniform_source_softening_epsilon_comoving) {
         throw std::invalid_argument(
             "Tree traversal source softening differs from the legacy source state used to build the tree");
+      }
+    } else {
+      const ResolvedSourceSofteningView build_softening =
+          resolvedSourceSoftening();
+      for (std::size_t source_index = 0;
+           source_index < pos_x_comoving.size();
+           ++source_index) {
+        if (resolveSourceSofteningEpsilon(
+                source_index, options.softening, softening_view) !=
+            build_softening.epsilonAt(source_index)) {
+          throw std::invalid_argument(
+              "Tree traversal source softening differs from the legacy source state used to build the tree");
+        }
       }
     }
   }
@@ -592,7 +637,7 @@ void TreeGravitySolver::evaluateActiveSet(
       .target_epsilon_comoving = softening_view.target_particle_epsilon_comoving,
       .target_override_mask = softening_view.target_particle_epsilon_override_mask,
       .target_species_tag = softening_view.target_species_tag,
-      .resolved_source_epsilon_comoving = m_source_softening_epsilon_comoving,
+      .resolved_source_softening = resolvedSourceSoftening(),
       .source_species_tag = softening_view.source_species_tag,
       .fallback = options.softening,
       .species_policy_enabled = softening_view.species_policy.enabled,
@@ -612,6 +657,14 @@ void TreeGravitySolver::evaluateActiveSet(
   }
 
   const auto traversal_start = std::chrono::steady_clock::now();
+  const bool uniform_source_softening =
+      m_source_softening_representation ==
+      ResolvedSourceSofteningRepresentation::kUniform;
+  const double* source_softening_base = uniform_source_softening
+      ? &m_uniform_source_softening_epsilon_comoving
+      : m_source_softening_epsilon_comoving.data();
+  const std::size_t source_softening_stride =
+      uniform_source_softening ? 0U : 1U;
   std::uint64_t accepted_nodes = 0;
   std::uint64_t opened_nodes = 0;
   std::uint64_t visited_nodes = 0;
@@ -702,8 +755,12 @@ void TreeGravitySolver::evaluateActiveSet(
               const double sy = pos_y_comoving[source_index] - py;
               const double sz = pos_z_comoving[source_index] - pz;
               const double sr2 = sx * sx + sy * sy + sz * sz;
+              const double source_softening_comoving =
+                  source_softening_base[
+                      static_cast<std::size_t>(source_index) *
+                      source_softening_stride];
               const double pair_epsilon = combineSofteningPairEpsilonUnchecked(
-                  m_source_softening_epsilon_comoving[source_index], target_softening_comoving);
+                  source_softening_comoving, target_softening_comoving);
               const double factor = options.gravitational_constant_code * mass_code[source_index] *
                   softenedInvR3Unchecked(sr2, pair_epsilon);
               ax += factor * sx;
@@ -762,6 +819,15 @@ const TreeMortonOrdering& TreeGravitySolver::ordering() const {
 
 TreeBuildGeneration TreeGravitySolver::treeBuildGeneration() const noexcept {
   return m_tree_build_generation;
+}
+
+ResolvedSourceSofteningView TreeGravitySolver::resolvedSourceSoftening() const noexcept {
+  return ResolvedSourceSofteningView{
+      .representation = m_source_softening_representation,
+      .source_count = m_build_source_count,
+      .uniform_epsilon_comoving = m_uniform_source_softening_epsilon_comoving,
+      .materialized_epsilon_comoving = m_source_softening_epsilon_comoving,
+  };
 }
 
 std::span<const double> TreeGravitySolver::resolvedSourceSofteningEpsilon() const noexcept {
@@ -841,7 +907,10 @@ void TreeGravitySolver::appendMemoryReport(core::MemoryReportBuilder& builder) c
       core::MemorySubsystem::kTree,
       "tree.source_softening",
       m_source_softening_epsilon_comoving,
-      "retained resolved source epsilon; M48-09 scalar specialization intentionally deferred");
+      m_source_softening_representation ==
+              ResolvedSourceSofteningRepresentation::kUniform
+          ? "uniform source softening is represented by one scalar; population lane capacity is zero"
+          : "heterogeneous source softening retains the exact resolved epsilon lane");
 }
 
 bool TreeGravitySolver::built() const {
@@ -989,13 +1058,27 @@ void TreeGravitySolver::accumulateMultipoles(
     double wx = 0.0;
     double wy = 0.0;
     double wz = 0.0;
+    if (m_source_softening_representation ==
+        ResolvedSourceSofteningRepresentation::kUniform) {
+      m_nodes.softening_min_comoving[node_index] =
+          m_uniform_source_softening_epsilon_comoving;
+      m_nodes.softening_max_comoving[node_index] =
+          m_uniform_source_softening_epsilon_comoving;
+    }
     for (TreeLocalCount i = begin; i < end; ++i) {
       const TreeLocalIndex particle = m_ordering.sorted_particle_index[i];
       const double m = mass_code[particle];
-      m_nodes.softening_min_comoving[node_index] =
-          std::min(m_nodes.softening_min_comoving[node_index], m_source_softening_epsilon_comoving[particle]);
-      m_nodes.softening_max_comoving[node_index] =
-          std::max(m_nodes.softening_max_comoving[node_index], m_source_softening_epsilon_comoving[particle]);
+      if (m_source_softening_representation ==
+          ResolvedSourceSofteningRepresentation::kMaterialized) {
+        m_nodes.softening_min_comoving[node_index] =
+            std::min(
+                m_nodes.softening_min_comoving[node_index],
+                m_source_softening_epsilon_comoving[particle]);
+        m_nodes.softening_max_comoving[node_index] =
+            std::max(
+                m_nodes.softening_max_comoving[node_index],
+                m_source_softening_epsilon_comoving[particle]);
+      }
       total_mass += m;
       wx += m * pos_x_comoving[particle];
       wy += m * pos_y_comoving[particle];

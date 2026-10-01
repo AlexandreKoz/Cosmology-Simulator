@@ -83,6 +83,13 @@ struct GravityMemoryEstimateInput {
   std::uint64_t local_cell_count = 0U;
   GravitySourceRepresentation source_representation =
       GravitySourceRepresentation::kMaterializedGeneric;
+  // Explicit representation policies used by preflight. Borrowed homogeneous
+  // DMO implies uniform source softening even when this flag is false.
+  bool source_softening_uniform = false;
+  // Production periodic TreePM may place physical density directly in the
+  // already-accounted FFT real owner. Generic/isolated compatibility paths
+  // leave this false and retain compact PmGridStorage density.
+  bool periodic_fft_backed_density = false;
   bool relative_force_mac_enabled = false;
   std::size_t tree_leaf_size = 16U;
   TreeMultipoleOrder multipole_order = TreeMultipoleOrder::kQuadrupole;

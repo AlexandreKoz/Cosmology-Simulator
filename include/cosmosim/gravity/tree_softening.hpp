@@ -44,11 +44,41 @@ struct TreeSofteningView {
   TreeSofteningSpeciesPolicy species_policy{};
 };
 
+enum class ResolvedSourceSofteningRepresentation : std::uint8_t {
+  kUniform = 0,
+  kMaterialized = 1,
+};
+
+struct ResolvedSourceSofteningView {
+  ResolvedSourceSofteningRepresentation representation =
+      ResolvedSourceSofteningRepresentation::kUniform;
+  std::size_t source_count = 0U;
+  double uniform_epsilon_comoving = 0.0;
+  std::span<const double> materialized_epsilon_comoving{};
+
+  [[nodiscard]] bool isUniform() const noexcept {
+    return representation == ResolvedSourceSofteningRepresentation::kUniform;
+  }
+
+  [[nodiscard]] bool validForSourceCount(std::size_t count) const noexcept {
+    if (source_count != count) {
+      return false;
+    }
+    return isUniform() || materialized_epsilon_comoving.size() == count;
+  }
+
+  [[nodiscard]] double epsilonAt(std::size_t source_index) const noexcept {
+    return isUniform()
+        ? uniform_epsilon_comoving
+        : materialized_epsilon_comoving[source_index];
+  }
+};
+
 struct ValidatedTargetSofteningView {
   std::span<const double> target_epsilon_comoving{};
   std::span<const std::uint8_t> target_override_mask{};
   std::span<const std::uint32_t> target_species_tag{};
-  std::span<const double> resolved_source_epsilon_comoving{};
+  ResolvedSourceSofteningView resolved_source_softening{};
   std::span<const std::uint32_t> source_species_tag{};
   TreeSofteningPolicy fallback{};
   bool species_policy_enabled = false;
@@ -68,8 +98,8 @@ struct ValidatedTargetSofteningView {
     return view.species_epsilon_comoving[view.target_species_tag[target_active_slot]];
   }
   if (view.target_epsilon_comoving.empty() &&
-      target_source_index < view.resolved_source_epsilon_comoving.size()) {
-    return view.resolved_source_epsilon_comoving[target_source_index];
+      target_source_index < view.resolved_source_softening.source_count) {
+    return view.resolved_source_softening.epsilonAt(target_source_index);
   }
   if (view.species_policy_enabled && target_source_index < view.source_species_tag.size()) {
     return view.species_epsilon_comoving[view.source_species_tag[target_source_index]];

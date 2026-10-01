@@ -2277,14 +2277,26 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   if (perform_long_range_refresh) {
     run_pm_communication_phase(
         GravityCommunicationArena::Phase::kPmDensity, [&] {
-          m_pm_solver.assignDensity(
-              m_grid,
-              pos_x_comoving,
-              pos_y_comoving,
-              pos_z_comoving,
-              mass_code,
-              pm_options,
-              profile != nullptr ? &profile->pm_profile : nullptr);
+          if (pm_options.boundary_condition == PmBoundaryCondition::kPeriodic &&
+              pm_options.execution_policy != core::ExecutionPolicy::kCuda) {
+            m_pm_solver.assignDensityPeriodicFftBacked(
+                m_grid,
+                pos_x_comoving,
+                pos_y_comoving,
+                pos_z_comoving,
+                mass_code,
+                pm_options,
+                profile != nullptr ? &profile->pm_profile : nullptr);
+          } else {
+            m_pm_solver.assignDensity(
+                m_grid,
+                pos_x_comoving,
+                pos_y_comoving,
+                pos_z_comoving,
+                mass_code,
+                pm_options,
+                profile != nullptr ? &profile->pm_profile : nullptr);
+          }
         });
     m_last_pm_slab_halo_exchange = {};
     m_grid.clearForceHaloCache();
@@ -3049,19 +3061,21 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   static_cast<void>(tree_mpi_world_size);
 #endif
 
-  // Pre-resolve source softening once from the immutable build-time lane so
-  // the residual hot path never re-enters throwing resolvers. Target softening
-  // is prevalidated below for every local active slot before any OpenMP region.
-  const std::span<const double> source_softening_comoving =
-      m_tree_solver.resolvedSourceSofteningEpsilon();
-  if (source_softening_comoving.size() != pos_x_comoving.size()) {
+  // Consume the immutable build-time representation directly. Homogeneous
+  // DMO keeps one scalar; heterogeneous source policies retain the exact lane.
+  // The residual hot path never re-enters throwing resolvers.
+  const ResolvedSourceSofteningView source_softening =
+      m_tree_solver.resolvedSourceSoftening();
+  if (!source_softening.validForSourceCount(pos_x_comoving.size())) {
     throw std::invalid_argument(
-        "TreePM residual source softening lane length must match the tree source count");
+        "TreePM residual source softening representation does not match the tree source count");
   }
-  const auto resolve_source_softening =
-      [&](TreeLocalIndex source_index) -> double {
-    return source_softening_comoving[source_index];
-  };
+  const bool uniform_source_softening = source_softening.isUniform();
+  const double* source_softening_base = uniform_source_softening
+      ? &source_softening.uniform_epsilon_comoving
+      : source_softening.materialized_epsilon_comoving.data();
+  const std::size_t source_softening_stride =
+      uniform_source_softening ? 0U : 1U;
 
   const std::uint32_t tree_max_depth = m_tree_solver.maxDepth();
   if (tree_max_depth > kMaximumTreeDepth) {
@@ -3157,7 +3171,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       .target_epsilon_comoving = softening_view.target_particle_epsilon_comoving,
       .target_override_mask = softening_view.target_particle_epsilon_override_mask,
       .target_species_tag = softening_view.target_species_tag,
-      .resolved_source_epsilon_comoving = source_softening_comoving,
+      .resolved_source_softening = source_softening,
       .source_species_tag = softening_view.source_species_tag,
       .fallback = options.tree_options.softening,
       .species_policy_enabled = softening_view.species_policy.enabled,
@@ -3338,7 +3352,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               continue;
             }
             const double sr = std::sqrt(std::max(sr2, 1.0e-30));
-            const double source_softening = resolve_source_softening(source_index);
+            const double source_softening =
+                source_softening_base[
+                    static_cast<std::size_t>(source_index) *
+                    source_softening_stride];
             const double pair_epsilon = combineSofteningPairEpsilonUnchecked(source_softening, target_softening_comoving);
             // PM carries the unsoftened Gaussian long-range field.  The tree therefore
             // evaluates the exact residual needed to recover the requested softened

@@ -335,12 +335,13 @@ allocation.
 ### PM spectral-operator cache telemetry
 
 `PmProfileEvent::spectral_operator_rebuilds` counts reconstructions of the
-scale-free periodic PM Poisson/gradient operator arrays. Cosmological
-`scale_factor` remains part of PM collective-entry consensus and force-state
-coordination, but it is not an invariant spectral-operator cache dependency.
-Changing only `scale_factor` therefore must leave this counter at zero after an
-operator has already been built for the same mesh, box, split scale, gravity
-constant, assignment scheme, and deconvolution policy.
+small periodic PM spectral axis/window metadata used to derive the Poisson
+operator. M48-09 no longer caches a full Poisson/gradient operator array.
+Cosmological `scale_factor`, TreePM split scale, and gravitational constant
+remain force-state/collective inputs but are applied directly and are not axis
+metadata cache dependencies. Changing only those values therefore leaves this
+counter at zero after the axis metadata has already been built for the same
+mesh, box lengths, assignment scheme, and deconvolution policy.
 
 ## MPI global diagnostics ownership
 

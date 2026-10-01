@@ -1163,6 +1163,17 @@ struct PmPlanLocalStorageLayout {
       storage.spectral_transposed = true;
       storage.transposed_local_ny = static_cast<std::size_t>(backend_local_ny);
       storage.transposed_begin_y = static_cast<std::size_t>(backend_begin_y);
+      storage.logical_local_complex_cells = checkedProduct(
+          checkedProduct(
+              storage.transposed_local_ny, shape.nx,
+              "PM plan transposed logical spectral extent"),
+          nz_complex,
+          "PM plan transposed logical spectral extent");
+      if (storage.allocated_local_complex_cells <
+          storage.logical_local_complex_cells) {
+        throw std::runtime_error(
+            "FFTW MPI local allocation is smaller than CHUI's transposed logical PM Fourier extent");
+      }
     }
     storage.used_backend_allocation_query = true;
   }
@@ -1186,6 +1197,10 @@ struct PmPlanLocalStorageLayout {
           nz_complex,
           "PM plan transposed Fourier extent");
       conservative_complex = std::max(conservative_complex, transposed_complex);
+      storage.spectral_transposed = true;
+      storage.transposed_local_ny = y_range.extentX();
+      storage.transposed_begin_y = y_range.begin_x;
+      storage.logical_local_complex_cells = transposed_complex;
     }
     storage.allocated_local_complex_cells =
         std::max<std::size_t>(1U, conservative_complex);
@@ -1473,7 +1488,14 @@ class PmSolver::Impl {
     std::vector<double> real;
     std::vector<std::complex<double>> fourier;
     std::vector<std::complex<double>> potential_k;
-    std::vector<double> poisson_kernel;
+    // M48-09 derives the Poisson operator from small per-axis metadata rather
+    // than retaining one scalar per allocated spectral coefficient.
+    std::vector<double> kx_by_ix;
+    std::vector<double> ky_by_iy;
+    std::vector<double> kz_by_iz;
+    std::vector<double> window_x_by_ix;
+    std::vector<double> window_y_by_iy;
+    std::vector<double> window_z_by_iz;
 #if COSMOSIM_ENABLE_FFTW
     fftw_plan forward_plan = nullptr;
     fftw_plan inverse_plan = nullptr;
@@ -1483,14 +1505,21 @@ class PmSolver::Impl {
     std::size_t real_z_stride = 0;
     std::size_t transposed_local_ny = 0;
     std::size_t transposed_begin_y = 0;
-    bool spectral_operators_ready = false;
+    std::size_t logical_local_complex_cells = 0U;
+    std::size_t allocated_local_complex_cells = 0U;
+    bool spectral_axis_metadata_ready = false;
     double cached_lx = 0.0;
     double cached_ly = 0.0;
     double cached_lz = 0.0;
-    double cached_split_scale = -1.0;
-    double cached_gravitational_constant_code = -1.0;
     bool cached_window_deconvolution = false;
     PmAssignmentScheme cached_assignment_scheme = PmAssignmentScheme::kCic;
+
+    // Direct periodic-density lifecycle. The pointer is identity only; the PM
+    // plan owns the bytes. Forward FFT invalidates this authority.
+    const PmGridStorage* periodic_density_grid = nullptr;
+    std::uint64_t periodic_density_generation = 0U;
+    std::uint64_t periodic_density_grid_generation = 0U;
+    bool periodic_density_ready = false;
   };
 
   struct DensityExchangeBuffers {
@@ -1860,7 +1889,7 @@ class PmSolver::Impl {
     const std::size_t allocated_local_complex_size =
         storage_layout.allocated_local_complex_cells;
     plan.real_z_stride = storage_layout.real_z_stride;
-
+    plan.allocated_local_complex_cells = allocated_local_complex_size;
 
 #if COSMOSIM_ENABLE_FFTW
 #if COSMOSIM_ENABLE_MPI
@@ -1872,7 +1901,6 @@ class PmSolver::Impl {
       plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
-      plan.poisson_kernel.assign(allocated_local_complex_size, 0.0);
     }
 #endif
 #if COSMOSIM_ENABLE_MPI
@@ -1914,7 +1942,6 @@ class PmSolver::Impl {
       plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
-      plan.poisson_kernel.assign(expected_local_complex_size, 0.0);
       plan.forward_plan = fftw_plan_dft_r2c_3d(
           static_cast<int>(m_shape.nx),
           static_cast<int>(m_shape.ny),
@@ -1941,8 +1968,20 @@ class PmSolver::Impl {
     plan.real.assign(storage_layout.real_element_count, 0.0);
     plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
     plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.poisson_kernel.assign(expected_local_complex_size, 0.0);
 #endif
+
+    plan.logical_local_complex_cells = plan.spectral_transposed
+        ? checkedProduct(
+              checkedProduct(
+                  plan.transposed_local_ny, m_shape.nx,
+                  "PM transposed logical spectral extent"),
+              nz_complex,
+              "PM transposed logical spectral extent")
+        : expected_local_complex_size;
+    if (plan.logical_local_complex_cells > plan.allocated_local_complex_cells) {
+      throw std::runtime_error(
+          "PM logical spectral extent exceeds the backend allocation");
+    }
 
 #if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
     if (layout.world_size > 1) {
@@ -1975,74 +2014,143 @@ class PmSolver::Impl {
   [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return activePlan().fourier; }
   [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return activePlan().potential_k; }
 
-  [[nodiscard]] bool ensureSpectralOperators(
+  void invalidatePeriodicDensityForGrid(const PmGridStorage* grid) noexcept {
+    for (auto& [_, plan] : m_plan_cache) {
+      if (plan.periodic_density_grid == grid) {
+        plan.periodic_density_ready = false;
+        plan.periodic_density_grid = nullptr;
+        plan.periodic_density_generation = 0U;
+        plan.periodic_density_grid_generation = 0U;
+      }
+    }
+  }
+
+  void publishPeriodicDensity(
+      PlanResources& plan,
+      const PmGridStorage& grid) {
+    if (m_periodic_density_generation ==
+        std::numeric_limits<std::uint64_t>::max()) {
+      throw std::overflow_error(
+          "PM periodic density generation would overflow; recreate the solver");
+    }
+    ++m_periodic_density_generation;
+    plan.periodic_density_grid = &grid;
+    plan.periodic_density_generation = m_periodic_density_generation;
+    plan.periodic_density_grid_generation = grid.storageGeneration();
+    plan.periodic_density_ready = true;
+  }
+
+  [[nodiscard]] bool periodicDensityReadyFor(
+      const PlanResources& plan,
+      const PmGridStorage& grid) const noexcept {
+    return plan.periodic_density_ready &&
+        plan.periodic_density_grid == &grid &&
+        plan.periodic_density_generation != 0U &&
+        plan.periodic_density_grid_generation == grid.storageGeneration();
+  }
+
+  [[nodiscard]] bool periodicDensityTokenTargetsGrid(
+      const PlanResources& plan,
+      const PmGridStorage& grid) const noexcept {
+    return plan.periodic_density_ready &&
+        plan.periodic_density_grid == &grid &&
+        plan.periodic_density_generation != 0U;
+  }
+
+  void consumePeriodicDensity(PlanResources& plan) noexcept {
+    plan.periodic_density_ready = false;
+    plan.periodic_density_grid = nullptr;
+    plan.periodic_density_generation = 0U;
+    plan.periodic_density_grid_generation = 0U;
+  }
+
+  [[nodiscard]] bool ensureSpectralAxisMetadata(
       PlanResources& plan,
       const BoxLengths& lengths,
       const PmSolveOptions& options,
       const PmGridShape& shape) {
-    if (plan.spectral_operators_ready &&
+    if (plan.spectral_axis_metadata_ready &&
         plan.cached_lx == lengths.lx &&
         plan.cached_ly == lengths.ly &&
         plan.cached_lz == lengths.lz &&
-        plan.cached_split_scale == options.tree_pm_split_scale_comoving &&
-        plan.cached_gravitational_constant_code == options.gravitational_constant_code &&
         plan.cached_window_deconvolution == options.enable_window_deconvolution &&
         plan.cached_assignment_scheme == options.assignment_scheme) {
       return false;
     }
 
-    std::fill(plan.poisson_kernel.begin(), plan.poisson_kernel.end(), 0.0);
-
     const std::size_t nz_complex = shape.nz / 2U + 1U;
-    const double prefactor = -4.0 * k_pi * options.gravitational_constant_code;
+    plan.kx_by_ix.resize(shape.nx);
+    plan.ky_by_iy.resize(shape.ny);
+    plan.kz_by_iz.resize(nz_complex);
+    plan.window_x_by_ix.assign(shape.nx, 1.0);
+    plan.window_y_by_iy.assign(shape.ny, 1.0);
+    plan.window_z_by_iz.assign(nz_complex, 1.0);
+
     const double dkx = 2.0 * k_pi / lengths.lx;
     const double dky = 2.0 * k_pi / lengths.ly;
     const double dkz = 2.0 * k_pi / lengths.lz;
+    const int window_exponent = assignmentWindowExponent(options.assignment_scheme);
 
-    auto set_entry = [&](std::size_t index, double kx, double ky, double kz) {
-      const double k2 = kx * kx + ky * ky + kz * kz;
-      if (k2 == 0.0) {
-        return;
-      }
-      double window_correction = 1.0;
+    for (std::size_t ix = 0; ix < shape.nx; ++ix) {
+      const std::ptrdiff_t mode = ix <= shape.nx / 2U
+          ? static_cast<std::ptrdiff_t>(ix)
+          : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
+      const double kx = dkx * static_cast<double>(mode);
+      plan.kx_by_ix[ix] = kx;
       if (options.enable_window_deconvolution) {
-        const int window_exponent = assignmentWindowExponent(options.assignment_scheme);
-        const double wx = std::pow(
+        plan.window_x_by_ix[ix] = std::pow(
             sinc(0.5 * kx * lengths.lx / static_cast<double>(shape.nx)),
             static_cast<double>(window_exponent));
-        const double wy = std::pow(
+      }
+    }
+    for (std::size_t iy = 0; iy < shape.ny; ++iy) {
+      const std::ptrdiff_t mode = iy <= shape.ny / 2U
+          ? static_cast<std::ptrdiff_t>(iy)
+          : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
+      const double ky = dky * static_cast<double>(mode);
+      plan.ky_by_iy[iy] = ky;
+      if (options.enable_window_deconvolution) {
+        plan.window_y_by_iy[iy] = std::pow(
             sinc(0.5 * ky * lengths.ly / static_cast<double>(shape.ny)),
             static_cast<double>(window_exponent));
-        const double wz = std::pow(
+      }
+    }
+    for (std::size_t iz = 0; iz < nz_complex; ++iz) {
+      const double kz = dkz * static_cast<double>(iz);
+      plan.kz_by_iz[iz] = kz;
+      if (options.enable_window_deconvolution) {
+        plan.window_z_by_iz[iz] = std::pow(
             sinc(0.5 * kz * lengths.lz / static_cast<double>(shape.nz)),
             static_cast<double>(window_exponent));
-        const double transfer_window = wx * wy * wz;
-        window_correction = 1.0 / std::max(transfer_window * transfer_window, 1.0e-12);
       }
-      double split_filter = 1.0;
-      if (options.tree_pm_split_scale_comoving > 0.0) {
-        split_filter = treePmGaussianFourierLongRangeFilterUnchecked(
-            std::sqrt(k2), options.tree_pm_split_scale_comoving);
-      }
-      plan.poisson_kernel[index] = prefactor * window_correction * split_filter / k2;
-    };
+    }
 
+    plan.spectral_axis_metadata_ready = true;
+    plan.cached_lx = lengths.lx;
+    plan.cached_ly = lengths.ly;
+    plan.cached_lz = lengths.lz;
+    plan.cached_window_deconvolution = options.enable_window_deconvolution;
+    plan.cached_assignment_scheme = options.assignment_scheme;
+    return true;
+  }
+
+  template <typename Callback>
+  void forEachLogicalSpectralMode(
+      const PlanResources& plan,
+      const PmGridShape& shape,
+      Callback&& callback) const {
+    const std::size_t nz_complex = shape.nz / 2U + 1U;
+    std::size_t visited = 0U;
     if (plan.spectral_transposed) {
       for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
         const std::size_t iy = plan.transposed_begin_y + local_iy;
-        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
-            ? static_cast<std::ptrdiff_t>(iy)
-            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
-        const double ky = dky * static_cast<double>(ny_mode);
         for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-          const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
-              ? static_cast<std::ptrdiff_t>(ix)
-              : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
-          const double kx = dkx * static_cast<double>(nx_mode);
           for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-            const double kz = dkz * static_cast<double>(iz);
             const std::size_t index = (local_iy * shape.nx + ix) * nz_complex + iz;
-            set_entry(index, kx, ky, kz);
+            callback(
+                index, ix, iy, iz,
+                plan.kx_by_ix[ix], plan.ky_by_iy[iy], plan.kz_by_iz[iz]);
+            ++visited;
           }
         }
       }
@@ -2050,33 +2158,77 @@ class PmSolver::Impl {
       const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
       for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
         const std::size_t ix = global_x_begin + local_ix;
-        const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
-            ? static_cast<std::ptrdiff_t>(ix)
-            : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
-        const double kx = dkx * static_cast<double>(nx_mode);
         for (std::size_t iy = 0; iy < shape.ny; ++iy) {
-          const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
-              ? static_cast<std::ptrdiff_t>(iy)
-              : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
-          const double ky = dky * static_cast<double>(ny_mode);
           for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-            const double kz = dkz * static_cast<double>(iz);
             const std::size_t index = (local_ix * shape.ny + iy) * nz_complex + iz;
-            set_entry(index, kx, ky, kz);
+            callback(
+                index, ix, iy, iz,
+                plan.kx_by_ix[ix], plan.ky_by_iy[iy], plan.kz_by_iz[iz]);
+            ++visited;
           }
         }
       }
     }
+    if (visited != plan.logical_local_complex_cells) {
+      throw std::logic_error(
+          "PM logical spectral traversal disagrees with the plan's logical extent");
+    }
+  }
 
-    plan.spectral_operators_ready = true;
-    plan.cached_lx = lengths.lx;
-    plan.cached_ly = lengths.ly;
-    plan.cached_lz = lengths.lz;
-    plan.cached_split_scale = options.tree_pm_split_scale_comoving;
-    plan.cached_gravitational_constant_code = options.gravitational_constant_code;
-    plan.cached_window_deconvolution = options.enable_window_deconvolution;
-    plan.cached_assignment_scheme = options.assignment_scheme;
-    return true;
+  [[nodiscard]] bool applyDerivedPoissonOperator(
+      PlanResources& plan,
+      const BoxLengths& lengths,
+      const PmSolveOptions& options,
+      const PmGridShape& shape) {
+    const bool rebuilt = ensureSpectralAxisMetadata(plan, lengths, options, shape);
+    auto fourier = fourierGrid();
+    if (fourier.size() != plan.allocated_local_complex_cells ||
+        plan.logical_local_complex_cells > fourier.size()) {
+      throw std::logic_error("PM Fourier storage extent disagrees with plan metadata");
+    }
+
+    const double prefactor = -4.0 * k_pi * options.gravitational_constant_code;
+    forEachLogicalSpectralMode(
+        plan, shape,
+        [&](std::size_t index,
+            std::size_t ix,
+            std::size_t iy,
+            std::size_t iz,
+            double kx,
+            double ky,
+            double kz) {
+          const double k2 = kx * kx + ky * ky + kz * kz;
+          if (k2 == 0.0) {
+            fourier[index] = std::complex<double>(0.0, 0.0);
+            return;
+          }
+          double window_correction = 1.0;
+          if (options.enable_window_deconvolution) {
+            const double transfer_window =
+                plan.window_x_by_ix[ix] *
+                plan.window_y_by_iy[iy] *
+                plan.window_z_by_iz[iz];
+            window_correction =
+                1.0 / std::max(transfer_window * transfer_window, 1.0e-12);
+          }
+          double split_filter = 1.0;
+          if (options.tree_pm_split_scale_comoving > 0.0) {
+            split_filter = treePmGaussianFourierLongRangeFilterUnchecked(
+                std::sqrt(k2), options.tree_pm_split_scale_comoving);
+          }
+          const double poisson_operator =
+              prefactor * window_correction * split_filter / k2;
+          fourier[index] *= poisson_operator;
+        });
+
+    // FFTW MPI may over-allocate beyond the logical spectral extent. The old
+    // zero-initialized full scalar operator implicitly zeroed that tail;
+    // preserve the same fail-closed behavior explicitly.
+    std::fill(
+        fourier.begin() + static_cast<std::ptrdiff_t>(plan.logical_local_complex_cells),
+        fourier.end(),
+        std::complex<double>(0.0, 0.0));
+    return rebuilt;
   }
 
   void fillGradientSpectrum(
@@ -2087,16 +2239,18 @@ class PmSolver::Impl {
     if (axis < 0 || axis > 2) {
       throw std::invalid_argument("PM spectral gradient axis must be 0, 1, or 2");
     }
+    if (!plan.spectral_axis_metadata_ready ||
+        plan.cached_lx != lengths.lx ||
+        plan.cached_ly != lengths.ly ||
+        plan.cached_lz != lengths.lz) {
+      throw std::logic_error(
+          "PM gradient requested without current spectral axis metadata");
+    }
 
     auto dst = fourierGrid();
     const auto potential_k = std::span<const std::complex<double>>(
         plan.potential_k.data(), plan.potential_k.size());
     std::fill(dst.begin(), dst.end(), std::complex<double>(0.0, 0.0));
-
-    const std::size_t nz_complex = shape.nz / 2U + 1U;
-    const double dkx = 2.0 * k_pi / lengths.lx;
-    const double dky = 2.0 * k_pi / lengths.ly;
-    const double dkz = 2.0 * k_pi / lengths.lz;
 
     const auto first_derivative_mode = [](std::size_t mode_index,
                                           std::size_t mode_count,
@@ -2108,62 +2262,23 @@ class PmSolver::Impl {
           : wave_number;
     };
 
-    const auto set_entry = [&](std::size_t index,
-                               std::size_t ix,
-                               std::size_t iy,
-                               std::size_t iz,
-                               double kx,
-                               double ky,
-                               double kz) {
-      const double gradient = axis == 0
-          ? first_derivative_mode(ix, shape.nx, kx)
-          : (axis == 1
-              ? first_derivative_mode(iy, shape.ny, ky)
-              : first_derivative_mode(iz, shape.nz, kz));
-      dst[index] = std::complex<double>(0.0, -gradient) * potential_k[index];
-    };
-
-    if (plan.spectral_transposed) {
-      for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
-        const std::size_t iy = plan.transposed_begin_y + local_iy;
-        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
-            ? static_cast<std::ptrdiff_t>(iy)
-            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
-        const double ky = dky * static_cast<double>(ny_mode);
-        for (std::size_t ix = 0; ix < shape.nx; ++ix) {
-          const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
-              ? static_cast<std::ptrdiff_t>(ix)
-              : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
-          const double kx = dkx * static_cast<double>(nx_mode);
-          for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-            const double kz = dkz * static_cast<double>(iz);
-            const std::size_t index = (local_iy * shape.nx + ix) * nz_complex + iz;
-            set_entry(index, ix, iy, iz, kx, ky, kz);
-          }
-        }
-      }
-      return;
-    }
-
-    const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
-    for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
-      const std::size_t ix = global_x_begin + local_ix;
-      const std::ptrdiff_t nx_mode = ix <= shape.nx / 2U
-          ? static_cast<std::ptrdiff_t>(ix)
-          : static_cast<std::ptrdiff_t>(ix) - static_cast<std::ptrdiff_t>(shape.nx);
-      const double kx = dkx * static_cast<double>(nx_mode);
-      for (std::size_t iy = 0; iy < shape.ny; ++iy) {
-        const std::ptrdiff_t ny_mode = iy <= shape.ny / 2U
-            ? static_cast<std::ptrdiff_t>(iy)
-            : static_cast<std::ptrdiff_t>(iy) - static_cast<std::ptrdiff_t>(shape.ny);
-        const double ky = dky * static_cast<double>(ny_mode);
-        for (std::size_t iz = 0; iz < nz_complex; ++iz) {
-          const double kz = dkz * static_cast<double>(iz);
-          const std::size_t index = (local_ix * shape.ny + iy) * nz_complex + iz;
-          set_entry(index, ix, iy, iz, kx, ky, kz);
-        }
-      }
-    }
+    forEachLogicalSpectralMode(
+        plan, shape,
+        [&](std::size_t index,
+            std::size_t ix,
+            std::size_t iy,
+            std::size_t iz,
+            double kx,
+            double ky,
+            double kz) {
+          const double gradient = axis == 0
+              ? first_derivative_mode(ix, shape.nx, kx)
+              : (axis == 1
+                  ? first_derivative_mode(iy, shape.ny, ky)
+                  : first_derivative_mode(iz, shape.nz, kz));
+          dst[index] =
+              std::complex<double>(0.0, -gradient) * potential_k[index];
+        });
   }
 
   double forwardFft() {
@@ -2595,11 +2710,26 @@ class PmSolver::Impl {
         accumulate(current, capacity, resources.real);
         accumulate(current, capacity, resources.fourier);
         accumulate(current, capacity, resources.potential_k);
-        accumulate(current, capacity, resources.poisson_kernel);
       }
       emit(core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
            "pm_solver.plan_cache_owned_arrays", current, capacity, capacity,
-           "owned FFT/Poisson arrays only; FFTW/cuFFT plan-internal allocations remain external/unknown");
+           "owned FFT real + Fourier working + preserved potential spectrum; no full Poisson-kernel lane");
+    }
+
+    {
+      std::uint64_t current = 0U;
+      std::uint64_t capacity = 0U;
+      for (const auto& [_, resources] : m_plan_cache) {
+        accumulate(current, capacity, resources.kx_by_ix);
+        accumulate(current, capacity, resources.ky_by_iy);
+        accumulate(current, capacity, resources.kz_by_iz);
+        accumulate(current, capacity, resources.window_x_by_ix);
+        accumulate(current, capacity, resources.window_y_by_iy);
+        accumulate(current, capacity, resources.window_z_by_iz);
+      }
+      emit(core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
+           "pm_solver.plan_spectral_axis_metadata", current, capacity, capacity,
+           "O(nx+ny+nz) wave-number and assignment-window tables used to derive the Poisson operator");
     }
 
     {
@@ -2701,6 +2831,7 @@ class PmSolver::Impl {
   mutable GravityCommunicationArena* m_external_communication_arena = nullptr;
   mutable std::pmr::memory_resource* m_external_communication_resource = nullptr;
   mutable std::unique_ptr<GravityCommunicationArena> m_standalone_communication_arena;
+  mutable std::uint64_t m_periodic_density_generation = 0U;
   mutable std::uint64_t m_density_exchange_logical_high_water_bytes = 0U;
   mutable std::uint64_t m_plane_interpolation_logical_high_water_bytes = 0U;
   IndexedTargetWorkspace m_indexed_target_workspace{};
@@ -2747,10 +2878,19 @@ PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
                      "PM plan-memory complex spectral arrays"),
       sizeof(std::complex<double>),
       "PM plan-memory complex spectral bytes");
-  estimate.scalar_spectral_array_bytes = checked_bytes(
-      storage_layout.allocated_local_complex_cells,
+  estimate.scalar_spectral_array_bytes = 0U;
+  const std::size_t nz_complex = shape.nz / 2U + 1U;
+  const std::size_t axis_value_count = checkedProduct(
+      2U,
+      core::checkedSizeAdd(
+          core::checkedSizeAdd(shape.nx, shape.ny, "PM plan-memory axis metadata"),
+          nz_complex,
+          "PM plan-memory axis metadata"),
+      "PM plan-memory wave-number/window axis metadata");
+  estimate.spectral_axis_metadata_bytes = checked_bytes(
+      axis_value_count,
       sizeof(double),
-      "PM plan-memory scalar spectral bytes");
+      "PM plan-memory spectral axis metadata bytes");
   const auto checked_add_bytes = [](std::uint64_t lhs, std::uint64_t rhs,
                                     std::string_view context) {
     if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs) {
@@ -2760,7 +2900,7 @@ PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
   };
   const std::uint64_t spectral_bytes = checked_add_bytes(
       estimate.complex_spectral_array_bytes,
-      estimate.scalar_spectral_array_bytes,
+      estimate.spectral_axis_metadata_bytes,
       "PM plan-memory spectral byte sum");
   estimate.total_owned_bytes = checked_add_bytes(
       estimate.real_array_bytes,
@@ -2827,7 +2967,6 @@ PmGridStorage::PmGridStorage(PmGridShape shape)
 PmGridStorage::PmGridStorage(PmGridShape shape, parallel::PmSlabLayout layout)
     : m_shape(shape),
       m_layout(std::move(layout)),
-      m_density(m_layout.localCellCount(), 0.0),
       m_force_x(m_layout.localCellCount(), 0.0),
       m_force_y(m_layout.localCellCount(), 0.0),
       m_force_z(m_layout.localCellCount(), 0.0) {
@@ -2858,12 +2997,43 @@ std::size_t PmGridStorage::localCellCount() const {
   return m_layout.localCellCount();
 }
 
+std::uint64_t PmGridStorage::storageGeneration() const noexcept {
+  return m_storage_generation;
+}
+
 std::span<double> PmGridStorage::density() {
+  ensureDensityStorage();
   return m_density;
 }
 
 std::span<const double> PmGridStorage::density() const {
   return m_density;
+}
+
+bool PmGridStorage::hasDensityStorage() const noexcept {
+  return m_density.size() == localCellCount();
+}
+
+void PmGridStorage::ensureDensityStorage() {
+  if (hasDensityStorage()) {
+    return;
+  }
+  if (m_storage_generation == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("PM grid storage generation overflow");
+  }
+  m_density.assign(localCellCount(), 0.0);
+  ++m_storage_generation;
+}
+
+void PmGridStorage::releaseDensityStorage() {
+  if (m_density.empty()) {
+    return;
+  }
+  if (m_storage_generation == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("PM grid storage generation overflow");
+  }
+  std::vector<double>{}.swap(m_density);
+  ++m_storage_generation;
 }
 
 std::span<double> PmGridStorage::potential() {
@@ -3053,7 +3223,13 @@ std::size_t PmGridStorage::linearIndex(std::size_t ix, std::size_t iy, std::size
 }
 
 void PmGridStorage::clear() {
-  std::fill(m_density.begin(), m_density.end(), 0.0);
+  if (m_storage_generation == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("PM grid storage generation overflow");
+  }
+  ++m_storage_generation;
+  if (!m_density.empty()) {
+    std::fill(m_density.begin(), m_density.end(), 0.0);
+  }
   if (!m_potential.empty()) {
     std::fill(m_potential.begin(), m_potential.end(), 0.0);
   }
@@ -3157,6 +3333,33 @@ void PmSolver::assignDensity(
     std::span<const double> mass,
     const PmSolveOptions& options,
     PmProfileEvent* profile) const {
+  assignDensityImpl(
+      grid, pos_x, pos_y, pos_z, mass, options,
+      /*periodic_fft_backed=*/false, profile);
+}
+
+void PmSolver::assignDensityPeriodicFftBacked(
+    PmGridStorage& grid,
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const double> mass,
+    const PmSolveOptions& options,
+    PmProfileEvent* profile) const {
+  assignDensityImpl(
+      grid, pos_x, pos_y, pos_z, mass, options,
+      /*periodic_fft_backed=*/true, profile);
+}
+
+void PmSolver::assignDensityImpl(
+    PmGridStorage& grid,
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const double> mass,
+    const PmSolveOptions& options,
+    bool periodic_fft_backed,
+    PmProfileEvent* profile) const {
   const PmDecompositionView decomposition_view(
       m_shape, grid.slabLayout(), options.decomposition_mode);
 #if COSMOSIM_ENABLE_MPI
@@ -3236,8 +3439,51 @@ void PmSolver::assignDensity(
   }
 #endif
 
+  if (periodic_fft_backed &&
+      options.boundary_condition != PmBoundaryCondition::kPeriodic) {
+    throw std::invalid_argument(
+        "FFT-backed PM density storage is valid only for periodic solves");
+  }
+
   const auto start = std::chrono::steady_clock::now();
-  std::fill(grid.density().begin(), grid.density().end(), 0.0);
+  Impl::PlanResources* density_plan = nullptr;
+  std::span<double> density_storage;
+  std::size_t density_z_stride = m_shape.nz;
+  if (periodic_fft_backed) {
+    // The production specialization has one physical density owner. Release
+    // any compact compatibility capacity retained by an earlier generic use
+    // before publishing a new FFT-backed density generation.
+    m_impl->invalidatePeriodicDensityForGrid(&grid);
+    grid.releaseDensityStorage();
+    Impl::PlanResources& plan =
+        m_impl->planForLayout(grid.slabLayout(), options.decomposition_mode);
+    density_plan = &plan;
+    plan.periodic_density_ready = false;
+    plan.periodic_density_grid = nullptr;
+    plan.periodic_density_generation = 0U;
+    plan.periodic_density_grid_generation = 0U;
+    density_storage = plan.real;
+    density_z_stride = plan.real_z_stride;
+    std::fill(density_storage.begin(), density_storage.end(), 0.0);
+  } else {
+    m_impl->invalidatePeriodicDensityForGrid(&grid);
+    grid.ensureDensityStorage();
+    density_storage = grid.density();
+    std::fill(density_storage.begin(), density_storage.end(), 0.0);
+  }
+
+  const auto density_index = [&](
+      std::size_t global_ix,
+      std::size_t global_iy,
+      std::size_t global_iz) -> std::size_t {
+    if (!grid.slabLayout().ownsGlobalX(global_ix) ||
+        global_iy >= m_shape.ny || global_iz >= m_shape.nz) {
+      throw std::out_of_range(
+          "PM density destination index is outside the owned physical mesh");
+    }
+    const std::size_t local_ix = global_ix - grid.slabLayout().owned_x.begin_x;
+    return (local_ix * m_shape.ny + global_iy) * density_z_stride + global_iz;
+  };
 
   const BoxLengths lengths = effectiveBoxLengths(options);
   const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
@@ -3273,7 +3519,9 @@ void PmSolver::assignDensity(
       throw std::invalid_argument(
           "PmSolver::assignDensity received a non-finite or negative mass contribution");
     }
-    grid.density()[grid.linearIndex(record.global_ix, record.global_iy, record.global_iz)] += record.mass_contribution;
+    density_storage[density_index(
+        record.global_ix, record.global_iy, record.global_iz)] +=
+        record.mass_contribution;
   };
 
   if (!distributed_slabs) {
@@ -3461,7 +3709,8 @@ void PmSolver::assignDensity(
                 ? wrapIndex(sz.offsets[dz], m_shape.nz)
                 : static_cast<std::size_t>(sz.offsets[dz]);
             const double weight = record.x_weight[plane] * sy.weights[dy] * sz.weights[dz];
-            grid.density()[grid.linearIndex(ix, iy, iz)] += record.mass_code * weight;
+            density_storage[density_index(ix, iy, iz)] +=
+                record.mass_code * weight;
           }
         }
       }
@@ -3780,8 +4029,17 @@ void PmSolver::assignDensity(
 
   const double cell_volume =
       (lengths.lx * lengths.ly * lengths.lz) / static_cast<double>(m_shape.cellCount());
-  for (double& density_cell : grid.density()) {
-    density_cell /= cell_volume;
+  for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      const std::size_t row_base =
+          (local_ix * m_shape.ny + iy) * density_z_stride;
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        density_storage[row_base + iz] /= cell_volume;
+      }
+    }
+  }
+  if (density_plan != nullptr) {
+    m_impl->publishPeriodicDensity(*density_plan, grid);
   }
 
   const auto stop = std::chrono::steady_clock::now();
@@ -3873,32 +4131,68 @@ void PmSolver::solvePoissonPeriodicImpl(
   auto fourier = m_impl->fourierGrid();
   auto potential_k = m_impl->potentialScratch();
 
-  std::fill(real.begin(), real.end(), 0.0);
-  if (plan.is_distributed) {
+  const bool fft_backed_density_ready =
+      m_impl->periodicDensityReadyFor(plan, grid);
+  if (!fft_backed_density_ready &&
+      m_impl->periodicDensityTokenTargetsGrid(plan, grid)) {
+    throw std::logic_error(
+        "Periodic FFT-backed density token is stale for the current PM grid generation");
+  }
+  if (!fft_backed_density_ready) {
+    const std::span<const double> compact_density =
+        static_cast<const PmGridStorage&>(grid).density();
+    if (!grid.hasDensityStorage() || compact_density.size() != grid.localCellCount()) {
+      throw std::logic_error(
+          "Periodic PM solve has neither current FFT-backed density nor materialized compact density");
+    }
+    std::fill(real.begin(), real.end(), 0.0);
     for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
       const std::size_t global_ix = grid.slabLayout().globalXFromLocal(local_ix);
       for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
         const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
-        const std::size_t fftw_base = (local_ix * m_shape.ny + iy) * plan.real_z_stride;
-        std::copy_n(grid.density().begin() + static_cast<std::ptrdiff_t>(compact_base), m_shape.nz, real.begin() + static_cast<std::ptrdiff_t>(fftw_base));
+        const std::size_t fft_base =
+            (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+        std::copy_n(
+            compact_density.begin() + static_cast<std::ptrdiff_t>(compact_base),
+            m_shape.nz,
+            real.begin() + static_cast<std::ptrdiff_t>(fft_base));
       }
     }
-  } else {
-    std::copy(grid.density().begin(), grid.density().end(), real.begin());
   }
 
-  double local_density_sum = std::accumulate(real.begin(), real.end(), 0.0);
+  // Physical reductions deliberately skip FFTW row padding. The direct-density
+  // path deposited and normalized only these locations; padding remains scratch.
+  double local_density_sum = 0.0;
+  for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      const std::size_t fft_base =
+          (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        local_density_sum += real[fft_base + iz];
+      }
+    }
+  }
   double global_density_sum = local_density_sum;
 #if COSMOSIM_ENABLE_MPI
   if (grid.slabLayout().world_size > 1) {
     MPI_Allreduce(&local_density_sum, &global_density_sum, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
   }
 #endif
-  const double mean_density = global_density_sum / static_cast<double>(m_shape.cellCount());
-  for (double& value : real) {
-    value -= mean_density;
+  const double mean_density =
+      global_density_sum / static_cast<double>(m_shape.cellCount());
+  for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
+    for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+      const std::size_t fft_base =
+          (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+      for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+        real[fft_base + iz] -= mean_density;
+      }
+    }
   }
 
+  // FFT execution destroys authoritative real-space density contents. Clear
+  // the generation/identity token before handing the allocation to FFTW.
+  m_impl->consumePeriodicDensity(plan);
   const double forward_fft_ms = m_impl->forwardFft();
   if (profile != nullptr) {
     profile->fft_forward_ms += forward_fft_ms;
@@ -3910,12 +4204,9 @@ void PmSolver::solvePoissonPeriodicImpl(
   const auto poisson_start = std::chrono::steady_clock::now();
   const BoxLengths lengths = effectiveBoxLengths(options);
   const bool spectral_operator_rebuilt =
-      m_impl->ensureSpectralOperators(plan, lengths, options, m_shape);
+      m_impl->applyDerivedPoissonOperator(plan, lengths, options, m_shape);
   if (profile != nullptr && spectral_operator_rebuilt) {
     ++profile->spectral_operator_rebuilds;
-  }
-  for (std::size_t i = 0; i < fourier.size(); ++i) {
-    fourier[i] *= plan.poisson_kernel[i];
   }
   const auto poisson_stop = std::chrono::steady_clock::now();
 
