@@ -53,8 +53,8 @@ class GravityRestartStateProvider {
   [[nodiscard]] virtual const gravity::PmGridShape& pmGridShape() const noexcept = 0;
   [[nodiscard]] virtual const parallel::DistributedExecutionTopology&
   runtimeTopology() const noexcept = 0;
-  [[nodiscard]] virtual io::GravityForceCachePersistentState
-  exportRestartForceCache(const core::SimulationState& state) const = 0;
+  [[nodiscard]] virtual io::GravityForceCachePersistentView
+  restartForceCacheView(const core::SimulationState& state) const = 0;
 };
 
 // Owner interface for rung-zero TreePM/PM cadence and force-cache lifecycle.

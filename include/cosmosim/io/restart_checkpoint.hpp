@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <span>
 #include <vector>
 
 #include "cosmosim/core/provenance.hpp"
@@ -101,6 +102,20 @@ struct StochasticPersistentState {
   std::vector<StochasticModulePersistentState> modules;
 };
 
+struct GravityForceCachePersistentView {
+  // Non-owning write/verification view. The live SimulationState and
+  // GravityRuntime remain the sole owners of these lanes.
+  bool valid = false;
+  std::span<const std::uint64_t> particle_id;
+  std::span<const std::uint64_t> gas_cell_id;
+  std::span<const double> particle_accel_x_comoving;
+  std::span<const double> particle_accel_y_comoving;
+  std::span<const double> particle_accel_z_comoving;
+  std::span<const double> cell_accel_x_comoving;
+  std::span<const double> cell_accel_y_comoving;
+  std::span<const double> cell_accel_z_comoving;
+};
+
 struct GravityForceCachePersistentState {
   // Cached accelerations are restart-authoritative at a safe KDK boundary:
   // the next pre-kick consumes them before ForceRefresh rebuilds a new field.
@@ -126,8 +141,10 @@ struct RestartWritePayload {
   // workflow-level persistence contract.  Required for v19 writes whenever gas
   // cells exist.
   const core::HierarchicalTimeBinScheduler* gas_cell_scheduler = nullptr;
-  // Optional for direct library callers; ReferenceWorkflow always supplies it.
+  // Owning compatibility input retained for direct library callers/tests.
+  // Production workflow writing should prefer gravity_force_cache_view.
   const GravityForceCachePersistentState* gravity_force_cache = nullptr;
+  const GravityForceCachePersistentView* gravity_force_cache_view = nullptr;
   core::ProvenanceRecord provenance;
   std::string normalized_config_text;
   std::string normalized_config_hash_hex;
@@ -203,6 +220,31 @@ void writeRestartCheckpointHdf5(
     const std::filesystem::path& output_path,
     const RestartWritePayload& payload,
     const RestartWritePolicy& policy = {});
+
+struct RestartVerificationPolicy {
+  core::MemoryGovernor* memory_governor = nullptr;
+  // Application-owned verification scratch. Independent of population size.
+  std::uint64_t workspace_limit_bytes = 16ULL * 1024ULL * 1024ULL;
+};
+
+struct RestartVerificationResult {
+  bool ok = false;
+  RestartDiagnosticsSummary diagnostics;
+  std::string schema_name;
+  std::uint32_t schema_version = 0;
+  std::uint64_t legacy_payload_hash = 0;
+  std::string payload_sha256_hex;
+  std::uint64_t verified_bytes = 0;
+  std::uint64_t workspace_high_water_bytes = 0;
+  std::uint64_t verified_dataset_count = 0;
+  std::string failed_field;
+  std::string detail;
+};
+
+[[nodiscard]] RestartVerificationResult verifyRestartCheckpointHdf5(
+    const std::filesystem::path& input_path,
+    const RestartWritePayload& expected,
+    const RestartVerificationPolicy& policy = {});
 
 [[nodiscard]] RestartReadResult readRestartCheckpointHdf5(
     const std::filesystem::path& input_path,

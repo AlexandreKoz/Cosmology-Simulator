@@ -415,3 +415,10 @@ includes the authoritative particle drift-history sidecar lanes
 serialized in the restart schema; this is comparator coverage only and does not
 change the restart schema version. Mutation-sensitivity coverage in the DMO
 restart-equivalence test requires either lane to make exact comparison fail.
+
+
+## Write-time streaming verification (M48-08)
+
+Checkpoint publication no longer performs a complete restore merely to verify a file that was just written. The production write path uses `verifyRestartCheckpointHdf5()` to compare the current-schema HDF5 checkpoint against live restart truth with bounded hyperslab reads and a fixed 16 MiB/rank CHUÍ-owned workspace. Compact DMO metadata and uniform rung-zero scheduler values are obtained through logical accessors; the gravity force cache is serialized and verified through non-owning spans. `/distributed_gravity/state` is compared through streaming serialization rather than a complete readback string.
+
+This does **not** change actual resume semantics: `readRestartCheckpointHdf5()` remains the complete owning restoration path, including legacy-schema compatibility and restore-candidate MemoryGovernor admission. The restart file schema and integrity algorithms are unchanged.

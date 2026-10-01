@@ -36,16 +36,6 @@
 namespace cosmosim::workflows::internal {
 namespace {
 
-[[nodiscard]] std::uint64_t checkedOutputBytesMul(
-    std::uint64_t lhs,
-    std::uint64_t rhs,
-    std::string_view context) {
-  if (lhs != 0U && rhs > std::numeric_limits<std::uint64_t>::max() / lhs) {
-    throw std::overflow_error(std::string(context) + ": uint64 byte multiplication overflow");
-  }
-  return lhs * rhs;
-}
-
 [[nodiscard]] std::uint64_t simulationOwnedCapacityBytes(
     const core::SimulationState& state) {
   return core::memoryReportBaselineOwnedBytes(
@@ -58,28 +48,6 @@ namespace {
   // local-row index lane. Keep one MiB of governed headroom for vector capacity
   // and HDF5-owned call staging without charging a second simulation state.
   return 1U << 20U;
-}
-
-[[nodiscard]] std::uint64_t restartForceCachePeakBytes(
-    const core::SimulationState& state) {
-  // One exported cache remains live while RestartReadResult materializes its
-  // independent cache, so budget both physical copies at readback peak.
-  const std::uint64_t particle_rows =
-      static_cast<std::uint64_t>(state.particles.size());
-  const std::uint64_t cell_rows =
-      static_cast<std::uint64_t>(state.cells.size());
-  const std::uint64_t particle_copy = checkedOutputBytesMul(
-      particle_rows,
-      sizeof(std::uint64_t) + 3U * sizeof(double),
-      "restart particle force-cache staging");
-  const std::uint64_t cell_copy = checkedOutputBytesMul(
-      cell_rows,
-      sizeof(std::uint64_t) + 3U * sizeof(double),
-      "restart gas-cell force-cache staging");
-  const std::uint64_t one_cache = core::checkedMemoryBytesAdd(
-      particle_copy, cell_copy, "restart force-cache staging total");
-  return checkedOutputBytesMul(
-      one_cache, 2U, "restart force-cache export/readback coexistence");
 }
 
 [[nodiscard]] std::uint64_t incrementalOutputStagingBytes(
@@ -191,48 +159,6 @@ namespace {
   }
   return stochastic_state;
 }
-
-[[nodiscard]] bool stochasticStatesEquivalent(
-    io::StochasticPersistentState lhs,
-    io::StochasticPersistentState rhs) {
-  const auto less_by_name = [](
-      const io::StochasticModulePersistentState& a,
-      const io::StochasticModulePersistentState& b) {
-    return a.module_name < b.module_name;
-  };
-  std::sort(lhs.modules.begin(), lhs.modules.end(), less_by_name);
-  std::sort(rhs.modules.begin(), rhs.modules.end(), less_by_name);
-  if (lhs.modules.size() != rhs.modules.size()) {
-    return false;
-  }
-  for (std::size_t i = 0; i < lhs.modules.size(); ++i) {
-    const auto& a = lhs.modules[i];
-    const auto& b = rhs.modules[i];
-    if (a.module_name != b.module_name || a.schema_version != b.schema_version ||
-        a.rng_policy != b.rng_policy || a.random_seed != b.random_seed ||
-        a.rank_local_seed_offset != b.rank_local_seed_offset ||
-        a.last_committed_step_index != b.last_committed_step_index ||
-        a.deterministic_from_serialized_inputs != b.deterministic_from_serialized_inputs) {
-      return false;
-    }
-  }
-  return true;
-}
-
-[[nodiscard]] bool gravityForceCachesEquivalent(
-    const io::GravityForceCachePersistentState& lhs,
-    const io::GravityForceCachePersistentState& rhs) {
-  return lhs.valid == rhs.valid &&
-      lhs.particle_id == rhs.particle_id &&
-      lhs.gas_cell_id == rhs.gas_cell_id &&
-      lhs.particle_accel_x_comoving == rhs.particle_accel_x_comoving &&
-      lhs.particle_accel_y_comoving == rhs.particle_accel_y_comoving &&
-      lhs.particle_accel_z_comoving == rhs.particle_accel_z_comoving &&
-      lhs.cell_accel_x_comoving == rhs.cell_accel_x_comoving &&
-      lhs.cell_accel_y_comoving == rhs.cell_accel_y_comoving &&
-      lhs.cell_accel_z_comoving == rhs.cell_accel_z_comoving;
-}
-
 
 [[nodiscard]] std::array<std::uint64_t, 6> snapshotLocalPartCounts(
     const core::SimulationState& state) {
@@ -772,31 +698,9 @@ bool maybeWriteOutputs(
   }
 
   if (checkpoint_due) {
-    core::MemoryReservation restart_staging_reservation;
-    std::exception_ptr restart_staging_admission_failure;
-    try {
-      const std::uint64_t state_readback_bytes =
-          simulationOwnedCapacityBytes(state);
-      const std::uint64_t scheduler_bytes = core::checkedMemoryBytesAdd(
-          scheduler.ownedCapacityBytes(),
-          gas_cell_scheduler.ownedCapacityBytes(),
-          "restart scheduler readback staging");
-      std::uint64_t restart_staging_bytes = core::checkedMemoryBytesAdd(
-          state_readback_bytes,
-          scheduler_bytes,
-          "restart state/scheduler readback staging");
-      restart_staging_bytes = core::checkedMemoryBytesAdd(
-          restart_staging_bytes,
-          restartForceCachePeakBytes(state),
-          "restart readback plus force-cache staging");
-      restart_staging_reservation = reserveOutputStaging(
-          services, restart_staging_bytes, "io.restart.write_readback");
-    } catch (...) {
-      restart_staging_admission_failure = std::current_exception();
-    }
-    FailureCoordinator(services).rethrowCollectiveFailure(
-        restart_staging_admission_failure,
-        "restart output staging memory admission");
+    // M48-08: write-time verification owns only its bounded diagnostic
+    // workspace and reserves it inside verifyRestartCheckpointHdf5(). Do not
+    // reserve a second canonical state/scheduler/force-cache population here.
 
     core::IntegratorState restart_integrator_state = integrator_state;
     if (restart_resume_dt_time_code > 0.0) {
@@ -810,9 +714,9 @@ bool maybeWriteOutputs(
     restart_payload.integrator_state = &restart_integrator_state;
     restart_payload.scheduler = &scheduler;
     restart_payload.gas_cell_scheduler = &gas_cell_scheduler;
-    const io::GravityForceCachePersistentState gravity_force_cache =
-        gravity_state.exportRestartForceCache(state);
-    restart_payload.gravity_force_cache = &gravity_force_cache;
+    const io::GravityForceCachePersistentView gravity_force_cache =
+        gravity_state.restartForceCacheView(state);
+    restart_payload.gravity_force_cache_view = &gravity_force_cache;
     restart_payload.provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
     // Optional science cadence is explicitly best-effort and nonpersistent.
@@ -897,65 +801,33 @@ bool maybeWriteOutputs(
         restart_payload.distributed_gravity_state.long_range_restart_policy;
 
     report.restart_path = report.run_directory / formatIndexedRankedFileStem(config.output.restart_stem, integrator_state.step_index, gravity_state.runtimeTopology().world_size, gravity_state.runtimeTopology().world_rank);
-    std::optional<io::RestartReadResult> restart_read_result;
+    std::optional<io::RestartVerificationResult> restart_verification_result;
     std::exception_ptr restart_io_failure;
     try {
-      io::writeRestartCheckpointHdf5(report.restart_path, restart_payload,
+      io::writeRestartCheckpointHdf5(
+          report.restart_path, restart_payload,
           io::RestartWritePolicy{.memory_governor = services.memory_governor});
       report.restart_roundtrip_executed = true;
-      restart_read_result.emplace(io::readRestartCheckpointHdf5(
-          report.restart_path,
-          io::RestartReadPolicy{.memory_governor = services.memory_governor}));
+      restart_verification_result.emplace(io::verifyRestartCheckpointHdf5(
+          report.restart_path, restart_payload,
+          io::RestartVerificationPolicy{.memory_governor = services.memory_governor}));
     } catch (...) {
       restart_io_failure = std::current_exception();
     }
     FailureCoordinator(services).rethrowCollectiveFailure(
-        restart_io_failure, "restart checkpoint write/readback");
-    const io::RestartReadResult& restart_read = *restart_read_result;
+        restart_io_failure, "restart checkpoint write/streaming verification");
+    const io::RestartVerificationResult& restart_verification =
+        *restart_verification_result;
     const auto compatibility = parallel::evaluateDistributedRestartCompatibility(
-        restart_read.distributed_gravity_state,
+        restart_payload.distributed_gravity_state,
         gravity_state.runtimeTopology());
     const bool restart_rank_qualified_name =
         gravity_state.runtimeTopology().world_size == 1 ||
         report.restart_path.filename().string().find("_rank") != std::string::npos;
-    report.restart_roundtrip_ok = restartRuntimeStateExactlyEquivalent(
-        restart_read.state, state) &&
-        restart_read.integrator_state.pm_refresh_enabled == integrator_state.pm_refresh_enabled &&
-        gravityForceCachesEquivalent(restart_read.gravity_force_cache, gravity_force_cache) &&
-        restart_read.scheduler_state.current_tick == scheduler.currentTick() &&
-        restart_read.distributed_gravity_state.decomposition_epoch ==
-            restart_payload.distributed_gravity_state.decomposition_epoch &&
-        restart_read.distributed_gravity_state.owning_rank_by_item.size() == state.particles.size() &&
-        restart_read.distributed_gravity_state.owning_rank_by_item == restart_payload.distributed_gravity_state.owning_rank_by_item &&
-        restart_read.distributed_gravity_state.pm_slab_begin_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_begin_x_by_rank &&
-        restart_read.distributed_gravity_state.pm_slab_end_x_by_rank == restart_payload.distributed_gravity_state.pm_slab_end_x_by_rank &&
-        restart_read.distributed_gravity_state.gravity_kick_opportunity == restart_payload.distributed_gravity_state.gravity_kick_opportunity &&
-        restart_read.distributed_gravity_state.pm_update_cadence_steps == restart_payload.distributed_gravity_state.pm_update_cadence_steps &&
-        restart_read.distributed_gravity_state.long_range_field_version == restart_payload.distributed_gravity_state.long_range_field_version &&
-        restart_read.distributed_gravity_state.last_long_range_refresh_opportunity ==
-            restart_payload.distributed_gravity_state.last_long_range_refresh_opportunity &&
-        restart_read.distributed_gravity_state.long_range_field_built_step_index ==
-            restart_payload.distributed_gravity_state.long_range_field_built_step_index &&
-        std::abs(
-            restart_read.distributed_gravity_state.long_range_field_built_scale_factor -
-            restart_payload.distributed_gravity_state.long_range_field_built_scale_factor) <= 1.0e-12 &&
-        restart_read.distributed_gravity_state.long_range_restart_policy ==
-            restart_payload.distributed_gravity_state.long_range_restart_policy &&
-        restart_read.output_cadence_state.output_enabled == restart_payload.output_cadence_state.output_enabled &&
-        restart_read.output_cadence_state.write_restarts == restart_payload.output_cadence_state.write_restarts &&
-        restart_read.output_cadence_state.next_snapshot_step_index ==
-            restart_payload.output_cadence_state.next_snapshot_step_index &&
-        restart_read.output_cadence_state.snapshot_interval_time_code ==
-            restart_payload.output_cadence_state.snapshot_interval_time_code &&
-        restart_read.output_cadence_state.next_snapshot_time_code ==
-            restart_payload.output_cadence_state.next_snapshot_time_code &&
-        restart_read.output_cadence_state.snapshot_stem == restart_payload.output_cadence_state.snapshot_stem &&
-        restart_read.output_cadence_state.restart_stem == restart_payload.output_cadence_state.restart_stem &&
-        stochasticStatesEquivalent(restart_read.stochastic_state, restart_payload.stochastic_state) &&
-        restart_rank_qualified_name &&
-        compatibility.compatible();
+    report.restart_roundtrip_ok =
+        restart_verification.ok && restart_rank_qualified_name && compatibility.compatible();
     // A distributed checkpoint is only verified when every rank's local
-    // write/readback equivalence succeeds.  This collective belongs to the
+    // streaming field verification succeeds. This collective belongs to the
     // checkpoint verification boundary, not to console presentation.
     const std::uint64_t restart_verification_failed_ranks =
         FailureCoordinator(services).failedRankCount(!report.restart_roundtrip_ok);
@@ -967,7 +839,7 @@ bool maybeWriteOutputs(
         .step_index = integrator_state.step_index,
         .simulation_time_code = integrator_state.current_time_code,
         .scale_factor = integrator_state.current_scale_factor,
-        .message = "restart checkpoint written and verified",
+        .message = "restart checkpoint written and streaming-verified",
         .payload = {{"path", report.restart_path.string()},
                     {"restart_schema", io::restartSchema().name},
                     {"restart_schema_version", std::to_string(io::restartSchema().version)},
@@ -978,6 +850,11 @@ bool maybeWriteOutputs(
                     {"pm_gravity_kick_opportunity", std::to_string(integrator_state.pm_sync_state.gravityKickOpportunity())},
                     {"pm_field_version", std::to_string(integrator_state.pm_sync_state.fieldVersion())},
                     {"pm_long_range_field_valid", integrator_state.pm_long_range_field_valid ? "true" : "false"},
+                    {"restart_verification_mode", "streaming_field_exact"},
+                    {"verification_workspace_high_water_bytes", std::to_string(restart_verification.workspace_high_water_bytes)},
+                    {"verification_bytes_read", std::to_string(restart_verification.verified_bytes)},
+                    {"verification_dataset_count", std::to_string(restart_verification.verified_dataset_count)},
+                    {"verification_failed_field", restart_verification.failed_field},
                     {"output_next_snapshot_step_index", std::to_string(restart_payload.output_cadence_state.next_snapshot_step_index)},
                     {"output_next_snapshot_time_code", formatRuntimeDouble(
                         restart_payload.output_cadence_state.next_snapshot_time_code)},
@@ -990,34 +867,29 @@ bool maybeWriteOutputs(
             integrator_state.step_index, report.restart_path);
       } else {
         services.console_reporter->emitWarning(
-            "io.restart", "restart checkpoint write/readback equivalence verification failed");
+            "io.restart", "restart checkpoint streaming verification failed");
       }
     }
     profiler.recordEvent(core::RuntimeEvent{
-        .event_kind = "restart.read.complete",
+        .event_kind = "restart.verify.complete",
         .severity = report.restart_roundtrip_ok ? core::RuntimeEventSeverity::kInfo : core::RuntimeEventSeverity::kWarning,
         .subsystem = "io.restart",
-        .step_index = restart_read.integrator_state.step_index,
-        .simulation_time_code = restart_read.integrator_state.current_time_code,
-        .scale_factor = restart_read.integrator_state.current_scale_factor,
-        .message = "restart checkpoint read and validated",
+        .step_index = integrator_state.step_index,
+        .simulation_time_code = integrator_state.current_time_code,
+        .scale_factor = integrator_state.current_scale_factor,
+        .message = "restart checkpoint streaming verification complete",
         .payload = {{"path", report.restart_path.string()},
-                    {"restart_schema", restart_read.diagnostics.restart_schema_name},
-                    {"restart_schema_version", std::to_string(restart_read.diagnostics.restart_schema_version)},
-                    {"boundary_kind", restart_read.diagnostics.last_completed_boundary_kind},
-                    {"restart_safe", restart_read.diagnostics.restart_safe ? "true" : "false"},
-                    {"scheduler_current_tick", std::to_string(restart_read.diagnostics.scheduler_current_tick)},
-                    {"scheduler_max_bin", std::to_string(restart_read.diagnostics.scheduler_max_bin)},
-                    {"scheduler_element_count", std::to_string(restart_read.diagnostics.scheduler_element_count)},
-                    {"scheduler_active_count", std::to_string(restart_read.diagnostics.scheduler_active_count)},
-                    {"scheduler_pending_transition_count", std::to_string(restart_read.diagnostics.scheduler_pending_transition_count)},
-                    {"pm_cadence_steps", std::to_string(restart_read.diagnostics.pm_cadence_steps)},
-                    {"pm_gravity_kick_opportunity", std::to_string(restart_read.diagnostics.pm_gravity_kick_opportunity)},
-                    {"pm_field_version", std::to_string(restart_read.diagnostics.pm_field_version)},
-                    {"pm_long_range_field_valid", restart_read.diagnostics.pm_long_range_field_valid ? "true" : "false"},
-                    {"output_next_snapshot_step_index", std::to_string(restart_read.diagnostics.output_next_snapshot_step_index)},
-                    {"stochastic_module_count", std::to_string(restart_read.diagnostics.stochastic_module_count)},
-                    {"payload_hash_hex", restart_read.payload_hash_hex}},
+                    {"restart_schema", restart_verification.schema_name},
+                    {"restart_schema_version", std::to_string(restart_verification.schema_version)},
+                    {"boundary_kind", restart_verification.diagnostics.last_completed_boundary_kind},
+                    {"restart_safe", restart_verification.diagnostics.restart_safe ? "true" : "false"},
+                    {"scheduler_current_tick", std::to_string(restart_verification.diagnostics.scheduler_current_tick)},
+                    {"scheduler_max_bin", std::to_string(restart_verification.diagnostics.scheduler_max_bin)},
+                    {"scheduler_element_count", std::to_string(restart_verification.diagnostics.scheduler_element_count)},
+                    {"pm_field_version", std::to_string(restart_verification.diagnostics.pm_field_version)},
+                    {"payload_hash_hex", restart_verification.payload_sha256_hex},
+                    {"verification_workspace_high_water_bytes", std::to_string(restart_verification.workspace_high_water_bytes)},
+                    {"verification_bytes_read", std::to_string(restart_verification.verified_bytes)}},
     });
     output_flushed = true;
   }
@@ -1321,21 +1193,17 @@ RuntimeTaskMemoryEstimate OutputRestartRuntime::estimateMemory(
   std::uint64_t peak = m_pending_output.snapshot_due
       ? incrementalOutputStagingBytes(m_services, state_bytes) : 0U;
   if (m_pending_output.checkpoint_due) {
-    const std::uint64_t scheduler_bytes = core::checkedMemoryBytesAdd(
-        m_scheduler.ownedCapacityBytes(), m_gas_cell_scheduler.ownedCapacityBytes(),
-        "restart scheduler readback staging");
-    std::uint64_t restart_bytes = core::checkedMemoryBytesAdd(
-        state_bytes, scheduler_bytes, "restart state/scheduler readback staging");
-    restart_bytes = core::checkedMemoryBytesAdd(
-        restart_bytes, restartForceCachePeakBytes(state),
-        "restart readback plus force-cache staging");
-    peak = std::max(peak, incrementalOutputStagingBytes(m_services, restart_bytes));
+    constexpr std::uint64_t k_restart_verification_workspace_bytes = 16ULL * 1024ULL * 1024ULL;
+    // Write-time verification no longer constructs a second SimulationState,
+    // scheduler population, or owning gravity force-cache replica. The live
+    // state/cache are borrowed; application-owned verification staging is a
+    // fixed chunk workspace. Genuine restore-candidate memory remains modeled
+    // by restartReadCandidateStagingBytes() on the restore path.
+    peak = std::max(peak, incrementalOutputStagingBytes(
+        m_services, k_restart_verification_workspace_bytes));
   }
-  // Snapshot and restart staging have separate release boundaries. Do not sum
-  // their maxima. The writer's metadata, HDF5 internals, and reader-side
-  // capacity growth still need a complete owner model before overlap is legal.
   return {peak, false,
-          "snapshot/restart staging modeled; complete writer/readback metadata peak unavailable"};
+          "snapshot staging plus bounded 16-MiB/rank streaming restart verification workspace"};
 }
 
 void OutputRestartRuntime::execute(OutputRestartStageView& view) {

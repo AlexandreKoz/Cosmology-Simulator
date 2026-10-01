@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <memory_resource>
 #include <sstream>
@@ -173,12 +174,12 @@ void validateSchedulerPersistentStateForRestart(
 }
 
 void validateGravityForceCacheForRestart(
-    const GravityForceCachePersistentState& cache,
+    const GravityForceCachePersistentView& cache,
     const core::SimulationState& state,
     std::string_view context) {
-  const auto validate_triplet = [&](const std::vector<double>& x,
-                                    const std::vector<double>& y,
-                                    const std::vector<double>& z,
+  const auto validate_triplet = [&](std::span<const double> x,
+                                    std::span<const double> y,
+                                    std::span<const double> z,
                                     std::size_t expected,
                                     std::string_view label) {
     if (x.size() != y.size() || x.size() != z.size()) {
@@ -209,7 +210,7 @@ void validateGravityForceCacheForRestart(
       }
     }
   };
-  const auto validate_identity = [&](const std::vector<std::uint64_t>& cache_ids,
+  const auto validate_identity = [&](std::span<const std::uint64_t> cache_ids,
                                      std::span<const std::uint64_t> state_ids,
                                      std::string_view label) {
     if (!cache.valid && !cache_ids.empty()) {
@@ -2622,6 +2623,7 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   if (payload.persistent_state.simulation_state == nullptr || payload.integrator_state == nullptr || payload.scheduler == nullptr) {
     throw std::invalid_argument("restart payload must provide state, integrator_state, and scheduler");
   }
+  (void)memory_governor;  // Integrity traversal is allocation-free in the production payload path.
   validateContinuationMetadata(
       payload.normalized_config_text,
       payload.normalized_config_hash_hex,
@@ -2631,53 +2633,67 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   if (!payload.persistent_state.simulation_state->validateOwnershipInvariants()) {
     throw std::invalid_argument("restart payload state failed ownership invariant validation");
   }
-  const GravityForceCachePersistentState empty_force_cache{};
-  const GravityForceCachePersistentState& gravity_force_cache =
-      payload.gravity_force_cache != nullptr ? *payload.gravity_force_cache : empty_force_cache;
+  const GravityForceCachePersistentView empty_force_cache{};
+  const GravityForceCachePersistentView owning_force_cache_view =
+      payload.gravity_force_cache != nullptr
+          ? GravityForceCachePersistentView{
+                .valid = payload.gravity_force_cache->valid,
+                .particle_id = payload.gravity_force_cache->particle_id,
+                .gas_cell_id = payload.gravity_force_cache->gas_cell_id,
+                .particle_accel_x_comoving = payload.gravity_force_cache->particle_accel_x_comoving,
+                .particle_accel_y_comoving = payload.gravity_force_cache->particle_accel_y_comoving,
+                .particle_accel_z_comoving = payload.gravity_force_cache->particle_accel_z_comoving,
+                .cell_accel_x_comoving = payload.gravity_force_cache->cell_accel_x_comoving,
+                .cell_accel_y_comoving = payload.gravity_force_cache->cell_accel_y_comoving,
+                .cell_accel_z_comoving = payload.gravity_force_cache->cell_accel_z_comoving}
+          : empty_force_cache;
+  const GravityForceCachePersistentView& gravity_force_cache =
+      payload.gravity_force_cache_view != nullptr
+          ? *payload.gravity_force_cache_view
+          : owning_force_cache_view;
   if (include_gravity_force_cache) {
     validateGravityForceCacheForRestart(
         gravity_force_cache, *payload.persistent_state.simulation_state, "restart payload");
   }
   const bool uniform_particle_scheduler =
       payload.scheduler->representation() == core::SchedulerRepresentation::kUniformRungZero;
-  core::TimeBinPersistentState scheduler_state_for_validation;
-  scheduler_state_for_validation.current_tick = payload.scheduler->currentTick();
-  scheduler_state_for_validation.max_bin = payload.scheduler->maxBin();
-  if (!uniform_particle_scheduler) {
-    scheduler_state_for_validation = payload.scheduler->exportPersistentState();
+  const core::SimulationState& validation_state = *payload.persistent_state.simulation_state;
+  core::assertCanWriteCheckpointAtBoundary(*payload.integrator_state, payload.scheduler->currentTick());
+  if (payload.scheduler->elementCount() != validation_state.particles.size()) {
+    throw std::invalid_argument("restart payload particle scheduler extent does not match particle state");
   }
-  const core::TimeBinPersistentState gas_cell_scheduler_state_for_validation =
-      payload.gas_cell_scheduler != nullptr
-          ? payload.gas_cell_scheduler->exportPersistentState()
-          : legacyGasCellSchedulerStateFromMirrors(
-                *payload.persistent_state.simulation_state, scheduler_state_for_validation);
-  const std::vector<std::uint64_t> gas_cell_scheduler_ids =
-      gasCellIdsByDenseLocalRow(*payload.persistent_state.simulation_state, "restart payload");
-  core::assertCanWriteCheckpointAtBoundary(*payload.integrator_state, scheduler_state_for_validation.current_tick);
-  if (gas_cell_scheduler_state_for_validation.current_tick != scheduler_state_for_validation.current_tick) {
-    throw std::invalid_argument("restart payload particle and gas-cell schedulers must share current_tick");
+  if (uniform_particle_scheduler && payload.scheduler->maxBin() != 0U) {
+    throw std::invalid_argument("restart payload uniform particle scheduler rung contract is invalid");
   }
-  if (uniform_particle_scheduler) {
-    if (payload.scheduler->elementCount() != payload.persistent_state.simulation_state->particles.size() ||
-        payload.scheduler->maxBin() != 0U) {
-      throw std::invalid_argument("restart payload uniform particle scheduler extent/rung contract is invalid");
+  for (std::size_t i = 0; i < validation_state.particles.size(); ++i) {
+    if (validation_state.particleTimeBin(i) !=
+        payload.scheduler->binIndex(static_cast<std::uint32_t>(i))) {
+      throw std::invalid_argument(
+          "restart payload particle time_bin mirror is stale relative to scheduler authority");
     }
-    for (std::size_t i = 0; i < payload.persistent_state.simulation_state->particles.size(); ++i) {
-      if (payload.persistent_state.simulation_state->particleTimeBin(i) != payload.scheduler->binIndex(static_cast<std::uint32_t>(i))) {
-        throw std::invalid_argument("restart payload particle time_bin mirror is stale relative to uniform scheduler authority");
+  }
+  if (payload.gas_cell_scheduler != nullptr) {
+    if (payload.gas_cell_scheduler->currentTick() != payload.scheduler->currentTick()) {
+      throw std::invalid_argument("restart payload particle and gas-cell schedulers must share current_tick");
+    }
+    if (payload.gas_cell_scheduler->elementCount() != validation_state.cells.size()) {
+      throw std::invalid_argument("restart payload gas-cell scheduler extent does not match cell state");
+    }
+    validation_state.requireGasCellIdentityMapCoversDenseRows("restart payload");
+    for (std::uint32_t cell_index = 0; cell_index < validation_state.cells.size(); ++cell_index) {
+      if (validation_state.gas_cell_identity.findByLocalRow(cell_index) == nullptr) {
+        throw std::invalid_argument("restart payload gas-cell identity map is missing a dense row");
+      }
+      if (validation_state.cells.time_bin[cell_index] !=
+          payload.gas_cell_scheduler->binIndex(cell_index)) {
+        throw std::invalid_argument(
+            "restart payload cell time_bin mirror is stale relative to gas-cell scheduler authority");
       }
     }
-  } else {
-    validateRestartTimeBinMirrorsAgainstScheduler(
-        *payload.persistent_state.simulation_state,
-        scheduler_state_for_validation,
-        "restart payload");
+  } else if (validation_state.cells.size() != 0U) {
+    throw std::invalid_argument(
+        "restart payload with gas cells must provide the authoritative gas-cell scheduler");
   }
-  validateGasCellTimeBinMirrorsAgainstScheduler(
-      *payload.persistent_state.simulation_state,
-      gas_cell_scheduler_state_for_validation,
-      gas_cell_scheduler_ids,
-      "restart payload");
   if (payload.distributed_gravity_state.world_size <= 0) {
     throw std::invalid_argument("restart payload distributed_gravity_state.world_size must be positive");
   }
@@ -2799,29 +2815,22 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   append_any_vec(state.gas_cells.sound_speed_code);
   if (include_gas_identity_records) {
     append_string(std::string(k_gas_identity_row_policy));
-    const auto gas_identity_records = gasIdentityRecordsSortedByLocalRow(state.gas_cell_identity);
-    std::vector<std::uint64_t> identity_gas_cell_id;
-    std::vector<std::uint8_t> identity_has_parent_particle;
-    std::vector<std::uint64_t> identity_parent_particle_id;
-    std::vector<std::uint64_t> identity_owning_patch_id;
-    std::vector<std::uint32_t> identity_local_cell_row;
-    identity_gas_cell_id.reserve(gas_identity_records.size());
-    identity_has_parent_particle.reserve(gas_identity_records.size());
-    identity_parent_particle_id.reserve(gas_identity_records.size());
-    identity_owning_patch_id.reserve(gas_identity_records.size());
-    identity_local_cell_row.reserve(gas_identity_records.size());
-    for (const core::GasCellIdentityRecord& record : gas_identity_records) {
-      identity_gas_cell_id.push_back(record.gas_cell_id);
-      identity_has_parent_particle.push_back(record.parent_particle_id.has_value() ? 1U : 0U);
-      identity_parent_particle_id.push_back(record.parent_particle_id.value_or(0U));
-      identity_owning_patch_id.push_back(record.owning_patch_id);
-      identity_local_cell_row.push_back(record.local_cell_row);
-    }
-    append_any_vec(identity_gas_cell_id);
-    append_any_vec(identity_has_parent_particle);
-    append_any_vec(identity_parent_particle_id);
-    append_any_vec(identity_owning_patch_id);
-    append_any_vec(identity_local_cell_row);
+    state.requireGasCellIdentityMapCoversDenseRows("restart integrity");
+    const std::size_t identity_count = state.cells.size();
+    const auto identity_at = [&](std::size_t i) -> const core::GasCellIdentityRecord& {
+      const auto* record = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(i));
+      if (record == nullptr) throw std::logic_error("restart integrity gas identity row missing");
+      return *record;
+    };
+    append_logical_lane(identity_count, [&](std::size_t i) { return identity_at(i).gas_cell_id; });
+    append_logical_lane(identity_count, [&](std::size_t i) {
+      return static_cast<std::uint8_t>(identity_at(i).parent_particle_id.has_value() ? 1U : 0U);
+    });
+    append_logical_lane(identity_count, [&](std::size_t i) {
+      return identity_at(i).parent_particle_id.value_or(0U);
+    });
+    append_logical_lane(identity_count, [&](std::size_t i) { return identity_at(i).owning_patch_id; });
+    append_logical_lane(identity_count, [&](std::size_t i) { return identity_at(i).local_cell_row; });
   }
 
   append_any_vec(state.patches.patch_id);
@@ -2841,16 +2850,22 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
   append_any_vec(state.patches.cell_dim_z);
   append_any_vec(state.patches.owning_rank);
   if (include_pending_flux_registers) {
-    std::vector<core::PendingFluxRegisterRecord> pending_flux_records(
-        state.pending_flux_registers.records().begin(), state.pending_flux_registers.records().end());
-    std::sort(
-        pending_flux_records.begin(),
-        pending_flux_records.end(),
-        [](const core::PendingFluxRegisterRecord& lhs, const core::PendingFluxRegisterRecord& rhs) {
-          return lhs.register_key < rhs.register_key;
-        });
+    const auto pending_flux_records = state.pending_flux_registers.records();
     append_u64(static_cast<std::uint64_t>(pending_flux_records.size()));
-    for (const core::PendingFluxRegisterRecord& record : pending_flux_records) {
+    std::uint64_t previous_key = 0U;
+    bool have_previous = false;
+    for (std::size_t ordered = 0; ordered < pending_flux_records.size(); ++ordered) {
+      const core::PendingFluxRegisterRecord* selected = nullptr;
+      for (const core::PendingFluxRegisterRecord& candidate : pending_flux_records) {
+        if (have_previous && candidate.register_key <= previous_key) continue;
+        if (selected == nullptr || candidate.register_key < selected->register_key) selected = &candidate;
+      }
+      if (selected == nullptr) {
+        throw std::invalid_argument("restart integrity pending-flux register keys must be unique");
+      }
+      const core::PendingFluxRegisterRecord& record = *selected;
+      previous_key = record.register_key;
+      have_previous = true;
       append_u64(record.register_key);
       append_u64(record.coarse_patch_id);
       append_u64(record.coarse_gas_cell_id);
@@ -2876,50 +2891,33 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
       append_u64(std::bit_cast<std::uint64_t>(record.coarse_momentum_y_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.coarse_momentum_z_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.coarse_total_energy_flux_integral_code));
-      if (include_star_formation_v22) {
-        append_u64(std::bit_cast<std::uint64_t>(record.coarse_metal_mass_flux_integral_code));
-      }
+      if (include_star_formation_v22) append_u64(std::bit_cast<std::uint64_t>(record.coarse_metal_mass_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_mass_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_x_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_y_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_momentum_z_flux_integral_code));
       append_u64(std::bit_cast<std::uint64_t>(record.fine_total_energy_flux_integral_code));
-      if (include_star_formation_v22) {
-        append_u64(std::bit_cast<std::uint64_t>(record.fine_metal_mass_flux_integral_code));
-      }
+      if (include_star_formation_v22) append_u64(std::bit_cast<std::uint64_t>(record.fine_metal_mass_flux_integral_code));
     }
   }
+
   if (include_temporal_boundary_history) {
-    // Sort non-owning indexes instead of copying the entire historical state.
-    // The outer index and largest per-patch index coexist in one bounded arena.
     const auto temporal_source = state.amr_temporal_boundary_history.records();
-    std::size_t max_history_cells = 0U;
-    for (const auto& record : temporal_source) {
-      max_history_cells = std::max(max_history_cells, record.cells.size());
-    }
-    const std::size_t temporal_index_bytes = core::checkedSizeAdd(
-        core::checkedSizeMultiply(temporal_source.size(), sizeof(const core::AmrTemporalBoundaryHistoryRecord*),
-                                  "restart temporal record index"),
-        core::checkedSizeMultiply(max_history_cells, sizeof(const core::AmrTemporalBoundaryHistoryCellRecord*),
-                                  "restart temporal cell index"),
-        "restart temporal index coexistence");
-    core::GovernedScratchArena temporal_index_arena(
-        memory_governor, core::MemoryClass::kScratchArena,
-        core::checkedMemoryBytesAdd(static_cast<std::uint64_t>(temporal_index_bytes), 256U,
-                                    "restart temporal index alignment"),
-        "io.restart.temporal_integrity_index");
-    std::pmr::vector<const core::AmrTemporalBoundaryHistoryRecord*> temporal_records(
-        temporal_index_arena.resource());
-    temporal_records.reserve(temporal_source.size());
-    for (const auto& record : temporal_source) temporal_records.push_back(&record);
-    std::sort(temporal_records.begin(), temporal_records.end(),
-        [](const auto* lhs, const auto* rhs) { return lhs->patch_id < rhs->patch_id; });
-    std::pmr::vector<const core::AmrTemporalBoundaryHistoryCellRecord*> cells(
-        temporal_index_arena.resource());
-    cells.reserve(max_history_cells);
-    append_u64(static_cast<std::uint64_t>(temporal_records.size()));
-    for (const auto* record_ptr : temporal_records) {
-      const auto& record = *record_ptr;
+    append_u64(static_cast<std::uint64_t>(temporal_source.size()));
+    std::uint64_t previous_patch_id = 0U;
+    bool have_previous_patch = false;
+    for (std::size_t ordered = 0; ordered < temporal_source.size(); ++ordered) {
+      const core::AmrTemporalBoundaryHistoryRecord* selected = nullptr;
+      for (const auto& candidate : temporal_source) {
+        if (have_previous_patch && candidate.patch_id <= previous_patch_id) continue;
+        if (selected == nullptr || candidate.patch_id < selected->patch_id) selected = &candidate;
+      }
+      if (selected == nullptr) {
+        throw std::invalid_argument("restart integrity temporal-history patch IDs must be unique");
+      }
+      const auto& record = *selected;
+      previous_patch_id = record.patch_id;
+      have_previous_patch = true;
       append_u64(record.patch_id);
       append_u64(record.patch_level);
       append_u64(record.patch_geometry_fingerprint);
@@ -2927,16 +2925,30 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
       append_u64(std::bit_cast<std::uint64_t>(record.interval_start_code));
       append_u64(std::bit_cast<std::uint64_t>(record.interval_end_code));
       append_u64(record.end_state_valid ? 1U : 0U);
-      cells.clear();
-      for (const auto& cell : record.cells) cells.push_back(&cell);
-      std::sort(cells.begin(), cells.end(), [](const auto* lhs, const auto* rhs) {
-        return lhs->patch_local_cell == rhs->patch_local_cell
-            ? lhs->gas_cell_id < rhs->gas_cell_id
-            : lhs->patch_local_cell < rhs->patch_local_cell;
-      });
-      append_u64(static_cast<std::uint64_t>(cells.size()));
-      for (const auto* cell_ptr : cells) {
-        const auto& cell = *cell_ptr;
+      append_u64(static_cast<std::uint64_t>(record.cells.size()));
+      std::uint64_t previous_local = 0U;
+      std::uint64_t previous_id = 0U;
+      bool have_previous_cell = false;
+      for (std::size_t cell_ordered = 0; cell_ordered < record.cells.size(); ++cell_ordered) {
+        const core::AmrTemporalBoundaryHistoryCellRecord* selected_cell = nullptr;
+        for (const auto& candidate : record.cells) {
+          const std::uint64_t local = static_cast<std::uint64_t>(candidate.patch_local_cell);
+          const bool after_previous = !have_previous_cell || local > previous_local ||
+              (local == previous_local && candidate.gas_cell_id > previous_id);
+          if (!after_previous) continue;
+          if (selected_cell == nullptr || local < static_cast<std::uint64_t>(selected_cell->patch_local_cell) ||
+              (local == static_cast<std::uint64_t>(selected_cell->patch_local_cell) &&
+               candidate.gas_cell_id < selected_cell->gas_cell_id)) {
+            selected_cell = &candidate;
+          }
+        }
+        if (selected_cell == nullptr) {
+          throw std::invalid_argument("restart integrity temporal-history cell keys must be unique");
+        }
+        const auto& cell = *selected_cell;
+        previous_local = static_cast<std::uint64_t>(cell.patch_local_cell);
+        previous_id = cell.gas_cell_id;
+        have_previous_cell = true;
         append_u64(cell.gas_cell_id);
         append_u64(static_cast<std::uint64_t>(cell.patch_local_cell));
         append_u64(std::bit_cast<std::uint64_t>(cell.start_mass_density_comoving));
@@ -2944,20 +2956,17 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
         append_u64(std::bit_cast<std::uint64_t>(cell.start_momentum_density_y_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.start_momentum_density_z_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.start_total_energy_density_comoving));
-        if (include_star_formation_v22) {
-          append_u64(std::bit_cast<std::uint64_t>(cell.start_metal_mass_density_comoving));
-        }
+        if (include_star_formation_v22) append_u64(std::bit_cast<std::uint64_t>(cell.start_metal_mass_density_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_mass_density_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_x_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_y_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_momentum_density_z_comoving));
         append_u64(std::bit_cast<std::uint64_t>(cell.end_total_energy_density_comoving));
-        if (include_star_formation_v22) {
-          append_u64(std::bit_cast<std::uint64_t>(cell.end_metal_mass_density_comoving));
-        }
+        if (include_star_formation_v22) append_u64(std::bit_cast<std::uint64_t>(cell.end_metal_mass_density_comoving));
       }
     }
   }
+
   append_any_vec(state.star_particles.particle_index);
   append_any_vec(state.star_particles.formation_scale_factor);
   append_any_vec(state.star_particles.birth_mass_code);
@@ -3070,39 +3079,61 @@ RestartIntegrityDigests restartPayloadIntegrityDigestsImpl(
     append_any_vec(gravity_force_cache.cell_accel_z_comoving);
   }
 
-  const core::TimeBinPersistentState& scheduler_state = scheduler_state_for_validation;
   append_u64(payload.scheduler->currentTick());
   append_u64(static_cast<std::uint64_t>(payload.scheduler->maxBin()));
-  if (uniform_particle_scheduler) {
-    const std::size_t scheduler_count = payload.scheduler->elementCount();
-    append_logical_lane(scheduler_count, [&](std::size_t i) {
-      return payload.scheduler->binIndex(static_cast<std::uint32_t>(i));
-    });
-    append_logical_lane(scheduler_count, [&](std::size_t i) {
-      return payload.scheduler->nextActivationTick(static_cast<std::uint32_t>(i));
-    });
-    append_logical_lane(scheduler_count, [&](std::size_t i) {
-      return static_cast<std::uint8_t>(payload.scheduler->isElementActive(static_cast<std::uint32_t>(i)) ? 1U : 0U);
-    });
-    append_logical_lane(scheduler_count, [&](std::size_t i) {
-      return payload.scheduler->pendingBinIndex(static_cast<std::uint32_t>(i));
-    });
-  } else {
-    append_any_vec(scheduler_state.bin_index);
-    append_any_vec(scheduler_state.next_activation_tick);
-    append_any_vec(scheduler_state.active_flag);
-    append_any_vec(scheduler_state.pending_bin_index);
-  }
+  const std::size_t scheduler_count = payload.scheduler->elementCount();
+  append_logical_lane(scheduler_count, [&](std::size_t i) {
+    return payload.scheduler->binIndex(static_cast<std::uint32_t>(i));
+  });
+  append_logical_lane(scheduler_count, [&](std::size_t i) {
+    return payload.scheduler->nextActivationTick(static_cast<std::uint32_t>(i));
+  });
+  append_logical_lane(scheduler_count, [&](std::size_t i) {
+    return static_cast<std::uint8_t>(
+        payload.scheduler->isElementActive(static_cast<std::uint32_t>(i)) ? 1U : 0U);
+  });
+  append_logical_lane(scheduler_count, [&](std::size_t i) {
+    return payload.scheduler->pendingBinIndex(static_cast<std::uint32_t>(i));
+  });
   if (include_gas_cell_scheduler) {
     append_string(std::string(k_gas_cell_scheduler_identity_key));
-    const core::TimeBinPersistentState& gas_scheduler_state = gas_cell_scheduler_state_for_validation;
-    append_u64(gas_scheduler_state.current_tick);
-    append_u64(static_cast<std::uint64_t>(gas_scheduler_state.max_bin));
-    append_any_vec(gas_cell_scheduler_ids);
-    append_any_vec(gas_scheduler_state.bin_index);
-    append_any_vec(gas_scheduler_state.next_activation_tick);
-    append_any_vec(gas_scheduler_state.active_flag);
-    append_any_vec(gas_scheduler_state.pending_bin_index);
+    const std::size_t gas_scheduler_count = validation_state.cells.size();
+    const std::uint64_t gas_current_tick =
+        payload.gas_cell_scheduler != nullptr ? payload.gas_cell_scheduler->currentTick()
+                                              : payload.scheduler->currentTick();
+    const std::uint8_t gas_max_bin =
+        payload.gas_cell_scheduler != nullptr ? payload.gas_cell_scheduler->maxBin()
+                                              : payload.scheduler->maxBin();
+    append_u64(gas_current_tick);
+    append_u64(static_cast<std::uint64_t>(gas_max_bin));
+    append_logical_lane(gas_scheduler_count, [&](std::size_t i) {
+      const auto* identity = validation_state.gas_cell_identity.findByLocalRow(
+          static_cast<std::uint32_t>(i));
+      if (identity == nullptr) throw std::logic_error("gas scheduler integrity identity row missing");
+      return identity->gas_cell_id;
+    });
+    append_logical_lane(gas_scheduler_count, [&](std::size_t i) {
+      return payload.gas_cell_scheduler != nullptr
+          ? payload.gas_cell_scheduler->binIndex(static_cast<std::uint32_t>(i))
+          : validation_state.cells.time_bin[i];
+    });
+    append_logical_lane(gas_scheduler_count, [&](std::size_t i) {
+      return payload.gas_cell_scheduler != nullptr
+          ? payload.gas_cell_scheduler->nextActivationTick(static_cast<std::uint32_t>(i))
+          : gas_current_tick;
+    });
+    append_logical_lane(gas_scheduler_count, [&](std::size_t i) {
+      return static_cast<std::uint8_t>(
+          payload.gas_cell_scheduler != nullptr &&
+                  payload.gas_cell_scheduler->isElementActive(static_cast<std::uint32_t>(i))
+              ? 1U
+              : 0U);
+    });
+    append_logical_lane(gas_scheduler_count, [&](std::size_t i) {
+      return payload.gas_cell_scheduler != nullptr
+          ? payload.gas_cell_scheduler->pendingBinIndex(static_cast<std::uint32_t>(i))
+          : validation_state.cells.time_bin[i];
+    });
   }
   append_u64(payload.output_cadence_state.output_enabled ? 1ull : 0ull);
   append_u64(payload.output_cadence_state.write_restarts ? 1ull : 0ull);
@@ -3256,9 +3287,24 @@ void writeRestartCheckpointHdf5(
       payload.output_cadence_state, *payload.integrator_state, "restart writer");
   validateStochasticStateForRestart(
       payload.stochastic_state, *payload.integrator_state, "restart writer");
-  const GravityForceCachePersistentState empty_force_cache{};
-  const GravityForceCachePersistentState& gravity_force_cache =
-      payload.gravity_force_cache != nullptr ? *payload.gravity_force_cache : empty_force_cache;
+  const GravityForceCachePersistentView empty_force_cache{};
+  const GravityForceCachePersistentView owning_force_cache_view =
+      payload.gravity_force_cache != nullptr
+          ? GravityForceCachePersistentView{
+                .valid = payload.gravity_force_cache->valid,
+                .particle_id = payload.gravity_force_cache->particle_id,
+                .gas_cell_id = payload.gravity_force_cache->gas_cell_id,
+                .particle_accel_x_comoving = payload.gravity_force_cache->particle_accel_x_comoving,
+                .particle_accel_y_comoving = payload.gravity_force_cache->particle_accel_y_comoving,
+                .particle_accel_z_comoving = payload.gravity_force_cache->particle_accel_z_comoving,
+                .cell_accel_x_comoving = payload.gravity_force_cache->cell_accel_x_comoving,
+                .cell_accel_y_comoving = payload.gravity_force_cache->cell_accel_y_comoving,
+                .cell_accel_z_comoving = payload.gravity_force_cache->cell_accel_z_comoving}
+          : empty_force_cache;
+  const GravityForceCachePersistentView& gravity_force_cache =
+      payload.gravity_force_cache_view != nullptr
+          ? *payload.gravity_force_cache_view
+          : owning_force_cache_view;
   validateGravityForceCacheForRestart(
       gravity_force_cache, *payload.persistent_state.simulation_state, "restart writer");
 
@@ -3535,6 +3581,628 @@ std::uint64_t restartReadCandidateStagingBytes(
 }
 #endif
 
+
+namespace {
+
+#if COSMOSIM_ENABLE_HDF5
+template <typename T, typename Getter>
+void verifyDataset1dChunked(
+    hid_t file,
+    std::string_view path,
+    std::size_t expected_count,
+    Getter getter,
+    hid_t memory_type,
+    std::uint64_t workspace_limit_bytes,
+    RestartVerificationResult& result) {
+  Hdf5Handle dataset(H5Dopen2(file, std::string(path).c_str(), H5P_DEFAULT));
+  if (!dataset.valid()) {
+    throw std::runtime_error("restart verification missing dataset: " + std::string(path));
+  }
+  Hdf5Handle file_space(H5Dget_space(dataset.get()));
+  if (!file_space.valid() || H5Sget_simple_extent_ndims(file_space.get()) != 1) {
+    throw std::runtime_error("restart verification expected 1D dataset: " + std::string(path));
+  }
+  hsize_t dims[1] = {0};
+  if (H5Sget_simple_extent_dims(file_space.get(), dims, nullptr) != 1 ||
+      dims[0] != static_cast<hsize_t>(expected_count)) {
+    throw std::runtime_error("restart verification extent mismatch: " + std::string(path));
+  }
+  const std::size_t capacity = std::max<std::size_t>(
+      1U, static_cast<std::size_t>(workspace_limit_bytes / std::max<std::size_t>(sizeof(T), 1U)));
+  std::vector<T> chunk(std::min(expected_count, capacity));
+  result.workspace_high_water_bytes = std::max<std::uint64_t>(
+      result.workspace_high_water_bytes,
+      static_cast<std::uint64_t>(chunk.capacity()) * sizeof(T));
+  for (std::size_t offset = 0; offset < expected_count;) {
+    const std::size_t count = std::min(chunk.size(), expected_count - offset);
+    hsize_t start[1] = {static_cast<hsize_t>(offset)};
+    hsize_t extent[1] = {static_cast<hsize_t>(count)};
+    Hdf5Handle selected_space(H5Dget_space(dataset.get()));
+    Hdf5Handle memory_space(H5Screate_simple(1, extent, nullptr));
+    if (!selected_space.valid() || !memory_space.valid() ||
+        H5Sselect_hyperslab(selected_space.get(), H5S_SELECT_SET, start, nullptr, extent, nullptr) < 0 ||
+        H5Dread(dataset.get(), memory_type, memory_space.get(), selected_space.get(), H5P_DEFAULT, chunk.data()) < 0) {
+      throw std::runtime_error("restart verification failed reading dataset: " + std::string(path));
+    }
+    for (std::size_t local = 0; local < count; ++local) {
+      const T observed = chunk[local];
+      const T expected = static_cast<T>(getter(offset + local));
+      bool equal = false;
+      if constexpr (std::is_floating_point_v<T>) {
+        equal = std::bit_cast<std::uint64_t>(static_cast<double>(observed)) ==
+            std::bit_cast<std::uint64_t>(static_cast<double>(expected));
+      } else {
+        equal = observed == expected;
+      }
+      if (!equal) {
+        result.failed_field = std::string(path);
+        result.detail = "first mismatch at row " + std::to_string(offset + local);
+        throw std::runtime_error(
+            "restart verification mismatch: " + std::string(path) +
+            " row=" + std::to_string(offset + local));
+      }
+    }
+    result.verified_bytes += static_cast<std::uint64_t>(count) * sizeof(T);
+    offset += count;
+  }
+  ++result.verified_dataset_count;
+}
+
+template <typename T>
+void verifyDatasetSpanChunked(
+    hid_t file, std::string_view path, std::span<const T> expected, hid_t memory_type,
+    std::uint64_t workspace_limit_bytes, RestartVerificationResult& result) {
+  verifyDataset1dChunked<T>(
+      file, path, expected.size(),
+      [&](std::size_t i) { return expected[i]; }, memory_type,
+      workspace_limit_bytes, result);
+}
+
+void verifyStringDatasetChunked(
+    hid_t file, std::string_view path, std::string_view expected,
+    std::uint64_t workspace_limit_bytes, RestartVerificationResult& result) {
+  verifyDataset1dChunked<std::uint8_t>(
+      file, path, expected.size(),
+      [&](std::size_t i) { return static_cast<std::uint8_t>(expected[i]); }, H5T_NATIVE_UINT8,
+      workspace_limit_bytes, result);
+}
+
+void verifyDistributedRestartStateChunked(
+    hid_t file,
+    const parallel::DistributedRestartState& expected,
+    std::uint64_t workspace_limit_bytes,
+    RestartVerificationResult& result) {
+  Hdf5Handle dataset(H5Dopen2(file, "/distributed_gravity/state", H5P_DEFAULT));
+  if (!dataset.valid()) throw std::runtime_error("restart verification missing /distributed_gravity/state");
+  Hdf5Handle space(H5Dget_space(dataset.get()));
+  hsize_t dims[1] = {0};
+  if (!space.valid() || H5Sget_simple_extent_ndims(space.get()) != 1 ||
+      H5Sget_simple_extent_dims(space.get(), dims, nullptr) != 1 ||
+      dims[0] != static_cast<hsize_t>(expected.serializedSizeBytes())) {
+    throw std::runtime_error("restart verification distributed state extent mismatch");
+  }
+  const std::size_t capacity = std::max<std::size_t>(1U, static_cast<std::size_t>(workspace_limit_bytes));
+  std::vector<char> chunk(std::min<std::size_t>(capacity, expected.serializedSizeBytes()));
+  result.workspace_high_water_bytes = std::max<std::uint64_t>(result.workspace_high_water_bytes, chunk.capacity());
+  class ComparingStreambuf final : public std::streambuf {
+   public:
+    ComparingStreambuf(hid_t dataset, std::vector<char>& chunk, RestartVerificationResult& result)
+        : m_dataset(dataset), m_chunk(chunk), m_result(result) {}
+    void finish(std::size_t expected_bytes) const {
+      if (m_offset != expected_bytes) throw std::runtime_error("distributed restart serialization length changed during verification");
+    }
+   protected:
+    std::streamsize xsputn(const char* bytes, std::streamsize count) override {
+      if (count < 0) throw std::length_error("negative distributed restart verification write");
+      std::size_t remaining = static_cast<std::size_t>(count);
+      const char* expected_bytes = bytes;
+      while (remaining != 0U) {
+        const std::size_t n = std::min(remaining, m_chunk.size());
+        hsize_t start[1] = {static_cast<hsize_t>(m_offset)};
+        hsize_t extent[1] = {static_cast<hsize_t>(n)};
+        Hdf5Handle file_space(H5Dget_space(m_dataset));
+        Hdf5Handle memory_space(H5Screate_simple(1, extent, nullptr));
+        if (!file_space.valid() || !memory_space.valid() ||
+            H5Sselect_hyperslab(file_space.get(), H5S_SELECT_SET, start, nullptr, extent, nullptr) < 0 ||
+            H5Dread(m_dataset, H5T_NATIVE_UINT8, memory_space.get(), file_space.get(), H5P_DEFAULT, m_chunk.data()) < 0) {
+          throw std::runtime_error("failed streaming /distributed_gravity/state");
+        }
+        if (std::memcmp(m_chunk.data(), expected_bytes, n) != 0) {
+          m_result.failed_field = "/distributed_gravity/state";
+          m_result.detail = "serialized byte mismatch near offset " + std::to_string(m_offset);
+          throw std::runtime_error("restart verification distributed state byte mismatch");
+        }
+        m_offset += n;
+        expected_bytes += n;
+        remaining -= n;
+        m_result.verified_bytes += n;
+      }
+      return count;
+    }
+    int_type overflow(int_type ch) override {
+      if (!traits_type::eq_int_type(ch, traits_type::eof())) {
+        const char value = traits_type::to_char_type(ch);
+        (void)xsputn(&value, 1);
+      }
+      return traits_type::not_eof(ch);
+    }
+   private:
+    hid_t m_dataset;
+    std::vector<char>& m_chunk;
+    RestartVerificationResult& m_result;
+    std::size_t m_offset = 0U;
+  };
+  ComparingStreambuf buffer(dataset.get(), chunk, result);
+  std::ostream stream(&buffer);
+  stream.exceptions(std::ios::badbit | std::ios::failbit);
+  expected.serializeTo(stream);
+  buffer.finish(expected.serializedSizeBytes());
+  ++result.verified_dataset_count;
+}
+#endif
+
+}  // namespace
+
+RestartVerificationResult verifyRestartCheckpointHdf5(
+    const std::filesystem::path& input_path,
+    const RestartWritePayload& expected,
+    const RestartVerificationPolicy& policy) {
+  RestartVerificationResult result;
+#if !COSMOSIM_ENABLE_HDF5
+  (void)input_path; (void)expected; (void)policy;
+  throw std::runtime_error("restart checkpoint verification requires COSMOSIM_ENABLE_HDF5=ON");
+#else
+  if (expected.persistent_state.simulation_state == nullptr || expected.integrator_state == nullptr ||
+      expected.scheduler == nullptr) {
+    throw std::invalid_argument("restart verifier requires state, integrator, and scheduler authority");
+  }
+  if (policy.workspace_limit_bytes < sizeof(std::uint64_t)) {
+    throw std::invalid_argument("restart verification workspace limit is too small");
+  }
+  core::MemoryReservation workspace_reservation;
+  if (policy.memory_governor != nullptr) {
+    workspace_reservation = policy.memory_governor->reserve(
+        core::MemoryClass::kDiagnostic, policy.workspace_limit_bytes, "io.restart.streaming_verify");
+    workspace_reservation.commit();
+  }
+  try {
+    Hdf5Handle file(H5Fopen(input_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT));
+    if (!file.valid()) throw std::runtime_error("failed to open restart checkpoint for streaming verification: " + input_path.string());
+    validateFileKindAttribute(file.get(), sharedIoContractNames().restart_checkpoint_file_kind, "restart verifier");
+    result.schema_name = readScalarStringAttribute(file.get(), "restart_schema_name");
+    result.schema_version = readScalarU32Attribute(file.get(), "restart_schema_version");
+    if (result.schema_name != restartSchema().name || result.schema_version != restartSchema().version) {
+      throw std::runtime_error("write-time restart verifier requires the current restart schema");
+    }
+    validateRestartCheckpointSchema(file.get(), result.schema_version);
+    const auto require_u32_attr = [&](hid_t loc, std::string_view key, std::uint32_t expected_value, std::string_view field) {
+      if (readScalarU32Attribute(loc, key) != expected_value) { result.failed_field = std::string(field); throw std::runtime_error("restart verification attribute mismatch: " + std::string(field)); }
+    };
+    const auto require_u64_attr = [&](hid_t loc, std::string_view key, std::uint64_t expected_value, std::string_view field) {
+      if (readScalarU64Attribute(loc, key) != expected_value) { result.failed_field = std::string(field); throw std::runtime_error("restart verification attribute mismatch: " + std::string(field)); }
+    };
+    const auto require_f64_attr = [&](hid_t loc, std::string_view key, double expected_value, std::string_view field) {
+      if (std::bit_cast<std::uint64_t>(readScalarF64Attribute(loc, key)) != std::bit_cast<std::uint64_t>(expected_value)) { result.failed_field = std::string(field); throw std::runtime_error("restart verification attribute mismatch: " + std::string(field)); }
+    };
+    const auto require_string_attr = [&](hid_t loc, std::string_view key, const std::string& expected_value, std::string_view field) {
+      if (readScalarStringAttribute(loc, key) != expected_value) { result.failed_field = std::string(field); throw std::runtime_error("restart verification attribute mismatch: " + std::string(field)); }
+    };
+
+    require_string_attr(file.get(), "normalized_config_hash_hex", expected.normalized_config_hash_hex, "/@normalized_config_hash_hex");
+
+    Hdf5Handle integrator_group(openRequiredGroup(file.get(), "/integrator"));
+    const auto& integ = *expected.integrator_state;
+    require_f64_attr(integrator_group.get(), "current_time_code", integ.current_time_code, "/integrator/@current_time_code");
+    require_f64_attr(integrator_group.get(), "current_scale_factor", integ.current_scale_factor, "/integrator/@current_scale_factor");
+    require_f64_attr(integrator_group.get(), "current_redshift", integ.current_redshift, "/integrator/@current_redshift");
+    require_f64_attr(integrator_group.get(), "current_hubble_rate_code", integ.current_hubble_rate_code, "/integrator/@current_hubble_rate_code");
+    require_f64_attr(integrator_group.get(), "time_si_per_code", integ.time_si_per_code, "/integrator/@time_si_per_code");
+    require_f64_attr(integrator_group.get(), "dt_time_code", integ.dt_time_code, "/integrator/@dt_time_code");
+    require_f64_attr(integrator_group.get(), "last_drift_factor_code", integ.last_drift_factor_code, "/integrator/@last_drift_factor_code");
+    require_f64_attr(integrator_group.get(), "last_first_kick_factor_code", integ.last_first_kick_factor_code, "/integrator/@last_first_kick_factor_code");
+    require_f64_attr(integrator_group.get(), "last_second_kick_factor_code", integ.last_second_kick_factor_code, "/integrator/@last_second_kick_factor_code");
+    require_f64_attr(integrator_group.get(), "last_first_hubble_drag_factor", integ.last_first_hubble_drag_factor, "/integrator/@last_first_hubble_drag_factor");
+    require_f64_attr(integrator_group.get(), "last_second_hubble_drag_factor", integ.last_second_hubble_drag_factor, "/integrator/@last_second_hubble_drag_factor");
+    require_u64_attr(integrator_group.get(), "step_index", integ.step_index, "/integrator/@step_index");
+    require_u32_attr(integrator_group.get(), "scheme", static_cast<std::uint32_t>(integ.scheme), "/integrator/@scheme");
+    require_u32_attr(integrator_group.get(), "current_boundary_kind", static_cast<std::uint32_t>(integ.current_boundary_kind), "/integrator/@current_boundary_kind");
+    require_u32_attr(integrator_group.get(), "last_completed_boundary_kind", static_cast<std::uint32_t>(integ.last_completed_boundary_kind), "/integrator/@last_completed_boundary_kind");
+    require_u32_attr(integrator_group.get(), "inside_kdk_step", integ.inside_kdk_step ? 1U : 0U, "/integrator/@inside_kdk_step");
+    require_u32_attr(integrator_group.get(), "last_completed_restart_safe", integ.last_completed_restart_safe ? 1U : 0U, "/integrator/@last_completed_restart_safe");
+    require_u32_attr(integrator_group.get(), "time_bins_hierarchical", integ.time_bins.hierarchical_enabled ? 1U : 0U, "/integrator/@time_bins_hierarchical");
+    require_u32_attr(integrator_group.get(), "time_bins_active_bin", integ.time_bins.active_bin, "/integrator/@time_bins_active_bin");
+    require_u32_attr(integrator_group.get(), "time_bins_max_bin", integ.time_bins.max_bin, "/integrator/@time_bins_max_bin");
+    require_u32_attr(integrator_group.get(), "pm_long_range_field_valid", integ.pm_long_range_field_valid ? 1U : 0U, "/integrator/@pm_long_range_field_valid");
+    require_u32_attr(integrator_group.get(), "pm_refresh_enabled", integ.pm_refresh_enabled ? 1U : 0U, "/integrator/@pm_refresh_enabled");
+    const core::PmSynchronizationPersistentState pm_sync = integ.pm_sync_state.exportPersistentState();
+    require_u64_attr(integrator_group.get(), "pm_cadence_steps", pm_sync.cadence_steps, "/integrator/@pm_cadence_steps");
+    require_u64_attr(integrator_group.get(), "pm_gravity_kick_opportunity", pm_sync.gravity_kick_opportunity, "/integrator/@pm_gravity_kick_opportunity");
+    require_u64_attr(integrator_group.get(), "pm_last_refresh_opportunity", pm_sync.last_refresh_opportunity, "/integrator/@pm_last_refresh_opportunity");
+    require_u64_attr(integrator_group.get(), "pm_field_version", pm_sync.field_version, "/integrator/@pm_field_version");
+    require_u64_attr(integrator_group.get(), "pm_last_refresh_step_index", pm_sync.last_refresh_step_index, "/integrator/@pm_last_refresh_step_index");
+    require_f64_attr(integrator_group.get(), "pm_last_refresh_scale_factor", pm_sync.last_refresh_scale_factor, "/integrator/@pm_last_refresh_scale_factor");
+    require_u32_attr(integrator_group.get(), "pm_refresh_commit_pending", pm_sync.refresh_commit_pending ? 1U : 0U, "/integrator/@pm_refresh_commit_pending");
+    require_u64_attr(integrator_group.get(), "pm_pending_refresh_opportunity", pm_sync.pending_refresh_opportunity, "/integrator/@pm_pending_refresh_opportunity");
+    require_u64_attr(integrator_group.get(), "pm_pending_refresh_field_version", pm_sync.pending_refresh_field_version, "/integrator/@pm_pending_refresh_field_version");
+
+    Hdf5Handle output_group(openRequiredGroup(file.get(), "/output_cadence"));
+    const auto& out = expected.output_cadence_state;
+    require_u32_attr(output_group.get(), "output_enabled", out.output_enabled ? 1U : 0U, "/output_cadence/@output_enabled");
+    require_u32_attr(output_group.get(), "write_restarts", out.write_restarts ? 1U : 0U, "/output_cadence/@write_restarts");
+    require_u32_attr(output_group.get(), "snapshot_due", out.snapshot_due ? 1U : 0U, "/output_cadence/@snapshot_due");
+    require_u32_attr(output_group.get(), "checkpoint_due", out.checkpoint_due ? 1U : 0U, "/output_cadence/@checkpoint_due");
+    require_u64_attr(output_group.get(), "last_completed_step_index", out.last_completed_step_index, "/output_cadence/@last_completed_step_index");
+    require_u64_attr(output_group.get(), "snapshot_interval_steps", out.snapshot_interval_steps, "/output_cadence/@snapshot_interval_steps");
+    require_u64_attr(output_group.get(), "next_snapshot_step_index", out.next_snapshot_step_index, "/output_cadence/@next_snapshot_step_index");
+    require_f64_attr(output_group.get(), "snapshot_interval_time_code", out.snapshot_interval_time_code, "/output_cadence/@snapshot_interval_time_code");
+    require_f64_attr(output_group.get(), "next_snapshot_time_code", out.next_snapshot_time_code, "/output_cadence/@next_snapshot_time_code");
+    require_string_attr(output_group.get(), "snapshot_stem", out.snapshot_stem, "/output_cadence/@snapshot_stem");
+    require_string_attr(output_group.get(), "restart_stem", out.restart_stem, "/output_cadence/@restart_stem");
+
+    const core::SimulationState& state = *expected.persistent_state.simulation_state;
+    const std::uint64_t w = policy.workspace_limit_bytes;
+#define VERIFY_SPAN(PATH, TYPE, MEMTYPE, VALUES) \
+    verifyDatasetSpanChunked<TYPE>(file.get(), PATH, std::span<const TYPE>((VALUES).data(), (VALUES).size()), MEMTYPE, w, result)
+    VERIFY_SPAN("/state/particles/position_x_comoving", double, H5T_NATIVE_DOUBLE, state.particles.position_x_comoving);
+    VERIFY_SPAN("/state/particles/position_y_comoving", double, H5T_NATIVE_DOUBLE, state.particles.position_y_comoving);
+    VERIFY_SPAN("/state/particles/position_z_comoving", double, H5T_NATIVE_DOUBLE, state.particles.position_z_comoving);
+    VERIFY_SPAN("/state/particles/velocity_x_peculiar", double, H5T_NATIVE_DOUBLE, state.particles.velocity_x_peculiar);
+    VERIFY_SPAN("/state/particles/velocity_y_peculiar", double, H5T_NATIVE_DOUBLE, state.particles.velocity_y_peculiar);
+    VERIFY_SPAN("/state/particles/velocity_z_peculiar", double, H5T_NATIVE_DOUBLE, state.particles.velocity_z_peculiar);
+    VERIFY_SPAN("/state/particles/mass_code", double, H5T_NATIVE_DOUBLE, state.particles.mass_code);
+    verifyDataset1dChunked<std::uint8_t>(file.get(), "/state/particles/time_bin", state.particles.size(),
+        [&](std::size_t i){ return state.particleTimeBin(i); }, H5T_NATIVE_UINT8, w, result);
+    VERIFY_SPAN("/state/particle_sidecar/particle_id", std::uint64_t, H5T_NATIVE_UINT64, state.particle_sidecar.particle_id);
+    verifyDataset1dChunked<std::uint64_t>(file.get(), "/state/particle_sidecar/sfc_key", state.particles.size(),
+        [&](std::size_t i){ return state.particleSfcKey(i); }, H5T_NATIVE_UINT64, w, result);
+    verifyDataset1dChunked<std::uint32_t>(file.get(), "/state/particle_sidecar/species_tag", state.particles.size(),
+        [&](std::size_t i){ return state.particleSpeciesTag(i); }, H5T_NATIVE_UINT32, w, result);
+    verifyDataset1dChunked<std::uint32_t>(file.get(), "/state/particle_sidecar/particle_flags", state.particles.size(),
+        [&](std::size_t i){ return state.particleFlags(i); }, H5T_NATIVE_UINT32, w, result);
+    verifyDataset1dChunked<std::uint32_t>(file.get(), "/state/particle_sidecar/owning_rank", state.particles.size(),
+        [&](std::size_t i){ return state.particleOwningRank(i); }, H5T_NATIVE_UINT32, w, result);
+    verifyDataset1dChunked<double>(file.get(), "/state/particle_sidecar/last_drift_time_code", state.particles.size(),
+        [&](std::size_t i){ return state.particleLastDriftTimeCode(i); }, H5T_NATIVE_DOUBLE, w, result);
+    verifyDataset1dChunked<double>(file.get(), "/state/particle_sidecar/last_drift_scale_factor", state.particles.size(),
+        [&](std::size_t i){ return state.particleLastDriftScaleFactor(i); }, H5T_NATIVE_DOUBLE, w, result);
+    VERIFY_SPAN("/state/particle_sidecar/gravity_softening_comoving", double, H5T_NATIVE_DOUBLE, state.particle_sidecar.gravity_softening_comoving);
+    VERIFY_SPAN("/state/particle_sidecar/has_gravity_softening_override", std::uint8_t, H5T_NATIVE_UINT8, state.particle_sidecar.has_gravity_softening_override);
+
+    VERIFY_SPAN("/state/cells/center_x_comoving", double, H5T_NATIVE_DOUBLE, state.cells.center_x_comoving);
+    VERIFY_SPAN("/state/cells/center_y_comoving", double, H5T_NATIVE_DOUBLE, state.cells.center_y_comoving);
+    VERIFY_SPAN("/state/cells/center_z_comoving", double, H5T_NATIVE_DOUBLE, state.cells.center_z_comoving);
+    VERIFY_SPAN("/state/cells/mass_code", double, H5T_NATIVE_DOUBLE, state.cells.mass_code);
+    VERIFY_SPAN("/state/cells/time_bin", std::uint8_t, H5T_NATIVE_UINT8, state.cells.time_bin);
+    VERIFY_SPAN("/state/cells/patch_index", std::uint32_t, H5T_NATIVE_UINT32, state.cells.patch_index);
+
+    VERIFY_SPAN("/state/gas_cells/gas_cell_id", std::uint64_t, H5T_NATIVE_UINT64, state.gas_cells.gas_cell_id);
+    VERIFY_SPAN("/state/gas_cells/parent_particle_id", std::uint64_t, H5T_NATIVE_UINT64, state.gas_cells.parent_particle_id);
+    VERIFY_SPAN("/state/gas_cells/velocity_x_peculiar", double, H5T_NATIVE_DOUBLE, state.gas_cells.velocity_x_peculiar);
+    VERIFY_SPAN("/state/gas_cells/velocity_y_peculiar", double, H5T_NATIVE_DOUBLE, state.gas_cells.velocity_y_peculiar);
+    VERIFY_SPAN("/state/gas_cells/velocity_z_peculiar", double, H5T_NATIVE_DOUBLE, state.gas_cells.velocity_z_peculiar);
+    VERIFY_SPAN("/state/gas_cells/density_code", double, H5T_NATIVE_DOUBLE, state.gas_cells.density_code);
+    VERIFY_SPAN("/state/gas_cells/pressure_code", double, H5T_NATIVE_DOUBLE, state.gas_cells.pressure_code);
+    VERIFY_SPAN("/state/gas_cells/internal_energy_code", double, H5T_NATIVE_DOUBLE, state.gas_cells.internal_energy_code);
+    VERIFY_SPAN("/state/gas_cells/metal_mass_code", double, H5T_NATIVE_DOUBLE, state.gas_cells.metal_mass_code);
+    VERIFY_SPAN("/state/gas_cells/temperature_code", double, H5T_NATIVE_DOUBLE, state.gas_cells.temperature_code);
+    VERIFY_SPAN("/state/gas_cells/sound_speed_code", double, H5T_NATIVE_DOUBLE, state.gas_cells.sound_speed_code);
+
+    VERIFY_SPAN("/state/patches/patch_id", std::uint64_t, H5T_NATIVE_UINT64, state.patches.patch_id);
+    VERIFY_SPAN("/state/patches/level", std::int32_t, H5T_NATIVE_INT32, state.patches.level);
+    VERIFY_SPAN("/state/patches/first_cell", std::uint32_t, H5T_NATIVE_UINT32, state.patches.first_cell);
+    VERIFY_SPAN("/state/patches/cell_count", std::uint32_t, H5T_NATIVE_UINT32, state.patches.cell_count);
+    VERIFY_SPAN("/state/patches/parent_patch_id", std::uint64_t, H5T_NATIVE_UINT64, state.patches.parent_patch_id);
+    VERIFY_SPAN("/state/patches/morton_key", std::uint64_t, H5T_NATIVE_UINT64, state.patches.morton_key);
+    VERIFY_SPAN("/state/patches/origin_x_comoving", double, H5T_NATIVE_DOUBLE, state.patches.origin_x_comoving);
+    VERIFY_SPAN("/state/patches/origin_y_comoving", double, H5T_NATIVE_DOUBLE, state.patches.origin_y_comoving);
+    VERIFY_SPAN("/state/patches/origin_z_comoving", double, H5T_NATIVE_DOUBLE, state.patches.origin_z_comoving);
+    VERIFY_SPAN("/state/patches/extent_x_comoving", double, H5T_NATIVE_DOUBLE, state.patches.extent_x_comoving);
+    VERIFY_SPAN("/state/patches/extent_y_comoving", double, H5T_NATIVE_DOUBLE, state.patches.extent_y_comoving);
+    VERIFY_SPAN("/state/patches/extent_z_comoving", double, H5T_NATIVE_DOUBLE, state.patches.extent_z_comoving);
+    VERIFY_SPAN("/state/patches/cell_dim_x", std::uint16_t, H5T_NATIVE_UINT16, state.patches.cell_dim_x);
+    VERIFY_SPAN("/state/patches/cell_dim_y", std::uint16_t, H5T_NATIVE_UINT16, state.patches.cell_dim_y);
+    VERIFY_SPAN("/state/patches/cell_dim_z", std::uint16_t, H5T_NATIVE_UINT16, state.patches.cell_dim_z);
+    VERIFY_SPAN("/state/patches/owning_rank", std::uint32_t, H5T_NATIVE_UINT32, state.patches.owning_rank);
+
+    verifyDataset1dChunked<std::uint64_t>(file.get(), "/state/gas_cell_identity/gas_cell_id", state.gas_cell_identity.size(),
+        [&](std::size_t i){ const auto* r = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(i)); if (r == nullptr) throw std::runtime_error("missing gas identity local row during restart verification"); return r->gas_cell_id; }, H5T_NATIVE_UINT64, w, result);
+    verifyDataset1dChunked<std::uint8_t>(file.get(), "/state/gas_cell_identity/has_parent_particle", state.gas_cell_identity.size(),
+        [&](std::size_t i){ const auto* r = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(i)); return static_cast<std::uint8_t>(r != nullptr && r->parent_particle_id.has_value() ? 1U : 0U); }, H5T_NATIVE_UINT8, w, result);
+    verifyDataset1dChunked<std::uint64_t>(file.get(), "/state/gas_cell_identity/parent_particle_id", state.gas_cell_identity.size(),
+        [&](std::size_t i){ const auto* r = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(i)); return r == nullptr ? 0ULL : r->parent_particle_id.value_or(0ULL); }, H5T_NATIVE_UINT64, w, result);
+    verifyDataset1dChunked<std::uint64_t>(file.get(), "/state/gas_cell_identity/owning_patch_id", state.gas_cell_identity.size(),
+        [&](std::size_t i){ const auto* r = state.gas_cell_identity.findByLocalRow(static_cast<std::uint32_t>(i)); return r == nullptr ? 0ULL : r->owning_patch_id; }, H5T_NATIVE_UINT64, w, result);
+    verifyDataset1dChunked<std::uint32_t>(file.get(), "/state/gas_cell_identity/local_cell_row", state.gas_cell_identity.size(),
+        [&](std::size_t i){ return static_cast<std::uint32_t>(i); }, H5T_NATIVE_UINT32, w, result);
+
+    const auto pending_records = state.pending_flux_registers.records();
+#define VERIFY_PENDING(NAME, TYPE, MEMTYPE, EXPR) \
+    verifyDataset1dChunked<TYPE>(file.get(), "/state/amr_pending_flux_registers/" NAME, pending_records.size(), \
+        [&](std::size_t i){ return static_cast<TYPE>(pending_records[i].EXPR); }, MEMTYPE, w, result)
+    VERIFY_PENDING("register_key", std::uint64_t, H5T_NATIVE_UINT64, register_key);
+    VERIFY_PENDING("coarse_patch_id", std::uint64_t, H5T_NATIVE_UINT64, coarse_patch_id);
+    VERIFY_PENDING("coarse_gas_cell_id", std::uint64_t, H5T_NATIVE_UINT64, coarse_gas_cell_id);
+    VERIFY_PENDING("coarse_cell_index", std::uint64_t, H5T_NATIVE_UINT64, coarse_cell_index);
+    VERIFY_PENDING("level", std::uint8_t, H5T_NATIVE_UINT8, level);
+    VERIFY_PENDING("axis", std::uint8_t, H5T_NATIVE_UINT8, axis);
+    VERIFY_PENDING("orientation", std::uint8_t, H5T_NATIVE_UINT8, orientation);
+    VERIFY_PENDING("expected_area_comov", double, H5T_NATIVE_DOUBLE, expected_area_comov);
+    VERIFY_PENDING("coarse_area_accumulated_comov", double, H5T_NATIVE_DOUBLE, coarse_area_accumulated_comov);
+    VERIFY_PENDING("fine_area_accumulated_comov", double, H5T_NATIVE_DOUBLE, fine_area_accumulated_comov);
+    VERIFY_PENDING("interval_start_code", double, H5T_NATIVE_DOUBLE, interval_start_code);
+    VERIFY_PENDING("interval_end_code", double, H5T_NATIVE_DOUBLE, interval_end_code);
+    VERIFY_PENDING("coarse_dt_code", double, H5T_NATIVE_DOUBLE, coarse_dt_code);
+    VERIFY_PENDING("expected_fine_substeps", std::uint32_t, H5T_NATIVE_UINT32, expected_fine_substeps);
+    VERIFY_PENDING("completed_fine_substeps", std::uint32_t, H5T_NATIVE_UINT32, completed_fine_substeps);
+    VERIFY_PENDING("fine_substep_coverage_mask", std::uint64_t, H5T_NATIVE_UINT64, fine_substep_coverage_mask);
+    VERIFY_PENDING("coarse_face_count", std::uint32_t, H5T_NATIVE_UINT32, coarse_face_count);
+    VERIFY_PENDING("fine_face_count", std::uint32_t, H5T_NATIVE_UINT32, fine_face_count);
+    VERIFY_PENDING("gas_cell_identity_generation", std::uint64_t, H5T_NATIVE_UINT64, gas_cell_identity_generation);
+    VERIFY_PENDING("patch_geometry_generation", std::uint64_t, H5T_NATIVE_UINT64, patch_geometry_generation);
+    VERIFY_PENDING("coarse_mass_flux_integral_code", double, H5T_NATIVE_DOUBLE, coarse_mass_flux_integral_code);
+    VERIFY_PENDING("coarse_momentum_x_flux_integral_code", double, H5T_NATIVE_DOUBLE, coarse_momentum_x_flux_integral_code);
+    VERIFY_PENDING("coarse_momentum_y_flux_integral_code", double, H5T_NATIVE_DOUBLE, coarse_momentum_y_flux_integral_code);
+    VERIFY_PENDING("coarse_momentum_z_flux_integral_code", double, H5T_NATIVE_DOUBLE, coarse_momentum_z_flux_integral_code);
+    VERIFY_PENDING("coarse_total_energy_flux_integral_code", double, H5T_NATIVE_DOUBLE, coarse_total_energy_flux_integral_code);
+    VERIFY_PENDING("coarse_metal_mass_flux_integral_code", double, H5T_NATIVE_DOUBLE, coarse_metal_mass_flux_integral_code);
+    VERIFY_PENDING("fine_mass_flux_integral_code", double, H5T_NATIVE_DOUBLE, fine_mass_flux_integral_code);
+    VERIFY_PENDING("fine_momentum_x_flux_integral_code", double, H5T_NATIVE_DOUBLE, fine_momentum_x_flux_integral_code);
+    VERIFY_PENDING("fine_momentum_y_flux_integral_code", double, H5T_NATIVE_DOUBLE, fine_momentum_y_flux_integral_code);
+    VERIFY_PENDING("fine_momentum_z_flux_integral_code", double, H5T_NATIVE_DOUBLE, fine_momentum_z_flux_integral_code);
+    VERIFY_PENDING("fine_total_energy_flux_integral_code", double, H5T_NATIVE_DOUBLE, fine_total_energy_flux_integral_code);
+    VERIFY_PENDING("fine_metal_mass_flux_integral_code", double, H5T_NATIVE_DOUBLE, fine_metal_mass_flux_integral_code);
+#undef VERIFY_PENDING
+
+    const auto temporal_records = state.amr_temporal_boundary_history.records();
+#define VERIFY_TEMPORAL_RECORD(NAME, TYPE, MEMTYPE, EXPR) \
+    verifyDataset1dChunked<TYPE>(file.get(), "/state/amr_temporal_boundary_history/" NAME, temporal_records.size(), \
+        [&](std::size_t i){ return static_cast<TYPE>(temporal_records[i].EXPR); }, MEMTYPE, w, result)
+    VERIFY_TEMPORAL_RECORD("patch_id", std::uint64_t, H5T_NATIVE_UINT64, patch_id);
+    VERIFY_TEMPORAL_RECORD("patch_level", std::uint8_t, H5T_NATIVE_UINT8, patch_level);
+    VERIFY_TEMPORAL_RECORD("patch_geometry_fingerprint", std::uint64_t, H5T_NATIVE_UINT64, patch_geometry_fingerprint);
+    VERIFY_TEMPORAL_RECORD("gas_cell_identity_generation", std::uint64_t, H5T_NATIVE_UINT64, gas_cell_identity_generation);
+    VERIFY_TEMPORAL_RECORD("interval_start_code", double, H5T_NATIVE_DOUBLE, interval_start_code);
+    VERIFY_TEMPORAL_RECORD("interval_end_code", double, H5T_NATIVE_DOUBLE, interval_end_code);
+    verifyDataset1dChunked<std::uint8_t>(file.get(), "/state/amr_temporal_boundary_history/end_state_valid", temporal_records.size(),
+        [&](std::size_t i){ return static_cast<std::uint8_t>(temporal_records[i].end_state_valid ? 1U : 0U); }, H5T_NATIVE_UINT8, w, result);
+    std::size_t temporal_offset_next = 0U;
+    std::uint64_t temporal_offset = 0U;
+    verifyDataset1dChunked<std::uint64_t>(file.get(), "/state/amr_temporal_boundary_history/cell_offset", temporal_records.size(),
+        [&](std::size_t i){
+          if (i != temporal_offset_next) throw std::logic_error("temporal verification accessor order changed");
+          const std::uint64_t value = temporal_offset;
+          temporal_offset += static_cast<std::uint64_t>(temporal_records[i].cells.size());
+          ++temporal_offset_next;
+          return value;
+        }, H5T_NATIVE_UINT64, w, result);
+    verifyDataset1dChunked<std::uint64_t>(file.get(), "/state/amr_temporal_boundary_history/cell_count", temporal_records.size(),
+        [&](std::size_t i){ return static_cast<std::uint64_t>(temporal_records[i].cells.size()); }, H5T_NATIVE_UINT64, w, result);
+    std::size_t temporal_cell_total = 0U;
+    for (const auto& record : temporal_records) temporal_cell_total += record.cells.size();
+    const auto verify_temporal_cells = [&](std::string_view name, auto member, hid_t memory_type) {
+      using T = std::decay_t<decltype(std::declval<core::AmrTemporalBoundaryHistoryCellRecord>().*member)>;
+      std::size_t record_index = 0U;
+      std::size_t cell_index = 0U;
+      verifyDataset1dChunked<T>(file.get(), std::string("/state/amr_temporal_boundary_history/") + std::string(name), temporal_cell_total,
+          [&](std::size_t) {
+            while (record_index < temporal_records.size() && cell_index == temporal_records[record_index].cells.size()) {
+              ++record_index; cell_index = 0U;
+            }
+            if (record_index >= temporal_records.size()) throw std::logic_error("temporal verification flattened accessor overflow");
+            return temporal_records[record_index].cells[cell_index++].*member;
+          }, memory_type, w, result);
+    };
+    verify_temporal_cells("gas_cell_id", &core::AmrTemporalBoundaryHistoryCellRecord::gas_cell_id, H5T_NATIVE_UINT64);
+    verify_temporal_cells("patch_local_cell", &core::AmrTemporalBoundaryHistoryCellRecord::patch_local_cell, H5T_NATIVE_UINT64);
+    verify_temporal_cells("start_mass_density_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::start_mass_density_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("start_momentum_density_x_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::start_momentum_density_x_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("start_momentum_density_y_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::start_momentum_density_y_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("start_momentum_density_z_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::start_momentum_density_z_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("start_total_energy_density_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::start_total_energy_density_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("start_metal_mass_density_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::start_metal_mass_density_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("end_mass_density_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::end_mass_density_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("end_momentum_density_x_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::end_momentum_density_x_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("end_momentum_density_y_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::end_momentum_density_y_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("end_momentum_density_z_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::end_momentum_density_z_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("end_total_energy_density_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::end_total_energy_density_comoving, H5T_NATIVE_DOUBLE);
+    verify_temporal_cells("end_metal_mass_density_comoving", &core::AmrTemporalBoundaryHistoryCellRecord::end_metal_mass_density_comoving, H5T_NATIVE_DOUBLE);
+#undef VERIFY_TEMPORAL_RECORD
+
+    VERIFY_SPAN("/state/star_particles/particle_index", std::uint32_t, H5T_NATIVE_UINT32, state.star_particles.particle_index);
+    VERIFY_SPAN("/state/star_particles/formation_scale_factor", double, H5T_NATIVE_DOUBLE, state.star_particles.formation_scale_factor);
+    VERIFY_SPAN("/state/star_particles/birth_mass_code", double, H5T_NATIVE_DOUBLE, state.star_particles.birth_mass_code);
+    VERIFY_SPAN("/state/star_particles/metallicity_mass_fraction", double, H5T_NATIVE_DOUBLE, state.star_particles.metallicity_mass_fraction);
+    VERIFY_SPAN("/state/star_particles/birth_key", std::uint64_t, H5T_NATIVE_UINT64, state.star_particles.birth_key);
+    VERIFY_SPAN("/state/star_particles/parent_gas_cell_id", std::uint64_t, H5T_NATIVE_UINT64, state.star_particles.parent_gas_cell_id);
+    VERIFY_SPAN("/state/star_particles/birth_tick", std::uint64_t, H5T_NATIVE_UINT64, state.star_particles.birth_tick);
+    VERIFY_SPAN("/state/star_particles/birth_ordinal", std::uint32_t, H5T_NATIVE_UINT32, state.star_particles.birth_ordinal);
+    VERIFY_SPAN("/state/star_particles/stellar_age_years_last", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_age_years_last);
+    VERIFY_SPAN("/state/star_particles/stellar_returned_mass_cumulative_code", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_returned_mass_cumulative_code);
+    VERIFY_SPAN("/state/star_particles/stellar_returned_metals_cumulative_code", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_returned_metals_cumulative_code);
+    VERIFY_SPAN("/state/star_particles/stellar_newly_synthesized_metals_cumulative_code", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_newly_synthesized_metals_cumulative_code);
+    VERIFY_SPAN("/state/star_particles/enrichment_carry_mass_code", double, H5T_NATIVE_DOUBLE, state.star_particles.enrichment_carry_mass_code);
+    VERIFY_SPAN("/state/star_particles/enrichment_carry_metals_code", double, H5T_NATIVE_DOUBLE, state.star_particles.enrichment_carry_metals_code);
+    VERIFY_SPAN("/state/star_particles/enrichment_carry_feedback_energy_erg", double, H5T_NATIVE_DOUBLE, state.star_particles.enrichment_carry_feedback_energy_erg);
+    VERIFY_SPAN("/state/star_particles/enrichment_carry_momentum_code", double, H5T_NATIVE_DOUBLE, state.star_particles.enrichment_carry_momentum_code);
+    VERIFY_SPAN("/state/star_particles/stellar_deposited_mass_cumulative_code", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_deposited_mass_cumulative_code);
+    VERIFY_SPAN("/state/star_particles/stellar_deposited_metals_cumulative_code", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_deposited_metals_cumulative_code);
+    VERIFY_SPAN("/state/star_particles/stellar_deposited_feedback_energy_cumulative_erg", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_deposited_feedback_energy_cumulative_erg);
+    VERIFY_SPAN("/state/star_particles/stellar_feedback_energy_cumulative_erg", double, H5T_NATIVE_DOUBLE, state.star_particles.stellar_feedback_energy_cumulative_erg);
+    for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
+      const std::string suffix = std::to_string(channel);
+      verifyDatasetSpanChunked<double>(file.get(), "/state/star_particles/stellar_returned_mass_channel_cumulative_code_" + suffix, state.star_particles.stellar_returned_mass_channel_cumulative_code[channel], H5T_NATIVE_DOUBLE, w, result);
+      verifyDatasetSpanChunked<double>(file.get(), "/state/star_particles/stellar_returned_metals_channel_cumulative_code_" + suffix, state.star_particles.stellar_returned_metals_channel_cumulative_code[channel], H5T_NATIVE_DOUBLE, w, result);
+      verifyDatasetSpanChunked<double>(file.get(), "/state/star_particles/stellar_feedback_energy_channel_cumulative_erg_" + suffix, state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel], H5T_NATIVE_DOUBLE, w, result);
+    }
+
+    VERIFY_SPAN("/state/black_holes/particle_index", std::uint32_t, H5T_NATIVE_UINT32, state.black_holes.particle_index);
+    VERIFY_SPAN("/state/black_holes/host_cell_index", std::uint32_t, H5T_NATIVE_UINT32, state.black_holes.host_cell_index);
+    VERIFY_SPAN("/state/black_holes/subgrid_mass_code", double, H5T_NATIVE_DOUBLE, state.black_holes.subgrid_mass_code);
+    VERIFY_SPAN("/state/black_holes/accretion_rate_code", double, H5T_NATIVE_DOUBLE, state.black_holes.accretion_rate_code);
+    VERIFY_SPAN("/state/black_holes/feedback_energy_code", double, H5T_NATIVE_DOUBLE, state.black_holes.feedback_energy_code);
+    VERIFY_SPAN("/state/black_holes/eddington_ratio", double, H5T_NATIVE_DOUBLE, state.black_holes.eddington_ratio);
+    VERIFY_SPAN("/state/black_holes/cumulative_accreted_mass_code", double, H5T_NATIVE_DOUBLE, state.black_holes.cumulative_accreted_mass_code);
+    VERIFY_SPAN("/state/black_holes/cumulative_feedback_energy_code", double, H5T_NATIVE_DOUBLE, state.black_holes.cumulative_feedback_energy_code);
+    VERIFY_SPAN("/state/black_holes/duty_cycle_active_time_code", double, H5T_NATIVE_DOUBLE, state.black_holes.duty_cycle_active_time_code);
+    VERIFY_SPAN("/state/black_holes/duty_cycle_total_time_code", double, H5T_NATIVE_DOUBLE, state.black_holes.duty_cycle_total_time_code);
+    VERIFY_SPAN("/state/tracers/particle_index", std::uint32_t, H5T_NATIVE_UINT32, state.tracers.particle_index);
+    VERIFY_SPAN("/state/tracers/parent_particle_id", std::uint64_t, H5T_NATIVE_UINT64, state.tracers.parent_particle_id);
+    VERIFY_SPAN("/state/tracers/injection_step", std::uint64_t, H5T_NATIVE_UINT64, state.tracers.injection_step);
+    VERIFY_SPAN("/state/tracers/host_cell_index", std::uint32_t, H5T_NATIVE_UINT32, state.tracers.host_cell_index);
+    VERIFY_SPAN("/state/tracers/mass_fraction_of_host", double, H5T_NATIVE_DOUBLE, state.tracers.mass_fraction_of_host);
+    VERIFY_SPAN("/state/tracers/last_host_mass_code", double, H5T_NATIVE_DOUBLE, state.tracers.last_host_mass_code);
+    VERIFY_SPAN("/state/tracers/cumulative_exchanged_mass_code", double, H5T_NATIVE_DOUBLE, state.tracers.cumulative_exchanged_mass_code);
+    verifyDatasetSpanChunked<std::uint64_t>(file.get(), "/state/species_count_by_species",
+        std::span<const std::uint64_t>(state.species.count_by_species.data(), state.species.count_by_species.size()),
+        H5T_NATIVE_UINT64, w, result);
+#undef VERIFY_SPAN
+
+    verifyStringDatasetChunked(file.get(), "/state/state_metadata", state.metadata.serialize(), w, result);
+    verifyStringDatasetChunked(file.get(), std::string(sharedIoContractNames().normalized_config_text_dataset), expected.normalized_config_text, w, result);
+    verifyStringDatasetChunked(file.get(), std::string(sharedIoContractNames().provenance_record_dataset), core::serializeProvenanceRecord(expected.provenance), w, result);
+    std::string expected_module_names;
+    for (const core::ModuleSidecarBlock* block : state.sidecars.blocksSortedByName()) {
+      expected_module_names += block->module_name;
+      expected_module_names.push_back('\n');
+      const std::string base = "/state/module_sidecars/" + block->module_name;
+      Hdf5Handle module_group(openRequiredGroup(file.get(), base));
+      require_u32_attr(module_group.get(), "schema_version", block->schema_version, base + "/@schema_version");
+      require_u32_attr(module_group.get(), "particle_indexed", block->particle_indexed ? 1U : 0U, base + "/@particle_indexed");
+      require_u32_attr(module_group.get(), "row_stride_bytes", block->row_stride_bytes, base + "/@row_stride_bytes");
+      require_u32_attr(module_group.get(), "required_species_mask", block->required_species_mask, base + "/@required_species_mask");
+      require_u32_attr(module_group.get(), "requirement_kind", static_cast<std::uint32_t>(block->requirement.kind), base + "/@requirement_kind");
+      require_u32_attr(module_group.get(), "requirement_species_mask", block->requirement.species_mask, base + "/@requirement_species_mask");
+      require_u32_attr(module_group.get(), "requirement_particle_flags_mask", block->requirement.particle_flags_mask, base + "/@requirement_particle_flags_mask");
+      require_f64_attr(module_group.get(), "requirement_threshold_code", block->requirement.threshold_code, base + "/@requirement_threshold_code");
+      verifyDataset1dChunked<std::uint8_t>(file.get(), base + "/payload", block->payload.size(),
+          [&](std::size_t i){ return std::to_integer<std::uint8_t>(block->payload[i]); }, H5T_NATIVE_UINT8, w, result);
+      if (block->isParticleIndexed()) {
+        verifyDatasetSpanChunked<std::uint64_t>(file.get(), base + "/particle_id_by_row", block->particle_id_by_row, H5T_NATIVE_UINT64, w, result);
+      }
+    }
+    verifyStringDatasetChunked(file.get(), "/state/module_sidecar_names", expected_module_names, w, result);
+
+    Hdf5Handle stochastic_group(openRequiredGroup(file.get(), "/stochastic_state"));
+    const auto stochastic_modules = sortedStochasticModules(expected.stochastic_state);
+    require_u32_attr(stochastic_group.get(), "module_count", static_cast<std::uint32_t>(stochastic_modules.size()), "/stochastic_state/@module_count");
+    std::string stochastic_names;
+    for (const auto& module : stochastic_modules) {
+      if (!stochastic_names.empty()) stochastic_names.push_back('\n');
+      stochastic_names += module.module_name;
+      const std::string base = "/stochastic_state/" + module.module_name;
+      Hdf5Handle module_group(openRequiredGroup(file.get(), base));
+      require_u32_attr(module_group.get(), "schema_version", module.schema_version, base + "/@schema_version");
+      require_string_attr(module_group.get(), "rng_policy", module.rng_policy, base + "/@rng_policy");
+      require_u64_attr(module_group.get(), "random_seed", module.random_seed, base + "/@random_seed");
+      require_u32_attr(module_group.get(), "rank_local_seed_offset", module.rank_local_seed_offset, base + "/@rank_local_seed_offset");
+      require_u64_attr(module_group.get(), "last_committed_step_index", module.last_committed_step_index, base + "/@last_committed_step_index");
+      require_u32_attr(module_group.get(), "deterministic_from_serialized_inputs", module.deterministic_from_serialized_inputs ? 1U : 0U, base + "/@deterministic_from_serialized_inputs");
+    }
+    verifyStringDatasetChunked(file.get(), "/stochastic_state/module_names", stochastic_names, w, result);
+
+    const GravityForceCachePersistentView empty_cache{};
+    const GravityForceCachePersistentView owning_cache_view =
+        expected.gravity_force_cache != nullptr
+            ? GravityForceCachePersistentView{
+                  .valid = expected.gravity_force_cache->valid,
+                  .particle_id = expected.gravity_force_cache->particle_id,
+                  .gas_cell_id = expected.gravity_force_cache->gas_cell_id,
+                  .particle_accel_x_comoving = expected.gravity_force_cache->particle_accel_x_comoving,
+                  .particle_accel_y_comoving = expected.gravity_force_cache->particle_accel_y_comoving,
+                  .particle_accel_z_comoving = expected.gravity_force_cache->particle_accel_z_comoving,
+                  .cell_accel_x_comoving = expected.gravity_force_cache->cell_accel_x_comoving,
+                  .cell_accel_y_comoving = expected.gravity_force_cache->cell_accel_y_comoving,
+                  .cell_accel_z_comoving = expected.gravity_force_cache->cell_accel_z_comoving}
+            : empty_cache;
+    const GravityForceCachePersistentView& cache =
+        expected.gravity_force_cache_view != nullptr ? *expected.gravity_force_cache_view : owning_cache_view;
+    if ((readScalarU32Attribute(openRequiredGroup(file.get(), "/gravity_force_cache").get(), "valid") != 0U) != cache.valid) {
+      throw std::runtime_error("restart verification gravity force-cache valid mismatch");
+    }
+    verifyDatasetSpanChunked<std::uint64_t>(file.get(), "/gravity_force_cache/particle_id", cache.particle_id, H5T_NATIVE_UINT64, w, result);
+    verifyDatasetSpanChunked<std::uint64_t>(file.get(), "/gravity_force_cache/gas_cell_id", cache.gas_cell_id, H5T_NATIVE_UINT64, w, result);
+    verifyDatasetSpanChunked<double>(file.get(), "/gravity_force_cache/particle_accel_x_comoving", cache.particle_accel_x_comoving, H5T_NATIVE_DOUBLE, w, result);
+    verifyDatasetSpanChunked<double>(file.get(), "/gravity_force_cache/particle_accel_y_comoving", cache.particle_accel_y_comoving, H5T_NATIVE_DOUBLE, w, result);
+    verifyDatasetSpanChunked<double>(file.get(), "/gravity_force_cache/particle_accel_z_comoving", cache.particle_accel_z_comoving, H5T_NATIVE_DOUBLE, w, result);
+    verifyDatasetSpanChunked<double>(file.get(), "/gravity_force_cache/cell_accel_x_comoving", cache.cell_accel_x_comoving, H5T_NATIVE_DOUBLE, w, result);
+    verifyDatasetSpanChunked<double>(file.get(), "/gravity_force_cache/cell_accel_y_comoving", cache.cell_accel_y_comoving, H5T_NATIVE_DOUBLE, w, result);
+    verifyDatasetSpanChunked<double>(file.get(), "/gravity_force_cache/cell_accel_z_comoving", cache.cell_accel_z_comoving, H5T_NATIVE_DOUBLE, w, result);
+
+    Hdf5Handle scheduler_group(openRequiredGroup(file.get(), "/scheduler"));
+    require_u64_attr(scheduler_group.get(), "current_tick", expected.scheduler->currentTick(), "/scheduler/@current_tick");
+    require_u32_attr(scheduler_group.get(), "max_bin", expected.scheduler->maxBin(), "/scheduler/@max_bin");
+    verifyDataset1dChunked<std::uint8_t>(file.get(), "/scheduler/bin_index", expected.scheduler->elementCount(),
+        [&](std::size_t i){ return expected.scheduler->binIndex(static_cast<std::uint32_t>(i)); }, H5T_NATIVE_UINT8, w, result);
+    verifyDataset1dChunked<std::uint64_t>(file.get(), "/scheduler/next_activation_tick", expected.scheduler->elementCount(),
+        [&](std::size_t i){ return expected.scheduler->nextActivationTick(static_cast<std::uint32_t>(i)); }, H5T_NATIVE_UINT64, w, result);
+    verifyDataset1dChunked<std::uint8_t>(file.get(), "/scheduler/active_flag", expected.scheduler->elementCount(),
+        [&](std::size_t i){ return static_cast<std::uint8_t>(expected.scheduler->isElementActive(static_cast<std::uint32_t>(i)) ? 1U : 0U); }, H5T_NATIVE_UINT8, w, result);
+    verifyDataset1dChunked<std::uint8_t>(file.get(), "/scheduler/pending_bin_index", expected.scheduler->elementCount(),
+        [&](std::size_t i){ return expected.scheduler->pendingBinIndex(static_cast<std::uint32_t>(i)); }, H5T_NATIVE_UINT8, w, result);
+    if (expected.gas_cell_scheduler != nullptr) {
+      Hdf5Handle gas_scheduler_group(openRequiredGroup(file.get(), "/gas_cell_scheduler"));
+      require_string_attr(gas_scheduler_group.get(), "identity_key", std::string(k_gas_cell_scheduler_identity_key), "/gas_cell_scheduler/@identity_key");
+      require_u64_attr(gas_scheduler_group.get(), "current_tick", expected.gas_cell_scheduler->currentTick(), "/gas_cell_scheduler/@current_tick");
+      require_u32_attr(gas_scheduler_group.get(), "max_bin", expected.gas_cell_scheduler->maxBin(), "/gas_cell_scheduler/@max_bin");
+      verifyDatasetSpanChunked<std::uint64_t>(file.get(), "/gas_cell_scheduler/gas_cell_id", state.gas_cells.gas_cell_id, H5T_NATIVE_UINT64, w, result);
+      verifyDataset1dChunked<std::uint8_t>(file.get(), "/gas_cell_scheduler/bin_index", expected.gas_cell_scheduler->elementCount(),
+          [&](std::size_t i){ return expected.gas_cell_scheduler->binIndex(static_cast<std::uint32_t>(i)); }, H5T_NATIVE_UINT8, w, result);
+      verifyDataset1dChunked<std::uint64_t>(file.get(), "/gas_cell_scheduler/next_activation_tick", expected.gas_cell_scheduler->elementCount(),
+          [&](std::size_t i){ return expected.gas_cell_scheduler->nextActivationTick(static_cast<std::uint32_t>(i)); }, H5T_NATIVE_UINT64, w, result);
+      verifyDataset1dChunked<std::uint8_t>(file.get(), "/gas_cell_scheduler/active_flag", expected.gas_cell_scheduler->elementCount(),
+          [&](std::size_t i){ return static_cast<std::uint8_t>(expected.gas_cell_scheduler->isElementActive(static_cast<std::uint32_t>(i)) ? 1U : 0U); }, H5T_NATIVE_UINT8, w, result);
+      verifyDataset1dChunked<std::uint8_t>(file.get(), "/gas_cell_scheduler/pending_bin_index", expected.gas_cell_scheduler->elementCount(),
+          [&](std::size_t i){ return expected.gas_cell_scheduler->pendingBinIndex(static_cast<std::uint32_t>(i)); }, H5T_NATIVE_UINT8, w, result);
+    }
+    verifyDistributedRestartStateChunked(file.get(), expected.distributed_gravity_state, w, result);
+
+    const RestartIntegrityDigests expected_integrity = restartPayloadIntegrityDigestsImpl(
+        expected, true, true, true, true, true, true, true, policy.memory_governor);
+    result.legacy_payload_hash = readScalarU64Attribute(file.get(), "payload_integrity_hash");
+    result.payload_sha256_hex = readScalarStringAttribute(file.get(), "payload_integrity_sha256_hex");
+    if (result.legacy_payload_hash != expected_integrity.legacy_fnv1a ||
+        result.payload_sha256_hex != expected_integrity.sha256_hex ||
+        readScalarStringAttribute(file.get(), "payload_integrity_algorithm") != "sha256-canonical-le-v1") {
+      result.failed_field = "/@payload_integrity";
+      throw std::runtime_error("restart verification integrity metadata mismatch");
+    }
+    result.diagnostics = readRestartDiagnosticsGroup(file.get(), result.schema_version);
+    std::uint64_t scheduler_active_count = 0U;
+    std::uint64_t scheduler_pending_count = 0U;
+    for (std::size_t i = 0; i < expected.scheduler->elementCount(); ++i) {
+      scheduler_active_count += expected.scheduler->isElementActive(static_cast<std::uint32_t>(i)) ? 1ULL : 0ULL;
+      scheduler_pending_count += expected.scheduler->pendingBinIndex(static_cast<std::uint32_t>(i)) != core::HierarchicalTimeBinScheduler::k_unset_pending_bin ? 1ULL : 0ULL;
+    }
+    if (result.diagnostics.restart_schema_name != restartSchema().name ||
+        result.diagnostics.restart_schema_version != restartSchema().version ||
+        result.diagnostics.step_index != expected.integrator_state->step_index ||
+        result.diagnostics.scheduler_current_tick != expected.scheduler->currentTick() ||
+        result.diagnostics.scheduler_max_bin != expected.scheduler->maxBin() ||
+        result.diagnostics.scheduler_element_count != expected.scheduler->elementCount() ||
+        result.diagnostics.scheduler_active_count != scheduler_active_count ||
+        result.diagnostics.scheduler_pending_transition_count != scheduler_pending_count ||
+        result.diagnostics.output_enabled != expected.output_cadence_state.output_enabled ||
+        result.diagnostics.output_snapshot_due != expected.output_cadence_state.snapshot_due ||
+        result.diagnostics.output_checkpoint_due != expected.output_cadence_state.checkpoint_due ||
+        result.diagnostics.output_last_completed_step_index != expected.output_cadence_state.last_completed_step_index ||
+        result.diagnostics.output_next_snapshot_step_index != expected.output_cadence_state.next_snapshot_step_index ||
+        std::bit_cast<std::uint64_t>(result.diagnostics.output_next_snapshot_time_code) !=
+            std::bit_cast<std::uint64_t>(expected.output_cadence_state.next_snapshot_time_code) ||
+        result.diagnostics.stochastic_module_count != expected.stochastic_state.modules.size()) {
+      result.failed_field = "/restart_diagnostics";
+      throw std::runtime_error("restart verification diagnostics summary mismatch");
+    }
+    result.ok = true;
+    result.detail = "streaming field-exact verification complete";
+    workspace_reservation.release();
+    return result;
+  } catch (...) {
+    workspace_reservation.release();
+    throw;
+  }
+#endif
+}
+
 RestartReadResult readRestartCheckpointHdf5(
     const std::filesystem::path& input_path,
     const RestartReadPolicy& policy) {
@@ -3680,7 +4348,17 @@ RestartReadResult readRestartCheckpointHdf5(
     result.gravity_force_cache.cell_accel_x_comoving = readDataset1d<double>(force_cache_group.get(), "cell_accel_x_comoving", H5T_NATIVE_DOUBLE);
     result.gravity_force_cache.cell_accel_y_comoving = readDataset1d<double>(force_cache_group.get(), "cell_accel_y_comoving", H5T_NATIVE_DOUBLE);
     result.gravity_force_cache.cell_accel_z_comoving = readDataset1d<double>(force_cache_group.get(), "cell_accel_z_comoving", H5T_NATIVE_DOUBLE);
-    validateGravityForceCacheForRestart(result.gravity_force_cache, result.state, "restart reader");
+    const GravityForceCachePersistentView read_force_cache_view{
+        .valid = result.gravity_force_cache.valid,
+        .particle_id = result.gravity_force_cache.particle_id,
+        .gas_cell_id = result.gravity_force_cache.gas_cell_id,
+        .particle_accel_x_comoving = result.gravity_force_cache.particle_accel_x_comoving,
+        .particle_accel_y_comoving = result.gravity_force_cache.particle_accel_y_comoving,
+        .particle_accel_z_comoving = result.gravity_force_cache.particle_accel_z_comoving,
+        .cell_accel_x_comoving = result.gravity_force_cache.cell_accel_x_comoving,
+        .cell_accel_y_comoving = result.gravity_force_cache.cell_accel_y_comoving,
+        .cell_accel_z_comoving = result.gravity_force_cache.cell_accel_z_comoving};
+    validateGravityForceCacheForRestart(read_force_cache_view, result.state, "restart reader");
   }
 
   Hdf5Handle scheduler_group(H5Gopen2(file.get(), "/scheduler", H5P_DEFAULT));
@@ -3760,7 +4438,17 @@ RestartReadResult readRestartCheckpointHdf5(
   verify_gas_cell_scheduler.importPersistentState(result.gas_cell_scheduler_state);
   verify_payload.scheduler = &verify_scheduler;
   if (schema_version >= k_restart_schema_v20) {
-    verify_payload.gravity_force_cache = &result.gravity_force_cache;
+    const GravityForceCachePersistentView verify_force_cache_view{
+        .valid = result.gravity_force_cache.valid,
+        .particle_id = result.gravity_force_cache.particle_id,
+        .gas_cell_id = result.gravity_force_cache.gas_cell_id,
+        .particle_accel_x_comoving = result.gravity_force_cache.particle_accel_x_comoving,
+        .particle_accel_y_comoving = result.gravity_force_cache.particle_accel_y_comoving,
+        .particle_accel_z_comoving = result.gravity_force_cache.particle_accel_z_comoving,
+        .cell_accel_x_comoving = result.gravity_force_cache.cell_accel_x_comoving,
+        .cell_accel_y_comoving = result.gravity_force_cache.cell_accel_y_comoving,
+        .cell_accel_z_comoving = result.gravity_force_cache.cell_accel_z_comoving};
+    verify_payload.gravity_force_cache_view = &verify_force_cache_view;
   }
   if (schema_version >= k_restart_schema_v19) {
     verify_payload.gas_cell_scheduler = &verify_gas_cell_scheduler;

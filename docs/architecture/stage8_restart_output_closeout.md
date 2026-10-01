@@ -1,5 +1,7 @@
 # Stage 8 restart/output closeout audit
 
+> **M48-08 update (2026-09-30):** the production checkpoint write path no longer performs a full `RestartReadResult` restoration after every write. `restart.read.complete` at this boundary has been replaced by bounded `restart.verify.complete` streaming verification. Genuine resume still uses the full reader. See `docs/repair/m48_08_streaming_restart_verification_20260930.md`.
+
 ## Scope
 
 This closeout covers the repaired Stage 8 restart/output maturity work after the post-audit upgrade pass. It includes restart-safe boundary checks, schema-versioned restart validation, snapshot-vs-restart file-kind separation, output cadence persistence, deterministic stochastic module contracts, a reusable direct-vs-restarted equivalence harness, stronger production-path equivalence tests, and restart read/write diagnostics.

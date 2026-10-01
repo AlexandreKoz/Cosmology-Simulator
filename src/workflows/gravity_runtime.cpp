@@ -748,9 +748,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
   [[nodiscard]] std::span<const double> particleAccelY() const noexcept { return m_particle_accel_y; }
   [[nodiscard]] std::span<const double> particleAccelZ() const noexcept { return m_particle_accel_z; }
 
-  [[nodiscard]] io::GravityForceCachePersistentState exportRestartForceCache(
+  [[nodiscard]] io::GravityForceCachePersistentView restartForceCacheView(
       const core::SimulationState& state) const {
-    io::GravityForceCachePersistentState cache;
+    io::GravityForceCachePersistentView cache;
     cache.valid = m_force_cache_valid;
     if (!cache.valid) {
       return cache;
@@ -771,8 +771,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
       throw std::runtime_error(
           "gravity force cache cannot be checkpointed because its dense lanes do not match SimulationState");
     }
-    cache.particle_id.assign(state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
-    cache.gas_cell_id.assign(state.gas_cells.gas_cell_id.begin(), state.gas_cells.gas_cell_id.end());
+    cache.particle_id = state.particle_sidecar.particle_id;
+    cache.gas_cell_id = state.gas_cells.gas_cell_id;
     cache.particle_accel_x_comoving = m_particle_accel_x;
     cache.particle_accel_y_comoving = m_particle_accel_y;
     cache.particle_accel_z_comoving = m_particle_accel_z;
