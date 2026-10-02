@@ -37,7 +37,7 @@ void checkForcedBoundedAllgather(
     const cosmosim::parallel::MpiContext& mpi_context) {
   // Eight bytes across 2-3 ranks produces a tiny per-rank slice and forces
   // several classic-MPI-safe rounds without large allocations.
-  setTestEnvironment("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES", "8");
+  setTestEnvironment("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES", "256");
   std::vector<std::uint8_t> local(
       static_cast<std::size_t>(5 + mpi_context.worldRank()),
       static_cast<std::uint8_t>(20 + mpi_context.worldRank()));

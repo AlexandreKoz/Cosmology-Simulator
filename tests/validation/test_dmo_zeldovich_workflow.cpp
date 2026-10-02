@@ -1348,7 +1348,7 @@ void runScientificValidation(const ParallelRuntime& runtime, const std::filesyst
   const cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
 
   const auto direct_report = runner.run(
-      root / ("rank_" + std::to_string(runtime.world_rank) + "_direct"),
+      root / "direct",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .step_index = 0U,
           .dt_time_code = k_step_dt_code,
@@ -1365,7 +1365,7 @@ void runScientificValidation(const ParallelRuntime& runtime, const std::filesyst
       cosmosim::io::readRestartCheckpointHdf5(direct_report.restart_path);
 
   const auto first_report = runner.run(
-      root / ("rank_" + std::to_string(runtime.world_rank) + "_first"),
+      root / "first",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .step_index = 0U,
           .dt_time_code = k_step_dt_code,
@@ -1381,7 +1381,7 @@ void runScientificValidation(const ParallelRuntime& runtime, const std::filesyst
       cosmosim::io::readRestartCheckpointHdf5(first_report.restart_path);
 
   const auto resumed_report = runner.run(
-      root / ("rank_" + std::to_string(runtime.world_rank) + "_resumed"),
+      root / "resumed",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .step_index = 0U,
           .dt_time_code = 0.0,

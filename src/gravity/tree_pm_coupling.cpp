@@ -3763,6 +3763,30 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     }
     coordinate_protocol_failure(local_domain_failure, "top-level domain preparation");
 
+    const int local_requires_geometry_fallback = local_authoritative_geometry ? 0 : 1;
+    int any_rank_requires_geometry_fallback = 0;
+    requireTreePmMpiSuccess(
+        MPI_Allreduce(
+            &local_requires_geometry_fallback,
+            &any_rank_requires_geometry_fallback,
+            1,
+            MPI_INT,
+            MPI_MAX,
+            MPI_COMM_WORLD),
+        "TreePM LET collective geometry-fallback agreement MPI_Allreduce");
+    if (any_rank_requires_geometry_fallback != 0 && local_authoritative_geometry) {
+      local_authoritative_geometry = false;
+      geometry_fallback_reason = TreePmDomainGeometryFallbackReason::kCollectivePeerFallback;
+      local_top_level_domain.clear();
+      local_top_level_domain.push_back(makeLocalTreePseudoParticlePacket(
+          mpi_world_rank,
+          options.decomposition_epoch.value,
+          options.force_epoch.sequence,
+          exchange_sequence,
+          m_tree_solver.nodes(),
+          pos_x_comoving.size()));
+    }
+
     m_last_residual_stats.domain_geometry_source_generation =
         options.authoritative_geometry_source_generation.value;
     m_last_residual_stats.current_gravity_source_generation =

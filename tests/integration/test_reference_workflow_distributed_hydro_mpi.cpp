@@ -163,7 +163,7 @@ int main() {
       "test_reference_workflow_distributed_hydro_mpi_direct");
   cosmosim::workflows::ReferenceWorkflowRunner direct_runner(direct_frozen);
   const auto direct_report = direct_runner.run(
-      root / ("rank_" + std::to_string(world_rank) + "_direct"),
+      root / "direct",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .write_outputs = true,
           .initial_state_override = &initial_state,
@@ -189,7 +189,7 @@ int main() {
       "test_reference_workflow_distributed_hydro_mpi_restart");
   cosmosim::workflows::ReferenceWorkflowRunner restart_runner(restart_frozen);
   const auto first_report = restart_runner.run(
-      root / ("rank_" + std::to_string(world_rank) + "_first"),
+      root / "first",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .write_outputs = true,
           .initial_state_override = &initial_state,
@@ -197,7 +197,7 @@ int main() {
   assert(first_report.restart_roundtrip_ok);
   const auto first_restart = cosmosim::io::readRestartCheckpointHdf5(first_report.restart_path);
   const auto resumed_report = restart_runner.run(
-      root / ("rank_" + std::to_string(world_rank) + "_resumed"),
+      root / "resumed",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .write_outputs = true,
           .restart_state_override = &first_restart,

@@ -38,6 +38,7 @@ enum class TreePmDomainGeometryFallbackReason : std::uint32_t {
   kDecompositionEpochMismatch = 3,
   kSourceCoverageFailure = 4,
   kGeometryPreparationFailure = 5,
+  kCollectivePeerFallback = 6,
 };
 
 [[nodiscard]] inline const char* treePmDomainGeometryFallbackReasonName(
@@ -55,6 +56,8 @@ enum class TreePmDomainGeometryFallbackReason : std::uint32_t {
       return "source_coverage_failure";
     case TreePmDomainGeometryFallbackReason::kGeometryPreparationFailure:
       return "geometry_preparation_failure";
+    case TreePmDomainGeometryFallbackReason::kCollectivePeerFallback:
+      return "collective_peer_fallback";
   }
   return "unknown";
 }

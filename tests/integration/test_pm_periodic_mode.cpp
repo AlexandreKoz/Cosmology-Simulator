@@ -190,7 +190,11 @@ void runDistributedDensityAssignmentCase(cosmosim::gravity::PmAssignmentScheme s
 
   cosmosim::gravity::PmProfileEvent profile;
   local_solver.assignDensity(local_grid, local_x, local_y, local_z, local_mass, options, &profile);
-  requireOrThrow(profile.routed_density_records > 0, "Distributed PM density route did not report routed records");
+  std::uint64_t global_routed_density_records = 0U;
+  MPI_Allreduce(
+      &profile.routed_density_records, &global_routed_density_records,
+      1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  requireOrThrow(global_routed_density_records > 0, "Distributed PM density route did not report any global routed records");
   requireOrThrow(profile.routed_density_peer_count > 0, "Distributed PM density route did not report participating peers");
   requireOrThrow(profile.routed_mpi_bytes_sent > 0, "Distributed PM density route did not report sent wire bytes");
   requireOrThrow(
@@ -666,7 +670,11 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
   std::vector<double> local_az(local_x.size(), 0.0);
   cosmosim::gravity::PmProfileEvent profile;
   local_solver.solveForParticles(local_grid, local_x, local_y, local_z, local_mass, local_ax, local_ay, local_az, options, &profile);
-  requireOrThrow(profile.routed_density_records > 0, "Distributed PM solve did not report routed density records");
+  std::uint64_t global_routed_density_records = 0U;
+  MPI_Allreduce(
+      &profile.routed_density_records, &global_routed_density_records,
+      1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  requireOrThrow(global_routed_density_records > 0, "Distributed PM solve did not report any global routed density records");
   const std::uint64_t local_force_route_count = profile.routed_force_requests + profile.force_halo_cache_hits;
   std::uint64_t global_force_route_count = 0U;
   MPI_Allreduce(

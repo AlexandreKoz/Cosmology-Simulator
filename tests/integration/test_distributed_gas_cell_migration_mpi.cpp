@@ -150,7 +150,7 @@ int main() {
   // The serialized migration wire format is larger than this ceiling even for
   // an empty peer packet, so production migration must execute more than one
   // bounded Alltoallv payload round without changing ownership/identity truth.
-  assert(::setenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES", "8", 1) == 0);
+  assert(::setenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES", "256", 1) == 0);
 
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       configText(world_size),

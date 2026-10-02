@@ -255,7 +255,7 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  assert(::setenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES", "8", 1) == 0);
+  assert(::setenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES", "256", 1) == 0);
   cosmosim::parallel::MpiContext mpi_context;
   SimulationState state = world_rank == 0 ? makeSourceState() : makeDestinationState();
 

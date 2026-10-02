@@ -2019,7 +2019,10 @@ void validateConfig(const SimulationConfig& config) {
         mesh_spacing_x, mesh_spacing_y, mesh_spacing_z});
     const double split_scale =
         config.numerics.treepm_asmth_cells * representative_mesh_spacing;
-    if (split_scale < coarsest_mesh_spacing) {
+    const double split_scale_boundary_tolerance =
+        8.0 * std::numeric_limits<double>::epsilon() *
+        std::max({1.0, std::abs(split_scale), std::abs(coarsest_mesh_spacing)});
+    if (split_scale + split_scale_boundary_tolerance < coarsest_mesh_spacing) {
       throw ConfigError(
           "periodic TreePM rectangular-grid support requires the spherical split scale "
           "treepm_asmth_cells*cbrt(dx*dy*dz) to be >= the coarsest PM cell spacing; "

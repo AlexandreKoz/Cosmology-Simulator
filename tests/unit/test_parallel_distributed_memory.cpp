@@ -1921,6 +1921,42 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
   assert(cosmosim::parallel::topDomainGeometryFingerprint(changed) != fingerprint);
 }
 
+void testTopDomainRefitPreservesTiedIntervals() {
+  cosmosim::parallel::DecompositionConfig config;
+  config.world_size = 1;
+  std::vector<cosmosim::parallel::TopDomainLeaf> seeds(2);
+  for (std::size_t i = 0; i < seeds.size(); ++i) {
+    seeds[i].domain_leaf_id = 100U + static_cast<std::uint64_t>(i);
+    seeds[i].owner_rank = 0;
+    seeds[i].decomposition_epoch = 7U;
+    seeds[i].sfc_key_begin = 0U;
+    seeds[i].sfc_key_end = std::numeric_limits<std::uint64_t>::max();
+    seeds[i].periodic_geometry = true;
+  }
+  const std::vector<double> x{0.10, 0.20, 0.30, 0.40};
+  const std::vector<double> y{0.11, 0.21, 0.31, 0.41};
+  const std::vector<double> z{0.12, 0.22, 0.32, 0.42};
+  cosmosim::parallel::TopDomainGeometryRefitDiagnostics diagnostics;
+  const auto refreshed = cosmosim::parallel::refitAuthoritativeTopDomainLeaves(
+      seeds, x, y, z, config, 0, 7U, &diagnostics);
+  assert(refreshed.size() == 2U);
+  assert(diagnostics.empty_seed_leaf_count == 0U);
+  assert(refreshed[0].domain_leaf_id == seeds[0].domain_leaf_id);
+  assert(refreshed[1].domain_leaf_id == seeds[1].domain_leaf_id);
+  assert(refreshed[0].entity_count > 0U);
+  assert(refreshed[1].entity_count > 0U);
+  assert(refreshed[0].entity_count + refreshed[1].entity_count == x.size());
+  const auto repeated = cosmosim::parallel::refitAuthoritativeTopDomainLeaves(
+      seeds, x, y, z, config, 0, 7U, nullptr);
+  assert(repeated.size() == refreshed.size());
+  for (std::size_t i = 0; i < refreshed.size(); ++i) {
+    assert(repeated[i].domain_leaf_id == refreshed[i].domain_leaf_id);
+    assert(repeated[i].entity_count == refreshed[i].entity_count);
+    assert(repeated[i].min_x_comov == refreshed[i].min_x_comov);
+    assert(repeated[i].max_x_comov == refreshed[i].max_x_comov);
+  }
+}
+
 bool nearMetric(double measured, double reference) {
   const double scale = std::max({1.0, std::abs(measured), std::abs(reference)});
   return std::abs(measured - reference) <= 1e-9 * scale;
@@ -2583,5 +2619,6 @@ int main() {
   testHardRankMemoryConstraintAndExpandedCostModel();
   testMemoryFeasibilityPrecedesWorkBalancing();
   testAuthoritativeTopDomainLeavesPreserveOwnedGeometry();
+  testTopDomainRefitPreservesTiedIntervals();
   return 0;
 }

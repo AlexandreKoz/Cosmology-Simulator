@@ -1077,8 +1077,7 @@ int main(int argc, char** argv) {
         mpi_context.allreduceSumUint64(
             result.report.counters.exact_audit_exchange_count);
     const std::uint64_t global_routing_collective_phases =
-        mpi_context.allreduceSumUint64(
-            result.report.counters.routing_collective_phase_count);
+        result.report.counters.routing_collective_phase_count;
     assert(global_batches > 0U && global_batches <= expected_chunks);
     if (!policy_mode) assert(global_batches < expected_chunks);
     assert(global_file_opens == K_MEMBER_COUNT);
@@ -1092,8 +1091,7 @@ int main(int argc, char** argv) {
     assert(global_routing_collective_phases > global_batches);
     assert(global_routing_collective_phases <= 24U * global_batches);
     const std::uint64_t global_collective_phases =
-        mpi_context.allreduceSumUint64(
-            result.report.counters.collective_phase_count);
+        result.report.counters.collective_phase_count;
     assert(global_collective_phases > global_batches);
 
     if (world_size > 1) {

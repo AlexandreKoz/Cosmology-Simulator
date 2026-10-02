@@ -1322,10 +1322,23 @@ std::vector<TopDomainLeaf> refitAuthoritativeTopDomainLeaves(
     }
     const std::uint64_t key = sfc_key_for_source(x, y, z);
     std::size_t selected = working.size();
-    for (std::size_t i = 0; i < working.size(); ++i) {
-      if (key >= working[i].sfc_key_begin && key <= working[i].sfc_key_end) {
-        selected = i;
-        break;
+    std::size_t matching_interval_count = 0U;
+    for (const TopDomainLeaf& leaf : working) {
+      if (key >= leaf.sfc_key_begin && key <= leaf.sfc_key_end) {
+        ++matching_interval_count;
+      }
+    }
+    if (matching_interval_count != 0U) {
+      const std::size_t selected_ordinal = source_index % matching_interval_count;
+      std::size_t matching_ordinal = 0U;
+      for (std::size_t i = 0; i < working.size(); ++i) {
+        if (key >= working[i].sfc_key_begin && key <= working[i].sfc_key_end) {
+          if (matching_ordinal == selected_ordinal) {
+            selected = i;
+            break;
+          }
+          ++matching_ordinal;
+        }
       }
     }
     if (selected == working.size()) {
