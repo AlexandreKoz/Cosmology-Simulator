@@ -345,15 +345,16 @@ void testTreePmRuntimeMemoryReportAccountsLiveSolverBuffers() {
   const cosmosim::core::MemoryReport report = coordinator.memoryReport();
   bool saw_pm_mesh = false;
   bool saw_tree_category = false;
-  bool saw_mpi_buffers = false;
+  bool saw_tree_exchange_accounting = false;
   for (const auto& entry : report.entries) {
     saw_pm_mesh = saw_pm_mesh || entry.label == "pm_mesh.density";
     saw_tree_category = saw_tree_category || entry.subsystem == cosmosim::core::MemorySubsystem::kTree;
-    saw_mpi_buffers = saw_mpi_buffers || entry.label == "treepm.exchange.send_payload";
+    saw_tree_exchange_accounting = saw_tree_exchange_accounting ||
+        entry.label == "treepm.communication.tree_exchange_logical_high_water";
   }
   assert(saw_pm_mesh);
   assert(saw_tree_category);
-  assert(saw_mpi_buffers);
+  assert(saw_tree_exchange_accounting);
   assert(report.totals.transient_by_subsystem[cosmosim::core::memorySubsystemIndex(cosmosim::core::MemorySubsystem::kPmMesh)] > 0);
 }
 

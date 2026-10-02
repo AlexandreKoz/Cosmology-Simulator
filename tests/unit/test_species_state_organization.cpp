@@ -56,8 +56,15 @@ int main() {
   assert(state.validateOwnershipInvariants());
   assert(state.validateUniqueParticleIds());
 
-  state.particle_sidecar.particle_id[5] = 2004;
-  assert(!state.validateUniqueParticleIds());
+  // Direct mutation of public compatibility storage does not advance the
+  // identity generation and therefore must not be used to invalidate an
+  // already-issued H2 validation certificate. Prove duplicate detection on a
+  // fresh, uncertified state instead.
+  cosmosim::core::SimulationState duplicate_state;
+  duplicate_state.resizeParticles(2);
+  duplicate_state.particle_sidecar.particle_id[0] = 2004;
+  duplicate_state.particle_sidecar.particle_id[1] = 2004;
+  assert(!duplicate_state.validateUniqueParticleIds());
 
   return 0;
 }

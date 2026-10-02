@@ -1227,7 +1227,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
         }
         force_target_particles = m_force_refresh_particle_indices;
       }
-      source_prediction_epoch = SourcePredictionEpoch::kStepBegin;
+      // A pre-kick rebuild evaluates the force cache at the step-begin
+      // epoch. A post-kick rebuild evaluates at step end, where source-term
+      // births already exist. Treating both kick stages as step-begin would
+      // attempt to back-predict newborn sources to an epoch before creation.
+      source_prediction_epoch =
+          context.stage == core::IntegrationStage::kGravityKickPre
+          ? SourcePredictionEpoch::kStepBegin
+          : SourcePredictionEpoch::kStepEnd;
     }
 
     // Budget against a conservative per-rank upper bound before materializing
@@ -2994,8 +3001,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
             ? context.timeline_step.scale_factor_begin
             : context.timeline_step.scale_factor_end;
         if (source_time > evaluation_time + 1.0e-12 || source_scale <= 0.0) {
-          throw std::runtime_error(
-              "inactive PM source has an invalid or future drift epoch");
+          std::ostringstream message;
+          message << "inactive PM source has an invalid or future drift epoch"
+                  << " source_index=" << global_index
+                  << " source_time=" << source_time
+                  << " evaluation_time=" << evaluation_time
+                  << " source_scale=" << source_scale
+                  << " evaluation_scale=" << evaluation_scale;
+          throw std::runtime_error(message.str());
         }
         double inactive_drift_factor = evaluation_time - source_time;
         if (context.cosmology_background != nullptr) {

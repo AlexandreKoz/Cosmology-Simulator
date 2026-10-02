@@ -1285,6 +1285,13 @@ class SourceRuntimeImpl final : public SourceRuntime {
           throw std::runtime_error(
               "source runtime star-formation report disagrees with appended particle rows");
         }
+        for (std::size_t particle_index = particle_count_before_birth;
+             particle_index < particle_count_after_birth; ++particle_index) {
+          context.state.particle_sidecar.last_drift_time_code[particle_index] =
+              context.timeline_step.time_end_code;
+          context.state.particle_sidecar.last_drift_scale_factor[particle_index] =
+              source_evaluation_scale_factor;
+        }
         internal::synchronizeParentParticleCompatibilityMirrors(
             context.state, m_world_rank, "SourceRuntime star-formation batch");
         if (context.newly_created_particle_ids != nullptr) {

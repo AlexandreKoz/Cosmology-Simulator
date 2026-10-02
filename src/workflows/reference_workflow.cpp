@@ -886,8 +886,24 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         .local_particle_id_xor = report.global_particle_id_xor,
         .local_particle_ids_unique = final_all_ranks_have_unique_local_ids,
     };
-    const parallel::LocalOwnershipIdentitySummary& final_expected_global_identity =
-        expected_global_identity;
+    // Source terms can legitimately grow the authoritative particle population
+    // after the initial decomposition (for example by spawning star particles).
+    // The exact expected-ID lane is extended by TimeCoordinator at each birth
+    // event, so derive the final scalar identity from that current authority
+    // instead of comparing the evolved state against the immutable IC digest.
+    const auto final_local_expected_identity =
+        parallel::summarizeLocalOwnedParticleIds(expected_global_particle_ids, true);
+    const parallel::LocalOwnershipIdentitySummary final_expected_global_identity{
+        .local_owned_count = mpi_context.allreduceSumUint64(
+            final_local_expected_identity.local_owned_count),
+        .local_particle_id_sum = mpi_context.allreduceSumUint64(
+            final_local_expected_identity.local_particle_id_sum),
+        .local_particle_id_square_sum = mpi_context.allreduceSumUint64(
+            final_local_expected_identity.local_particle_id_square_sum),
+        .local_particle_id_xor = mpi_context.allreduceXorUint64(
+            final_local_expected_identity.local_particle_id_xor),
+        .local_particle_ids_unique = true,
+    };
     std::vector<std::uint64_t> final_generic_local_owned_particle_ids;
     std::span<const std::uint64_t> final_local_owned_particle_ids = state.particle_sidecar.particle_id;
     if (!state.hasHomogeneousDmoMetadata()) {

@@ -1490,7 +1490,8 @@ struct DomainCoverageResult {
     std::uint64_t decomposition_epoch,
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
-    std::span<const double> pos_z_comoving) {
+    std::span<const double> pos_z_comoving,
+    const PeriodicBoxLengths& box_lengths) {
   DomainCoverageResult result;
   if (pos_x_comoving.size() != pos_y_comoving.size() ||
       pos_x_comoving.size() != pos_z_comoving.size()) {
@@ -1519,12 +1520,19 @@ struct DomainCoverageResult {
         epoch_mismatch_seen = true;
         continue;
       }
-      if (pos_x_comoving[source_index] >= leaf.min_x_comov - k_geometry_tolerance &&
-          pos_x_comoving[source_index] <= leaf.max_x_comov + k_geometry_tolerance &&
-          pos_y_comoving[source_index] >= leaf.min_y_comov - k_geometry_tolerance &&
-          pos_y_comoving[source_index] <= leaf.max_y_comov + k_geometry_tolerance &&
-          pos_z_comoving[source_index] >= leaf.min_z_comov - k_geometry_tolerance &&
-          pos_z_comoving[source_index] <= leaf.max_z_comov + k_geometry_tolerance) {
+      SourceDomainBoundsPacket bounds;
+      bounds.min_x_comoving = leaf.min_x_comov;
+      bounds.max_x_comoving = leaf.max_x_comov;
+      bounds.min_y_comoving = leaf.min_y_comov;
+      bounds.max_y_comoving = leaf.max_y_comov;
+      bounds.min_z_comoving = leaf.min_z_comov;
+      bounds.max_z_comoving = leaf.max_z_comov;
+      bounds.source_particle_count = leaf.entity_count;
+      if (minimumDistanceToPeriodicBounds(
+              pos_x_comoving[source_index],
+              pos_y_comoving[source_index],
+              pos_z_comoving[source_index],
+              bounds, box_lengths) <= k_geometry_tolerance) {
         covered = true;
         break;
       }
@@ -1550,9 +1558,11 @@ struct DomainCoverageResult {
     std::uint64_t decomposition_epoch,
     std::span<const double> pos_x_comoving,
     std::span<const double> pos_y_comoving,
-    std::span<const double> pos_z_comoving) {
+    std::span<const double> pos_z_comoving,
+    const PeriodicBoxLengths& box_lengths) {
   return authoritativeDomainCoversLocalSourcesEx(
-      leaves, world_rank, decomposition_epoch, pos_x_comoving, pos_y_comoving, pos_z_comoving)
+      leaves, world_rank, decomposition_epoch, pos_x_comoving, pos_y_comoving, pos_z_comoving,
+      box_lengths)
       .covered;
 }
 
@@ -3730,7 +3740,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             options.decomposition_epoch.value,
             pos_x_comoving,
             pos_y_comoving,
-            pos_z_comoving);
+            pos_z_comoving,
+            box_lengths);
         geometry_uncovered_source_count = coverage.uncovered_source_count;
         local_authoritative_geometry = coverage.covered;
         if (!coverage.covered) {

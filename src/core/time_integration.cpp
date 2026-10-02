@@ -1340,7 +1340,21 @@ void HierarchicalTimeBinScheduler::planAppendCapacity(
     if (initial_bin != 0U) {
       throw std::invalid_argument("uniform rung-zero append requires initial_bin == 0");
     }
-    plan.add(m_active_elements, target);
+    plan.add(m_active_sort_scratch, target);
+    plan.add(m_elements_by_bin, 1U);
+    // Population creation is the boundary where a homogeneous-DMO scheduler
+    // may need a future activation tick. Budget the one-time generic
+    // materialization here so appendElements() never creates an ungoverned
+    // O(N) compatibility lane when that happens. Bin-0 membership is staged
+    // through the already-governed sort scratch so any open active-set span
+    // remains valid until the normal substep invalidation boundary.
+    plan.add(m_hot.bin_index, target);
+    plan.add(m_hot.next_activation_tick, target);
+    plan.add(m_hot.active_flag, target);
+    plan.add(m_hot.pending_bin_index, target);
+    plan.add(m_position_in_bin, target);
+    plan.add(m_candidate_bin_index, target);
+    plan.add(m_candidate_source, target);
     return;
   }
   plan.add(m_hot.bin_index, target);
@@ -1359,6 +1373,34 @@ void HierarchicalTimeBinScheduler::planAppendCapacity(
 }
 
 
+void HierarchicalTimeBinScheduler::materializeGenericRepresentationForAppend() {
+  if (m_representation != SchedulerRepresentation::kUniformRungZero) {
+    return;
+  }
+  const std::size_t count = static_cast<std::size_t>(m_element_count);
+  m_hot.bin_index.assign(count, 0U);
+  m_hot.next_activation_tick.assign(count, m_current_tick);
+  m_hot.active_flag.assign(count, m_substep_open ? 1U : 0U);
+  m_hot.pending_bin_index.assign(count, m_uniform_pending_bin_index);
+  m_position_in_bin.resize(count);
+  std::iota(m_position_in_bin.begin(), m_position_in_bin.end(), std::size_t{0});
+  m_candidate_bin_index.assign(count, k_unset_pending_bin);
+  m_candidate_source.assign(count, TimeStepCandidateSource::kUserClamp);
+
+  m_active_sort_scratch.resize(count);
+  std::iota(m_active_sort_scratch.begin(), m_active_sort_scratch.end(), 0U);
+  m_elements_by_bin.clear();
+  m_elements_by_bin.resize(1U);
+  m_elements_by_bin[0] = std::move(m_active_sort_scratch);
+  // Keep m_active_elements untouched while a substep is open: StepContext may
+  // still hold a span into the current active set. The normal endSubstep()/
+  // next beginSubstep rebuild is the safe invalidation boundary.
+  m_uniform_pending_bin_index = k_unset_pending_bin;
+  m_representation = SchedulerRepresentation::kGenericHierarchical;
+  refreshOwnedCapacityHighWater();
+  validateInternalState("HierarchicalTimeBinScheduler::materializeGenericRepresentationForAppend");
+}
+
 void HierarchicalTimeBinScheduler::appendElements(
     std::uint32_t new_element_count,
     std::uint8_t initial_bin,
@@ -1369,11 +1411,8 @@ void HierarchicalTimeBinScheduler::appendElements(
     throw std::overflow_error("HierarchicalTimeBinScheduler::appendElements element count overflow");
   }
   const std::uint32_t total_count = old_count + new_element_count;
-  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
-    if (initial_bin != 0U || first_activation_tick != m_current_tick) {
-      throw std::invalid_argument(
-          "uniform rung-zero append requires bin 0 and activation at current scheduler tick");
-    }
+  if (m_representation == SchedulerRepresentation::kUniformRungZero &&
+      initial_bin == 0U && first_activation_tick == m_current_tick) {
     m_active_elements.resize(total_count);
     for (std::uint32_t element = old_count; element < total_count; ++element) {
       m_active_elements[element] = element;
@@ -1382,6 +1421,12 @@ void HierarchicalTimeBinScheduler::appendElements(
     m_diagnostics.occupancy_by_bin[0] = total_count;
     refreshOwnedCapacityHighWater();
     return;
+  }
+  if (m_representation == SchedulerRepresentation::kUniformRungZero) {
+    if (initial_bin != 0U) {
+      throw std::invalid_argument("uniform rung-zero scheduler append requires initial_bin == 0");
+    }
+    materializeGenericRepresentationForAppend();
   }
   const std::uint8_t clamped_bin = clampBin(initial_bin);
   m_hot.bin_index.resize(total_count, clamped_bin);

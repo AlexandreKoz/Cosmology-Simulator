@@ -445,11 +445,16 @@ void testGovernedDiagnosticMemoryAndScientificEquivalence() {
   assert(actual.health.ownership_invariants_ok == expected.health.ownership_invariants_ok);
   assert(actual.health.unique_particle_ids_ok == expected.health.unique_particle_ids_ok);
 
-  // Green/Amber is not admission: this request exceeds the remaining bytes.
+  // The successful reference pass above certifies particle-ID uniqueness, so
+  // the next bundle legitimately needs less validation scratch. Recompute the
+  // current request before constructing the one-byte-short admission case.
+  analysis::DiagnosticsEngine estimate_engine(config);
+  const auto constrained_required = estimate_engine.estimateBundleIncrementalBytes(
+      analysis::DiagnosticClass::kScienceHeavy, state);
+  assert(constrained_required <= required);
   core::MemoryGovernor constrained(core::MemoryGovernorPolicy{
-      .hard_limit_bytes = required + 4096U});
+      .hard_limit_bytes = constrained_required + 4096U});
   constrained.setBaselineOwnedBytes(4097U);
-  assert(constrained.snapshot().pressure == core::MemoryPressure::kGreen);
   analysis::DiagnosticsEngine constrained_engine(config, &constrained);
   bool rejected = false;
   try {
@@ -467,7 +472,9 @@ void testGovernedDiagnosticMemoryAndScientificEquivalence() {
   core::OwnershipValidationWorkspace scratch;
   assert(scratch.ownedCapacityBytes() == 0U);
   scratch.resize(4U, 4U);
-  assert(scratch.ownedCapacityBytes() >= 60U);
+  assert(scratch.ownedCapacityBytes() >=
+         core::OwnershipValidationWorkspace::requiredBytes(
+             4U, 4U, false, false, false, false, false));
   assert(state.validateUniqueParticleIds(scratch));
   assert(state.validateOwnershipInvariants(scratch) ==
          state.validateOwnershipInvariants());

@@ -1921,6 +1921,47 @@ void testAuthoritativeTopDomainLeavesPreserveOwnedGeometry() {
   assert(cosmosim::parallel::topDomainGeometryFingerprint(changed) != fingerprint);
 }
 
+void testAuthoritativeTopDomainPeriodicSeamBoundsStayCompact() {
+  cosmosim::parallel::DecompositionConfig config;
+  config.world_size = 1;
+  config.domain_x_min_comov = 0.0;
+  config.domain_x_max_comov = 1.0;
+  config.domain_y_min_comov = 0.0;
+  config.domain_y_max_comov = 1.0;
+  config.domain_z_min_comov = 0.0;
+  config.domain_z_max_comov = 1.0;
+
+  std::vector<cosmosim::parallel::DecompositionItem> items;
+  for (std::size_t i = 0; i < 4U; ++i) {
+    cosmosim::parallel::DecompositionItem item;
+    item.entity_id = 10U + i;
+    item.current_owner_rank = 0;
+    item.x_comov = i < 2U ? 0.995 + 0.001 * static_cast<double>(i)
+                          : 0.002 + 0.001 * static_cast<double>(i - 2U);
+    item.y_comov = 0.40 + 0.01 * static_cast<double>(i);
+    item.z_comov = 0.60 + 0.01 * static_cast<double>(i);
+    items.push_back(item);
+  }
+
+  const auto leaves = cosmosim::parallel::buildAuthoritativeTopDomainLeaves(
+      items, config, 0, 9U, 1U);
+  assert(leaves.size() == 1U);
+  const auto& leaf = leaves.front();
+  assert(leaf.periodic_geometry);
+  assert(leaf.max_x_comov - leaf.min_x_comov < 0.02);
+  assert(leaf.min_x_comov < leaf.max_x_comov);
+
+  std::vector<cosmosim::parallel::TopDomainLeaf> seeds{leaf};
+  const std::vector<double> x{0.997, 0.001, 0.004};
+  const std::vector<double> y{0.2, 0.2, 0.2};
+  const std::vector<double> z{0.3, 0.3, 0.3};
+  const auto refreshed = cosmosim::parallel::refitAuthoritativeTopDomainLeaves(
+      seeds, x, y, z, config, 0, 9U, nullptr);
+  assert(refreshed.size() == 1U);
+  assert(refreshed.front().max_x_comov - refreshed.front().min_x_comov < 0.02);
+  assert(refreshed.front().domain_leaf_id == leaf.domain_leaf_id);
+}
+
 void testTopDomainRefitPreservesTiedIntervals() {
   cosmosim::parallel::DecompositionConfig config;
   config.world_size = 1;
@@ -2619,6 +2660,7 @@ int main() {
   testHardRankMemoryConstraintAndExpandedCostModel();
   testMemoryFeasibilityPrecedesWorkBalancing();
   testAuthoritativeTopDomainLeavesPreserveOwnedGeometry();
+  testAuthoritativeTopDomainPeriodicSeamBoundsStayCompact();
   testTopDomainRefitPreservesTiedIntervals();
   return 0;
 }

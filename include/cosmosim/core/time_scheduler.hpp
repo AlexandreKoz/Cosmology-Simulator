@@ -287,6 +287,7 @@ class HierarchicalTimeBinScheduler {
       std::uint8_t target_bin,
       std::string_view source_label) const;
   void refreshOwnedCapacityHighWater();
+  void materializeGenericRepresentationForAppend();
 
   std::uint64_t m_current_tick = 0;
   std::uint32_t m_element_count = 0;

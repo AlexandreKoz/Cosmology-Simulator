@@ -3,6 +3,20 @@
 > **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
 
 
+
+## 2026-10-02 P5-Q3 remaining qualification gates
+
+The known P5-Q2 source backlog addressed by P5-Q3 is closed for the exercised
+CPU and serial-HDF5 paths: compact periodic-seam top-domain geometry, scheduler
+promotion for future-activated source births, newborn drift/post-kick epoch
+handling, evolved-population final ownership validation, and stale CPU fixtures.
+DMO and TreePM single-rank restart equivalence pass exactly. Remaining gates are
+qualification rather than known source defects: run the MPI+OpenMP force-vector
+matrix, event-by-event collective fallback/recovery sequence, MPI restart
+publication smoke, and Parallel-HDF5 provider-family matrix on a host providing
+MPI C++, Parallel HDF5, FFTW and FFTW-MPI. Do not start P5-W as a substitute for
+those gates.
+
 ## 2026-09-21 first-light science-I/O closure remaining qualification gates
 
 Source-level closure now covers order-independent zero-based external IDs, numerically consistent distributed mass auditing, one-file Parallel-HDF5 science-output topology, transactional publication, and final-endpoint output. Remaining items are qualification/scale extensions rather than permission to fall back silently:

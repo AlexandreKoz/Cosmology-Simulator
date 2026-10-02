@@ -98,6 +98,122 @@ using internal::injectMpiTestFault;
   return (expandBits3d(z) << 2U) | (expandBits3d(y) << 1U) | expandBits3d(x);
 }
 
+struct PeriodicAxisBounds {
+  double domain_min = 0.0;
+  double domain_max = 1.0;
+  double anchor = 0.0;
+  double lower = 0.0;
+  double upper = 0.0;
+  bool initialized = false;
+};
+
+[[nodiscard]] double periodicImageNear(
+    double value, double anchor, double domain_min, double domain_max) {
+  const double extent = domain_max - domain_min;
+  if (!(extent > 0.0) || !std::isfinite(extent)) {
+    throw std::invalid_argument("periodic top-domain geometry requires positive finite domain extents");
+  }
+  const double canonical = value - extent * std::floor((value - domain_min) / extent);
+  double image = anchor + std::remainder(canonical - anchor, extent);
+  // std::remainder has an implementation-defined sign choice only at exact
+  // half-box ties. Select the lower image deterministically so geometry
+  // fingerprints do not depend on libm tie handling.
+  const double half = 0.5 * extent;
+  if (image - anchor >= half) {
+    image -= extent;
+  }
+  return image;
+}
+
+void expandPeriodicPoint(PeriodicAxisBounds& bounds, double value) {
+  if (!std::isfinite(value)) {
+    throw std::invalid_argument("periodic top-domain geometry found a non-finite coordinate");
+  }
+  if (!bounds.initialized) {
+    const double extent = bounds.domain_max - bounds.domain_min;
+    if (!(extent > 0.0) || !std::isfinite(extent)) {
+      throw std::invalid_argument("periodic top-domain geometry requires positive finite domain extents");
+    }
+    const double canonical = value - extent * std::floor((value - bounds.domain_min) / extent);
+    bounds.anchor = canonical;
+    bounds.lower = canonical;
+    bounds.upper = canonical;
+    bounds.initialized = true;
+    return;
+  }
+  const double image = periodicImageNear(
+      value, bounds.anchor, bounds.domain_min, bounds.domain_max);
+  bounds.lower = std::min(bounds.lower, image);
+  bounds.upper = std::max(bounds.upper, image);
+}
+
+void expandPeriodicRange(
+    PeriodicAxisBounds& bounds, double lower, double upper, double representative) {
+  if (!std::isfinite(lower) || !std::isfinite(upper) || !std::isfinite(representative) ||
+      lower > upper) {
+    throw std::invalid_argument("periodic top-domain geometry received invalid spatial bounds");
+  }
+  const double extent = bounds.domain_max - bounds.domain_min;
+  if (!(extent > 0.0) || !std::isfinite(extent)) {
+    throw std::invalid_argument("periodic top-domain geometry requires positive finite domain extents");
+  }
+  if (!bounds.initialized) {
+    expandPeriodicPoint(bounds, representative);
+  }
+  if (upper - lower >= extent) {
+    bounds.lower = bounds.anchor - 0.5 * extent;
+    bounds.upper = bounds.lower + extent;
+    return;
+  }
+  expandPeriodicPoint(bounds, lower);
+  expandPeriodicPoint(bounds, upper);
+  expandPeriodicPoint(bounds, representative);
+}
+
+struct PeriodicLeafBounds {
+  PeriodicAxisBounds x;
+  PeriodicAxisBounds y;
+  PeriodicAxisBounds z;
+
+  explicit PeriodicLeafBounds(const DecompositionConfig& config)
+      : x{.domain_min = config.domain_x_min_comov, .domain_max = config.domain_x_max_comov},
+        y{.domain_min = config.domain_y_min_comov, .domain_max = config.domain_y_max_comov},
+        z{.domain_min = config.domain_z_min_comov, .domain_max = config.domain_z_max_comov} {}
+
+  void expand(const DecompositionItem& item) {
+    expandPeriodicRange(
+        x,
+        item.has_spatial_bounds ? item.min_x_comov : item.x_comov,
+        item.has_spatial_bounds ? item.max_x_comov : item.x_comov,
+        item.x_comov);
+    expandPeriodicRange(
+        y,
+        item.has_spatial_bounds ? item.min_y_comov : item.y_comov,
+        item.has_spatial_bounds ? item.max_y_comov : item.y_comov,
+        item.y_comov);
+    expandPeriodicRange(
+        z,
+        item.has_spatial_bounds ? item.min_z_comov : item.z_comov,
+        item.has_spatial_bounds ? item.max_z_comov : item.z_comov,
+        item.z_comov);
+  }
+
+  void expandPoint(double px, double py, double pz) {
+    expandPeriodicPoint(x, px);
+    expandPeriodicPoint(y, py);
+    expandPeriodicPoint(z, pz);
+  }
+
+  void assignTo(TopDomainLeaf& leaf) const {
+    leaf.min_x_comov = x.lower;
+    leaf.max_x_comov = x.upper;
+    leaf.min_y_comov = y.lower;
+    leaf.max_y_comov = y.upper;
+    leaf.min_z_comov = z.lower;
+    leaf.max_z_comov = z.upper;
+  }
+};
+
 [[nodiscard]] bool hasNonZeroComponentWeight(const DecompositionWeightCoefficients& weights) {
   return weights.particle_count != 0.0 || weights.gas_cell != 0.0 || weights.tree_interaction != 0.0 ||
       weights.pm_mesh != 0.0 || weights.amr_patch != 0.0 || weights.active_fraction != 0.0 ||
@@ -891,30 +1007,14 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeaves(
     if (begin == end) {
       continue;
     }
-    const DecompositionItem& first = *keyed[begin].item;
-    const auto item_bounds = [](const DecompositionItem& item) {
-      return std::array<double, 6>{
-          item.has_spatial_bounds ? item.min_x_comov : item.x_comov,
-          item.has_spatial_bounds ? item.max_x_comov : item.x_comov,
-          item.has_spatial_bounds ? item.min_y_comov : item.y_comov,
-          item.has_spatial_bounds ? item.max_y_comov : item.y_comov,
-          item.has_spatial_bounds ? item.min_z_comov : item.z_comov,
-          item.has_spatial_bounds ? item.max_z_comov : item.z_comov};
-    };
-    const auto first_bounds = item_bounds(first);
     TopDomainLeaf leaf{
         .owner_rank = owner_rank,
         .decomposition_epoch = decomposition_epoch,
         .sfc_key_begin = keyed[begin].key,
         .sfc_key_end = keyed[end - 1U].key,
-        .min_x_comov = first_bounds[0],
-        .max_x_comov = first_bounds[1],
-        .min_y_comov = first_bounds[2],
-        .max_y_comov = first_bounds[3],
-        .min_z_comov = first_bounds[4],
-        .max_z_comov = first_bounds[5],
         .periodic_geometry = true,
     };
+    PeriodicLeafBounds periodic_bounds(config);
     std::uint64_t id_hash = 1469598103934665603ULL;
     const auto mix_id = [&id_hash](std::uint64_t value) {
       id_hash ^= value;
@@ -930,16 +1030,11 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeaves(
     mix_id(leaf.sfc_key_end);
     for (std::size_t slot = begin; slot < end; ++slot) {
       const DecompositionItem& item = *keyed[slot].item;
-      const auto bounds = item_bounds(item);
-      leaf.min_x_comov = std::min(leaf.min_x_comov, bounds[0]);
-      leaf.max_x_comov = std::max(leaf.max_x_comov, bounds[1]);
-      leaf.min_y_comov = std::min(leaf.min_y_comov, bounds[2]);
-      leaf.max_y_comov = std::max(leaf.max_y_comov, bounds[3]);
-      leaf.min_z_comov = std::min(leaf.min_z_comov, bounds[4]);
-      leaf.max_z_comov = std::max(leaf.max_z_comov, bounds[5]);
+      periodic_bounds.expand(item);
       leaf.work_weight += weightedLoad(item, config);
       ++leaf.entity_count;
     }
+    periodic_bounds.assignTo(leaf);
     leaf.domain_leaf_id = id_hash;
     leaves.push_back(leaf);
   }
@@ -1012,36 +1107,20 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromCompact(
   const std::size_t leaf_count = std::min(max_leaves_per_rank, records.size());
   std::vector<TopDomainLeaf> leaves;
   leaves.reserve(leaf_count);
-  const auto item_bounds = [](const DecompositionItem& item) {
-    return std::array<double, 6>{
-        item.has_spatial_bounds ? item.min_x_comov : item.x_comov,
-        item.has_spatial_bounds ? item.max_x_comov : item.x_comov,
-        item.has_spatial_bounds ? item.min_y_comov : item.y_comov,
-        item.has_spatial_bounds ? item.max_y_comov : item.y_comov,
-        item.has_spatial_bounds ? item.min_z_comov : item.z_comov,
-        item.has_spatial_bounds ? item.max_z_comov : item.z_comov};
-  };
   for (std::size_t leaf_ordinal = 0U; leaf_ordinal < leaf_count; ++leaf_ordinal) {
     const std::size_t begin = (leaf_ordinal * records.size()) / leaf_count;
     const std::size_t end = ((leaf_ordinal + 1U) * records.size()) / leaf_count;
     if (begin == end) {
       continue;
     }
-    const DecompositionItem& first = local_items[records[begin].local_index];
-    const auto first_bounds = item_bounds(first);
     TopDomainLeaf leaf{
         .owner_rank = owner_rank,
         .decomposition_epoch = decomposition_epoch,
         .sfc_key_begin = records[begin].sfc_key,
         .sfc_key_end = records[end - 1U].sfc_key,
-        .min_x_comov = first_bounds[0],
-        .max_x_comov = first_bounds[1],
-        .min_y_comov = first_bounds[2],
-        .max_y_comov = first_bounds[3],
-        .min_z_comov = first_bounds[4],
-        .max_z_comov = first_bounds[5],
         .periodic_geometry = true,
     };
+    PeriodicLeafBounds periodic_bounds(config);
     std::uint64_t id_hash = 1469598103934665603ULL;
     const auto mix_id = [&id_hash](std::uint64_t value) {
       id_hash ^= value;
@@ -1053,16 +1132,11 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromCompact(
     mix_id(leaf.sfc_key_end);
     for (std::size_t slot = begin; slot < end; ++slot) {
       const DecompositionItem& item = local_items[records[slot].local_index];
-      const auto bounds = item_bounds(item);
-      leaf.min_x_comov = std::min(leaf.min_x_comov, bounds[0]);
-      leaf.max_x_comov = std::max(leaf.max_x_comov, bounds[1]);
-      leaf.min_y_comov = std::min(leaf.min_y_comov, bounds[2]);
-      leaf.max_y_comov = std::max(leaf.max_y_comov, bounds[3]);
-      leaf.min_z_comov = std::min(leaf.min_z_comov, bounds[4]);
-      leaf.max_z_comov = std::max(leaf.max_z_comov, bounds[5]);
+      periodic_bounds.expand(item);
       leaf.work_weight += records[slot].weighted_load;
       ++leaf.entity_count;
     }
+    periodic_bounds.assignTo(leaf);
     leaf.domain_leaf_id = id_hash;
     leaves.push_back(leaf);
   }
@@ -1155,35 +1229,24 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromSource(
   if (records.empty()) {
     return {};
   }
-  const auto bounds_for = [&](const CompactTopDomainSeedRecord& record) {
+  const auto expand_seed_bounds = [&](
+      PeriodicLeafBounds& bounds, const CompactTopDomainSeedRecord& record) {
     if (record.kind == DecompositionEntityKind::kParticle) {
-      return std::array<double, 6>{
-          source.particle_x_comoving[record.local_index],
+      bounds.expandPoint(
           source.particle_x_comoving[record.local_index],
           source.particle_y_comoving[record.local_index],
-          source.particle_y_comoving[record.local_index],
-          source.particle_z_comoving[record.local_index],
-          source.particle_z_comoving[record.local_index]};
+          source.particle_z_comoving[record.local_index]);
+      return;
     }
     const std::uint32_t first_cell = source.patch_first_cells[record.local_index];
     const std::uint32_t cell_count = source.patch_cell_counts[record.local_index];
-    std::array<double, 6> bounds{
-        source.cell_x_comoving[first_cell],
-        source.cell_x_comoving[first_cell],
-        source.cell_y_comoving[first_cell],
-        source.cell_y_comoving[first_cell],
-        source.cell_z_comoving[first_cell],
-        source.cell_z_comoving[first_cell]};
     for (std::uint32_t offset = 0; offset < cell_count; ++offset) {
       const std::size_t cell = static_cast<std::size_t>(first_cell) + offset;
-      bounds[0] = std::min(bounds[0], source.cell_x_comoving[cell]);
-      bounds[1] = std::max(bounds[1], source.cell_x_comoving[cell]);
-      bounds[2] = std::min(bounds[2], source.cell_y_comoving[cell]);
-      bounds[3] = std::max(bounds[3], source.cell_y_comoving[cell]);
-      bounds[4] = std::min(bounds[4], source.cell_z_comoving[cell]);
-      bounds[5] = std::max(bounds[5], source.cell_z_comoving[cell]);
+      bounds.expandPoint(
+          source.cell_x_comoving[cell],
+          source.cell_y_comoving[cell],
+          source.cell_z_comoving[cell]);
     }
-    return bounds;
   };
   const auto work_for = [&](const CompactTopDomainSeedRecord& seed) {
     const CompactRuntimeDecompositionRecord record = makeSourceRecord(
@@ -1200,20 +1263,14 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromSource(
     if (begin == end) {
       continue;
     }
-    const auto first_bounds = bounds_for(records[begin]);
     TopDomainLeaf leaf{
         .owner_rank = owner_rank,
         .decomposition_epoch = decomposition_epoch,
         .sfc_key_begin = records[begin].sfc_key,
         .sfc_key_end = records[end - 1U].sfc_key,
-        .min_x_comov = first_bounds[0],
-        .max_x_comov = first_bounds[1],
-        .min_y_comov = first_bounds[2],
-        .max_y_comov = first_bounds[3],
-        .min_z_comov = first_bounds[4],
-        .max_z_comov = first_bounds[5],
         .periodic_geometry = true,
     };
+    PeriodicLeafBounds periodic_bounds(config);
     std::uint64_t id_hash = 1469598103934665603ULL;
     const auto mix_id = [&id_hash](std::uint64_t value) {
       id_hash ^= value;
@@ -1224,16 +1281,11 @@ std::vector<TopDomainLeaf> buildAuthoritativeTopDomainLeavesFromSource(
     mix_id(leaf.sfc_key_begin);
     mix_id(leaf.sfc_key_end);
     for (std::size_t slot = begin; slot < end; ++slot) {
-      const auto bounds = bounds_for(records[slot]);
-      leaf.min_x_comov = std::min(leaf.min_x_comov, bounds[0]);
-      leaf.max_x_comov = std::max(leaf.max_x_comov, bounds[1]);
-      leaf.min_y_comov = std::min(leaf.min_y_comov, bounds[2]);
-      leaf.max_y_comov = std::max(leaf.max_y_comov, bounds[3]);
-      leaf.min_z_comov = std::min(leaf.min_z_comov, bounds[4]);
-      leaf.max_z_comov = std::max(leaf.max_z_comov, bounds[5]);
+      expand_seed_bounds(periodic_bounds, records[slot]);
       leaf.work_weight += work_for(records[slot]);
       ++leaf.entity_count;
     }
+    periodic_bounds.assignTo(leaf);
     leaf.domain_leaf_id = id_hash;
     leaves.push_back(leaf);
   }
@@ -1265,7 +1317,9 @@ std::vector<TopDomainLeaf> refitAuthoritativeTopDomainLeaves(
   // O(N) AABB expansion. Seeds owned by another rank or stamped with a stale
   // epoch are rejected rather than silently repaired.
   std::vector<TopDomainLeaf> working;
+  std::vector<PeriodicLeafBounds> periodic_bounds;
   working.reserve(seed_leaves.size());
+  periodic_bounds.reserve(seed_leaves.size());
   for (const TopDomainLeaf& seed : seed_leaves) {
     if (seed.owner_rank != owner_rank) {
       throw std::invalid_argument("top-domain leaf refit seed is owned by another rank");
@@ -1284,6 +1338,17 @@ std::vector<TopDomainLeaf> refitAuthoritativeTopDomainLeaves(
     leaf.entity_count = 0U;
 
     working.push_back(leaf);
+    PeriodicLeafBounds bounds(config);
+    const auto seed_axis = [](PeriodicAxisBounds& axis, double lower, double upper) {
+      axis.anchor = 0.5 * (lower + upper);
+      axis.lower = std::numeric_limits<double>::infinity();
+      axis.upper = -std::numeric_limits<double>::infinity();
+      axis.initialized = true;
+    };
+    seed_axis(bounds.x, seed.min_x_comov, seed.max_x_comov);
+    seed_axis(bounds.y, seed.min_y_comov, seed.max_y_comov);
+    seed_axis(bounds.z, seed.min_z_comov, seed.max_z_comov);
+    periodic_bounds.push_back(bounds);
   }
 
   if (working.empty()) {
@@ -1363,12 +1428,7 @@ std::vector<TopDomainLeaf> refitAuthoritativeTopDomainLeaves(
       }
     }
     TopDomainLeaf& leaf = working[selected];
-    leaf.min_x_comov = std::min(leaf.min_x_comov, x);
-    leaf.max_x_comov = std::max(leaf.max_x_comov, x);
-    leaf.min_y_comov = std::min(leaf.min_y_comov, y);
-    leaf.max_y_comov = std::max(leaf.max_y_comov, y);
-    leaf.min_z_comov = std::min(leaf.min_z_comov, z);
-    leaf.max_z_comov = std::max(leaf.max_z_comov, z);
+    periodic_bounds[selected].expandPoint(x, y, z);
     ++leaf.entity_count;
   }
 
@@ -1383,6 +1443,7 @@ std::vector<TopDomainLeaf> refitAuthoritativeTopDomainLeaves(
       // zero-entity routing packet is manufactured.
       continue;
     }
+    periodic_bounds[static_cast<std::size_t>(&leaf - working.data())].assignTo(leaf);
     refreshed.push_back(leaf);
     if (diagnostics != nullptr) {
       ++diagnostics->refreshed_leaf_count;
