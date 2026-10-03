@@ -1448,6 +1448,172 @@ double TimeCoordinator::updateAdaptiveTimeBins(
       update_all_elements);
 }
 
+void TimeCoordinator::coordinatePmRefreshDirective(core::StepContext& context) {
+  if (context.stage != core::IntegrationStage::kGravityKickPre &&
+      context.stage != core::IntegrationStage::kForceRefresh &&
+      context.stage != core::IntegrationStage::kGravityKickPost) {
+    return;
+  }
+
+  auto& directive = context.pm_refresh_directive;
+  const auto& mpi_context = m_services.mpi_context;
+  const std::uint64_t world_size = static_cast<std::uint64_t>(
+      std::max(mpi_context.worldSize(), 1));
+
+  const auto materialize_single_rank = [&]() {
+    if (!directive.sync_event_requested) {
+      return;
+    }
+    if (!directive.cadence_opportunity_allowed) {
+      if (directive.reason == core::PmRefreshDirective::Reason::kSourceMutationForceRefresh) {
+        throw std::runtime_error(
+            "gravity source state changed after the scheduled PM refresh on a boundary where long-range repair is illegal");
+      }
+      throw std::runtime_error(
+          "PM cadence event requested outside an integrator-authorized refresh opportunity");
+    }
+    core::materializePmRefreshDirective(
+        context, context.integrator_state.pm_long_range_field_valid);
+  };
+
+  if (!mpi_context.isEnabled() || world_size <= 1U) {
+    materialize_single_rank();
+    return;
+  }
+
+  // All ranks reach this fixed-size reduction before any branch-dependent
+  // TreePM work. Local predicates are evidence only; the values below define
+  // the one distributed refresh decision for this stage.
+  std::array<std::uint64_t, 5> votes{
+      context.integrator_state.pm_refresh_enabled ? 1ULL : 0ULL,
+      context.boundary.pm_refresh_allowed ? 1ULL : 0ULL,
+      context.boundary.local_substep ? 1ULL : 0ULL,
+      context.integrator_state.pm_long_range_field_valid ? 1ULL : 0ULL,
+      context.integrator_state.pm_source_generation != context.state.gravitySourceGeneration() ? 1ULL : 0ULL,
+  };
+  mpi_context.allreduceSumUint64sInPlace(votes);
+
+  const bool pm_enablement_consistent = votes[0] == 0U || votes[0] == world_size;
+  const bool global_pm_enabled = votes[0] == world_size;
+  const bool global_refresh_allowed = votes[1] == world_size;
+  const bool any_local_substep = votes[2] != 0U;
+  const bool global_field_valid = votes[3] == world_size;
+  const bool field_validity_mixed = votes[3] != 0U && votes[3] != world_size;
+  const bool global_source_changed = votes[4] != 0U;
+
+  std::exception_ptr coordination_failure;
+  try {
+    if (!pm_enablement_consistent) {
+      throw std::runtime_error(
+          "TreePM PM-refresh enablement diverged across ranks before cadence coordination");
+    }
+    if (!global_pm_enabled && !global_field_valid) {
+      throw std::runtime_error(
+          "TreePM long-range PM field is invalid while PM refresh is disabled");
+    }
+
+    // Rebuild the directive from global semantics rather than preserving a
+    // rank-local candidate. The event itself remains uncommitted until the
+    // gravity callback succeeds and the core integrator accepts it.
+    directive.has_sync_event = false;
+    directive.refresh_long_range_field = false;
+    directive.solver_executed = false;
+    directive.sync_stage = core::PmSyncStage::kNone;
+    directive.gravity_kick_opportunity = 0U;
+    directive.field_version = 0U;
+    directive.last_refresh_opportunity = 0U;
+    directive.field_built_step_index = 0U;
+    directive.field_built_scale_factor = 1.0;
+
+    switch (context.stage) {
+      case core::IntegrationStage::kGravityKickPre: {
+        const bool global_initial_bootstrap_needed =
+            global_pm_enabled && !global_field_valid;
+        const bool global_initial_bootstrap_allowed =
+            !any_local_substep ||
+            (context.integrator_state.step_index == 0U &&
+             global_initial_bootstrap_needed);
+        directive.initial_cache_bootstrap_allowed =
+            global_initial_bootstrap_allowed;
+        directive.sync_event_requested = global_initial_bootstrap_needed;
+        directive.cadence_opportunity_allowed =
+            global_initial_bootstrap_needed && global_initial_bootstrap_allowed;
+        if (global_initial_bootstrap_needed) {
+          if (!global_initial_bootstrap_allowed) {
+            throw std::runtime_error(
+                "TreePM distributed initial PM bootstrap is not legal at this integration boundary");
+          }
+          directive.reason =
+              core::PmRefreshDirective::Reason::kInitialForceBootstrap;
+          directive.force_evaluation_scale_factor =
+              context.timeline_step.scale_factor_begin;
+        } else {
+          directive.reason = core::PmRefreshDirective::Reason::kNone;
+        }
+        break;
+      }
+      case core::IntegrationStage::kForceRefresh: {
+        directive.force_refresh_surface = true;
+        directive.requires_predicted_inactive_sources = any_local_substep;
+        directive.reason =
+            core::PmRefreshDirective::Reason::kScheduledForceRefreshStage;
+        directive.force_evaluation_scale_factor =
+            context.timeline_step.scale_factor_end;
+        directive.cadence_opportunity_allowed =
+            global_pm_enabled && global_refresh_allowed;
+        directive.sync_event_requested = directive.cadence_opportunity_allowed;
+        if (global_pm_enabled && !global_field_valid &&
+            !global_refresh_allowed) {
+          throw std::runtime_error(
+              "TreePM distributed PM field is invalid but no rank-global refresh boundary is available");
+        }
+        break;
+      }
+      case core::IntegrationStage::kGravityKickPost: {
+        directive.force_refresh_surface = global_source_changed;
+        directive.cadence_opportunity_allowed = false;
+        directive.sync_event_requested = false;
+        directive.reason = core::PmRefreshDirective::Reason::kNone;
+        if (global_source_changed) {
+          if (!global_pm_enabled) {
+            throw std::runtime_error(
+                "TreePM gravity sources changed while PM refresh is disabled");
+          }
+          if (!global_refresh_allowed) {
+            throw std::runtime_error(
+                "gravity source state changed after the scheduled PM refresh on a boundary where long-range repair is illegal");
+          }
+          directive.reason =
+              core::PmRefreshDirective::Reason::kSourceMutationForceRefresh;
+          directive.force_evaluation_scale_factor =
+              context.timeline_step.scale_factor_end;
+          directive.cadence_opportunity_allowed = true;
+          directive.sync_event_requested = true;
+        } else if (global_pm_enabled && !global_field_valid) {
+          if (field_validity_mixed) {
+            throw std::runtime_error(
+                "TreePM long-range PM validity diverged across ranks without an authorized refresh request");
+          }
+          throw std::runtime_error(
+              "TreePM post-kick reached an invalid long-range PM field without a source-mutation refresh request");
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    if (directive.sync_event_requested) {
+      core::materializePmRefreshDirective(context, global_field_valid);
+    }
+  } catch (...) {
+    coordination_failure = std::current_exception();
+  }
+
+  FailureCoordinator(m_services).rethrowCollectiveFailure(
+      coordination_failure, "TreePM PM-refresh rank-global directive coordination");
+}
+
 void TimeCoordinator::dispatchStage(
     core::StepContext& context,
     bool require_output_safe_boundary) {
@@ -1462,6 +1628,8 @@ void TimeCoordinator::dispatchStage(
     context.profiler_session->counters().addCount(
         stage_name + ".invocations", 1U);
   }
+
+  coordinatePmRefreshDirective(context);
 
   SimulationRuntimeEpochSource epoch_source(
       context.state, m_time_state.m_particle_scheduler, context.integrator_state);

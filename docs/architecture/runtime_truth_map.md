@@ -87,11 +87,12 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 - Scheduler authoritative bin timeline: `HierarchicalTimeBinScheduler` internals (`m_hot`, `m_elements_by_bin`, `m_active_elements`, `m_current_tick`).
 - Scheduler-owned PM cadence truth: `PmSynchronizationState` (`gravity_kick_opportunity`, cadence steps, field version, last refresh opportunity, field-built step/scale factor).
-- During an authorized refresh but before cadence commit, the current
-  `PmRefreshDirective` is the transient decision view. Operational events
-  emitted in that interval copy its opportunity/version/build epoch; the
-  previous committed `PmSynchronizationState` remains authority for completed
-  refreshes.
+- During an authorized refresh but before cadence commit, the core integrator
+  emits rank-local refresh evidence in `PmRefreshDirective`. Distributed
+  execution globalizes that evidence in `TimeCoordinator` before materializing
+  one identical transient decision on every rank. Operational events emitted in
+  that interval copy its opportunity/version/build epoch; the previous
+  committed `PmSynchronizationState` remains authority for completed refreshes.
 - Per-particle timestep bin mirror: `SimulationState::particles.time_bin`.
 - Per-cell timestep bin mirror: `SimulationState::cells.time_bin`.
 - Integrator coarse state and metadata mirror: `IntegratorState::{current_time_code,current_scale_factor,dt_time_code,step_index,scheme,time_bins}`.
@@ -137,7 +138,7 @@ This document is a code-first runtime-state ownership audit. It was compiled fro
 
 ### Ownership decision
 
-- **Single live authority**: Stage 2 assigns timestep-bin membership, activation, active-set construction, and PM cadence ownership to scheduler objects (`HierarchicalTimeBinScheduler` and `PmSynchronizationState`). State `time_bin` lanes, migration records, restart mirrors, and `IntegratorState::time_bins` are mirrors/metadata only. Any future path that consumes mirrors as scheduling authority must be rejected or documented as a new ADR-backed schema/interface change.
+- **Single live authority**: Stage 2 assigns timestep-bin membership, activation, active-set construction, and committed PM cadence ownership to scheduler objects (`HierarchicalTimeBinScheduler` and `PmSynchronizationState`). The core integrator may emit rank-local PM-refresh evidence, but only the MPI-aware `TimeCoordinator` may convert that evidence into a distributed directive before branch-dependent TreePM work. State `time_bin` lanes, migration records, restart mirrors, and `IntegratorState::time_bins` are mirrors/metadata only. Any future path that consumes mirrors as scheduling authority must be rejected or documented as a new ADR-backed schema/interface change.
 - `gravity.pm_long_range_field` is an observer, not a second cadence owner. Its
   in-flight payload is copied from `PmRefreshDirective` because the matching
   `PmSynchronizationState` commit has not happened yet.

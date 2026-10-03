@@ -1577,6 +1577,29 @@ void testPmSynchronizationCadencePreservesRefreshBoundaries() {
   assert(std::abs(pm_sync.lastRefreshScaleFactor() - 0.8) < k_tolerance);
 }
 
+void testPmSynchronizationPreviewDoesNotCommitCadenceTruth() {
+  cosmosim::core::PmSynchronizationState pm_sync;
+  pm_sync.reset(2);
+
+  const auto preview = pm_sync.previewKickOpportunity(21, 0.4, false);
+  assert(preview.gravity_kick_opportunity == 1U);
+  assert(preview.refresh_long_range_field);
+  assert(preview.field_version == 1U);
+  assert(pm_sync.gravityKickOpportunity() == 0U);
+  assert(pm_sync.fieldVersion() == 0U);
+  assert(!pm_sync.refreshCommitPending());
+
+  pm_sync.commitKickOpportunity(preview);
+  assert(pm_sync.gravityKickOpportunity() == 1U);
+  assert(pm_sync.fieldVersion() == 0U);
+  assert(pm_sync.refreshCommitPending());
+
+  pm_sync.commitRefresh(preview);
+  assert(pm_sync.fieldVersion() == 1U);
+  assert(pm_sync.lastRefreshOpportunity() == 1U);
+  assert(!pm_sync.refreshCommitPending());
+}
+
 void testKdkFailureMarksBookkeepingRestartUnsafe() {
   cosmosim::core::SimulationState state;
   cosmosim::core::IntegratorState integrator_state;
@@ -1658,5 +1681,6 @@ int main() {
   testOutputBoundaryRequiresSafeContracts();
   testBoundarySafetyClassification();
   testPmSynchronizationCadencePreservesRefreshBoundaries();
+  testPmSynchronizationPreviewDoesNotCommitCadenceTruth();
   return 0;
 }

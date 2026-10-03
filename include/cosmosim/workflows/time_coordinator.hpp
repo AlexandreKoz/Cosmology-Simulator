@@ -139,6 +139,7 @@ class TimeCoordinator {
       bool update_all_elements);
 
  private:
+  void coordinatePmRefreshDirective(core::StepContext& context);
   void dispatchStage(
       core::StepContext& context,
       bool require_output_safe_boundary);

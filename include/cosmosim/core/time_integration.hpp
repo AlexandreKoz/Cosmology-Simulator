@@ -158,6 +158,10 @@ struct PmRefreshDirective {
   bool cadence_opportunity_allowed = false;
   bool initial_cache_bootstrap_allowed = false;
   bool requires_predicted_inactive_sources = false;
+  // Rank-local evidence that this stage wants a cadence event.  In distributed
+  // execution the workflow globalizes this request before materializing the
+  // authoritative event; it is not itself committed cadence truth.
+  bool sync_event_requested = false;
   bool has_sync_event = false;
   bool refresh_long_range_field = false;
   bool solver_executed = false;
@@ -248,6 +252,16 @@ struct PmSynchronizationPersistentState {
 class PmSynchronizationState {
  public:
   void reset(std::uint64_t cadence_steps = 1);
+  // Preview is side-effect free so distributed runtime code can globalize
+  // rank-local evidence before any cadence epoch becomes authoritative.
+  [[nodiscard]] PmSyncEvent previewKickOpportunity(
+      std::uint64_t step_index,
+      double scale_factor,
+      bool has_long_range_field) const;
+  // Commit the accepted opportunity only after the corresponding solver
+  // callback completed successfully. Refresh events remain pending until
+  // commitRefresh() publishes the new PM field version.
+  void commitKickOpportunity(const PmSyncEvent& event);
   [[nodiscard]] PmSyncEvent registerKickOpportunity(
       std::uint64_t step_index,
       double scale_factor,
@@ -355,6 +369,14 @@ struct StepContext {
   PmRefreshDirective pm_refresh_directive;
   IntegrationStage stage = IntegrationStage::kGravityKickPre;
 };
+
+// Materialize a previously requested PM cadence event without committing it.
+// The caller supplies the authoritative long-range-validity verdict: serial
+// dispatch uses the local value, while distributed workflow dispatch supplies
+// a rank-global verdict.
+void materializePmRefreshDirective(
+    StepContext& context,
+    bool has_long_range_field);
 
 // Dependency-safe dispatch seam used by workflow-level typed resource views.
 // Core retains KDK/timeline invariants while the workflow owns task selection;

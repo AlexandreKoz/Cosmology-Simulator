@@ -125,6 +125,23 @@ void validateRuntimeStageContract(
   }
 }
 
+void materializeLocalPmRefreshDirective(StepContext& context) {
+  auto& directive = context.pm_refresh_directive;
+  if (!directive.sync_event_requested) {
+    return;
+  }
+  if (!directive.cadence_opportunity_allowed) {
+    if (directive.reason == PmRefreshDirective::Reason::kSourceMutationForceRefresh) {
+      throw std::runtime_error(
+          "gravity source state changed after the scheduled PM refresh on a boundary where long-range repair is illegal");
+    }
+    throw std::runtime_error(
+        "PM cadence event requested outside an integrator-authorized refresh opportunity");
+  }
+  materializePmRefreshDirective(
+      context, context.integrator_state.pm_long_range_field_valid);
+}
+
 void validatePmRefreshDirectiveLegality(const StepContext& context, std::string_view phase) {
   const auto& directive = context.pm_refresh_directive;
   const bool initial_surface_exception =
@@ -446,12 +463,12 @@ void PmSynchronizationState::reset(std::uint64_t cadence_steps) {
   m_pending_refresh_field_version = 0;
 }
 
-PmSyncEvent PmSynchronizationState::registerKickOpportunity(
+PmSyncEvent PmSynchronizationState::previewKickOpportunity(
     std::uint64_t step_index,
     double scale_factor,
-    bool has_long_range_field) {
+    bool has_long_range_field) const {
   if (m_refresh_commit_pending) {
-    PmSyncEvent pending{
+    const PmSyncEvent pending{
         .gravity_kick_opportunity = m_pending_refresh_opportunity,
         .refresh_long_range_field = true,
         .field_version = m_pending_refresh_field_version,
@@ -461,27 +478,84 @@ PmSyncEvent PmSynchronizationState::registerKickOpportunity(
     };
     throw std::runtime_error(pmContextMessage(
         "previous refresh event was not committed before next kick opportunity",
-        "PmSynchronizationState::registerKickOpportunity",
+        "PmSynchronizationState::previewKickOpportunity",
         pending,
         m_cadence_steps,
         m_field_version));
   }
-  ++m_gravity_kick_opportunity;
+  if (m_gravity_kick_opportunity == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("PM synchronization gravity kick opportunity overflow");
+  }
+  const std::uint64_t next_opportunity = m_gravity_kick_opportunity + 1U;
   const bool refresh = !has_long_range_field ||
-      ((m_gravity_kick_opportunity - m_last_refresh_opportunity) >= m_cadence_steps);
-  PmSyncEvent event{
-      .gravity_kick_opportunity = m_gravity_kick_opportunity,
+      ((next_opportunity - m_last_refresh_opportunity) >= m_cadence_steps);
+  if (refresh && m_field_version == std::numeric_limits<std::uint64_t>::max()) {
+    throw std::overflow_error("PM synchronization field version overflow");
+  }
+  return PmSyncEvent{
+      .gravity_kick_opportunity = next_opportunity,
       .refresh_long_range_field = refresh,
       .field_version = refresh ? (m_field_version + 1U) : m_field_version,
-      .last_refresh_opportunity = refresh ? m_gravity_kick_opportunity : m_last_refresh_opportunity,
+      .last_refresh_opportunity = refresh ? next_opportunity : m_last_refresh_opportunity,
       .field_built_step_index = refresh ? step_index : m_last_refresh_step_index,
       .field_built_scale_factor = refresh ? scale_factor : m_last_refresh_scale_factor,
   };
+}
+
+void PmSynchronizationState::commitKickOpportunity(const PmSyncEvent& event) {
+  if (m_refresh_commit_pending) {
+    throw std::runtime_error(
+        "PmSynchronizationState::commitKickOpportunity: previous refresh event is still pending");
+  }
+  if (m_gravity_kick_opportunity == std::numeric_limits<std::uint64_t>::max() ||
+      event.gravity_kick_opportunity != m_gravity_kick_opportunity + 1U) {
+    throw std::runtime_error(pmContextMessage(
+        "kick opportunity does not immediately follow committed cadence state",
+        "PmSynchronizationState::commitKickOpportunity",
+        event,
+        m_cadence_steps,
+        m_field_version));
+  }
+  if (event.refresh_long_range_field) {
+    if (m_field_version == std::numeric_limits<std::uint64_t>::max() ||
+        event.field_version != m_field_version + 1U ||
+        event.last_refresh_opportunity != event.gravity_kick_opportunity ||
+        !std::isfinite(event.field_built_scale_factor) ||
+        event.field_built_scale_factor <= 0.0) {
+      throw std::runtime_error(pmContextMessage(
+          "refresh opportunity metadata is inconsistent with committed cadence state",
+          "PmSynchronizationState::commitKickOpportunity",
+          event,
+          m_cadence_steps,
+          m_field_version));
+    }
+  } else if (event.field_version != m_field_version ||
+             event.last_refresh_opportunity != m_last_refresh_opportunity ||
+             event.field_built_step_index != m_last_refresh_step_index ||
+             event.field_built_scale_factor != m_last_refresh_scale_factor) {
+    throw std::runtime_error(pmContextMessage(
+        "reuse opportunity metadata is inconsistent with committed cadence state",
+        "PmSynchronizationState::commitKickOpportunity",
+        event,
+        m_cadence_steps,
+        m_field_version));
+  }
+
+  m_gravity_kick_opportunity = event.gravity_kick_opportunity;
   if (event.refresh_long_range_field) {
     m_refresh_commit_pending = true;
     m_pending_refresh_opportunity = event.gravity_kick_opportunity;
     m_pending_refresh_field_version = event.field_version;
   }
+}
+
+PmSyncEvent PmSynchronizationState::registerKickOpportunity(
+    std::uint64_t step_index,
+    double scale_factor,
+    bool has_long_range_field) {
+  const PmSyncEvent event = previewKickOpportunity(
+      step_index, scale_factor, has_long_range_field);
+  commitKickOpportunity(event);
   return event;
 }
 
@@ -569,6 +643,66 @@ void PmSynchronizationState::importPersistentState(const PmSynchronizationPersis
   m_pending_refresh_field_version = persistent_state.pending_refresh_field_version;
 }
 
+
+void materializePmRefreshDirective(
+    StepContext& context,
+    bool has_long_range_field) {
+  auto& directive = context.pm_refresh_directive;
+  if (!directive.sync_event_requested) {
+    throw std::logic_error(
+        "PM refresh directive materialization requires a requested sync event");
+  }
+  if (directive.has_sync_event) {
+    throw std::logic_error(
+        "PM refresh directive sync event was materialized more than once");
+  }
+  if (!directive.cadence_opportunity_allowed) {
+    throw std::runtime_error(
+        "PM refresh directive materialization reached a non-cadence opportunity");
+  }
+  if (!std::isfinite(directive.force_evaluation_scale_factor) ||
+      directive.force_evaluation_scale_factor <= 0.0) {
+    throw std::runtime_error(
+        "PM refresh directive materialization requires a finite positive force-evaluation scale factor");
+  }
+
+  bool field_available_for_cadence = has_long_range_field;
+  switch (directive.reason) {
+    case PmRefreshDirective::Reason::kInitialForceBootstrap:
+      directive.sync_stage = PmSyncStage::kInitialLongRangeBootstrap;
+      field_available_for_cadence = false;
+      break;
+    case PmRefreshDirective::Reason::kScheduledForceRefreshStage:
+      directive.sync_stage = PmSyncStage::kScheduledLongRangeRefresh;
+      break;
+    case PmRefreshDirective::Reason::kSourceMutationForceRefresh:
+      directive.sync_stage = PmSyncStage::kScheduledLongRangeRefresh;
+      field_available_for_cadence = false;
+      break;
+    case PmRefreshDirective::Reason::kNone:
+      throw std::logic_error(
+          "PM refresh directive materialization requires a typed refresh reason");
+  }
+
+  const PmSyncEvent event = context.integrator_state.pm_sync_state.previewKickOpportunity(
+      context.integrator_state.step_index,
+      directive.force_evaluation_scale_factor,
+      field_available_for_cadence);
+  if ((directive.reason == PmRefreshDirective::Reason::kInitialForceBootstrap ||
+       directive.reason == PmRefreshDirective::Reason::kSourceMutationForceRefresh) &&
+      !event.refresh_long_range_field) {
+    throw std::logic_error(
+        "mandatory PM invalidation materialized as a cadence reuse event");
+  }
+
+  directive.has_sync_event = true;
+  directive.refresh_long_range_field = event.refresh_long_range_field;
+  directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
+  directive.field_version = event.field_version;
+  directive.last_refresh_opportunity = event.last_refresh_opportunity;
+  directive.field_built_step_index = event.field_built_step_index;
+  directive.field_built_scale_factor = event.field_built_scale_factor;
+}
 
 std::string_view integrationStageName(IntegrationStage stage) {
   switch (stage) {
@@ -835,6 +969,7 @@ std::optional<StageContract> StepOrchestrator::contractForHandlerStage(
 void StepOrchestrator::dispatchStageHandlers(
     StepContext& context,
     bool require_output_safe_boundary) const {
+  materializeLocalPmRefreshDirective(context);
   const std::string stage_name = "stage." + std::string(integrationStageName(context.stage));
   COSMOSIM_PROFILE_SCOPE(context.profiler_session, stage_name);
   if (context.profiler_session != nullptr) {
@@ -1048,37 +1183,16 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
     }
     if (stage == IntegrationStage::kGravityKickPost &&
         integrator_state.pm_refresh_enabled &&
-        integrator_state.pm_long_range_field_valid &&
         integrator_state.pm_source_generation != state.gravitySourceGeneration()) {
       // Hydro/source work may mutate authoritative gas mass, source membership,
-      // or ownership after the scheduled post-drift PM refresh.  A second-kick
-      // force may not silently combine that new source state with the old PM
-      // field.  Until multirate predictor/reuse semantics exist, repair the
-      // mismatch only on an integrator-authorized global refresh surface.
-      if (!boundary.pm_refresh_allowed) {
-        throw std::runtime_error(
-            "gravity source state changed after the scheduled PM refresh on a boundary where long-range repair is illegal");
-      }
+      // or ownership after the scheduled post-drift PM refresh. Record local
+      // evidence here, but do not advance cadence state: the workflow must first
+      // globalize the request so every rank enters the same TreePM path.
       context.pm_refresh_directive.force_refresh_surface = true;
       context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kSourceMutationForceRefresh;
       context.pm_refresh_directive.force_evaluation_scale_factor = timeline_step.scale_factor_end;
-      context.pm_refresh_directive.cadence_opportunity_allowed = true;
-      const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
-          integrator_state.step_index,
-          timeline_step.scale_factor_end,
-          integrator_state.pm_long_range_field_valid);
-      context.pm_refresh_directive.has_sync_event = true;
-      context.pm_refresh_directive.sync_stage = PmSyncStage::kScheduledLongRangeRefresh;
-      context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
-      context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
-      context.pm_refresh_directive.field_version = event.field_version;
-      context.pm_refresh_directive.last_refresh_opportunity = event.last_refresh_opportunity;
-      context.pm_refresh_directive.field_built_step_index = event.field_built_step_index;
-      context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
-      if (!event.refresh_long_range_field) {
-        throw std::runtime_error(
-            "gravity source mutation requires a fresh PM field; cadence reuse is not implemented for changed sources");
-      }
+      context.pm_refresh_directive.cadence_opportunity_allowed = boundary.pm_refresh_allowed;
+      context.pm_refresh_directive.sync_event_requested = true;
     }
     if (stage == IntegrationStage::kGravityKickPre) {
       // The initial-condition surface is globally synchronized even when the
@@ -1092,19 +1206,8 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
           !integrator_state.pm_long_range_field_valid) {
         context.pm_refresh_directive.reason = PmRefreshDirective::Reason::kInitialForceBootstrap;
         context.pm_refresh_directive.force_evaluation_scale_factor = timeline_step.scale_factor_begin;
-        const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
-            integrator_state.step_index,
-            timeline_step.scale_factor_begin,
-            integrator_state.pm_long_range_field_valid);
         context.pm_refresh_directive.cadence_opportunity_allowed = true;
-        context.pm_refresh_directive.has_sync_event = true;
-        context.pm_refresh_directive.sync_stage = PmSyncStage::kInitialLongRangeBootstrap;
-        context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
-        context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
-        context.pm_refresh_directive.field_version = event.field_version;
-        context.pm_refresh_directive.last_refresh_opportunity = event.last_refresh_opportunity;
-        context.pm_refresh_directive.field_built_step_index = event.field_built_step_index;
-        context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
+        context.pm_refresh_directive.sync_event_requested = true;
       }
     } else if (stage == IntegrationStage::kForceRefresh) {
       context.pm_refresh_directive.force_refresh_surface = true;
@@ -1120,18 +1223,7 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
       const bool legal_pm_refresh_boundary = boundary.pm_refresh_allowed;
       context.pm_refresh_directive.cadence_opportunity_allowed = legal_pm_refresh_boundary;
       if (integrator_state.pm_refresh_enabled && legal_pm_refresh_boundary) {
-        const PmSyncEvent event = integrator_state.pm_sync_state.registerKickOpportunity(
-            integrator_state.step_index,
-            timeline_step.scale_factor_end,
-            integrator_state.pm_long_range_field_valid);
-        context.pm_refresh_directive.has_sync_event = true;
-        context.pm_refresh_directive.sync_stage = PmSyncStage::kScheduledLongRangeRefresh;
-        context.pm_refresh_directive.refresh_long_range_field = event.refresh_long_range_field;
-        context.pm_refresh_directive.gravity_kick_opportunity = event.gravity_kick_opportunity;
-        context.pm_refresh_directive.field_version = event.field_version;
-        context.pm_refresh_directive.last_refresh_opportunity = event.last_refresh_opportunity;
-        context.pm_refresh_directive.field_built_step_index = event.field_built_step_index;
-        context.pm_refresh_directive.field_built_scale_factor = event.field_built_scale_factor;
+        context.pm_refresh_directive.sync_event_requested = true;
       }
     }
     const std::size_t particle_count_before_stage = state.particles.size();
@@ -1154,20 +1246,27 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
       if (!context.pm_refresh_directive.solver_executed) {
         throw std::runtime_error("integrator-issued PM refresh directive was not consumed by a TreePM callback");
       }
+      const PmSyncEvent event{
+          .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
+          .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
+          .field_version = context.pm_refresh_directive.field_version,
+          .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
+          .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
+          .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
+      };
+      // Cadence truth advances only after the solver consumed the globally
+      // authorized directive. A failing callback therefore cannot leave one
+      // rank with an accepted opportunity while peers remain on the old epoch.
+      if (!context.pm_refresh_directive.refresh_long_range_field &&
+          !integrator_state.pm_long_range_field_valid) {
+        throw std::runtime_error(
+            "PM sync reused a long-range field before the integrator marked one valid");
+      }
+      integrator_state.pm_sync_state.commitKickOpportunity(event);
       if (context.pm_refresh_directive.refresh_long_range_field) {
-        const PmSyncEvent event{
-            .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
-            .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
-            .field_version = context.pm_refresh_directive.field_version,
-            .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
-            .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
-            .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
-        };
         integrator_state.pm_sync_state.commitRefresh(event);
         integrator_state.pm_long_range_field_valid = true;
         integrator_state.pm_source_generation = state.gravitySourceGeneration();
-      } else if (!integrator_state.pm_long_range_field_valid) {
-        throw std::runtime_error("PM sync reused a long-range field before the integrator marked one valid");
       }
     }
     if (stage == IntegrationStage::kDrift && state.hasHomogeneousDmoMetadata()) {

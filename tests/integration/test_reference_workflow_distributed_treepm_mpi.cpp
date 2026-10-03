@@ -455,6 +455,48 @@ int main() {
     assert(first_restart.distributed_gravity_state.pm_slab_begin_x_by_rank[world_rank] == local_slab.begin_x);
     assert(first_restart.distributed_gravity_state.pm_slab_end_x_by_rank[world_rank] == local_slab.end_x);
 
+    // A2 regression: feed the production restart path deliberately rank-local
+    // PM-validity evidence. Rank 1 requests an initial PM repair while rank 0
+    // still considers the checkpoint field valid. The MPI-aware time
+    // coordinator must turn that evidence into one shared directive before
+    // GravityRuntime reaches any branch-dependent TreePM collective.
+    cosmosim::io::RestartReadResult rank_local_pm_validity_restart = first_restart;
+    if (world_rank == 1) {
+      rank_local_pm_validity_restart.integrator_state.pm_long_range_field_valid = false;
+    }
+    cosmosim::workflows::ReferenceWorkflowOptions cadence_consensus_options;
+    cadence_consensus_options.write_outputs = false;
+    cadence_consensus_options.restart_state_override = &rank_local_pm_validity_restart;
+    cadence_consensus_options.max_steps_override = 1;
+    const cosmosim::workflows::ReferenceWorkflowReport cadence_consensus_report =
+        restart_runner.run(root / "rank_local_pm_validity_consensus", cadence_consensus_options);
+    assert(cadence_consensus_report.completed_steps == 1U);
+    assert(!cadence_consensus_report.treepm_cadence_records.empty());
+    const auto& consensus_record = cadence_consensus_report.treepm_cadence_records.front();
+    assert(consensus_record.stage_name == "gravity_kick_pre");
+    assert(consensus_record.pm_refresh_reason == "initial_force_bootstrap");
+    assert(consensus_record.refreshed_long_range_field);
+
+    const std::uint64_t local_consensus_values[] = {
+        consensus_record.gravity_kick_opportunity,
+        consensus_record.field_version,
+        consensus_record.last_refresh_opportunity,
+        consensus_record.refreshed_long_range_field ? 1ULL : 0ULL,
+    };
+    std::uint64_t reduced_consensus_values[4] = {};
+    MPI_Allreduce(
+        local_consensus_values,
+        reduced_consensus_values,
+        4,
+        MPI_UINT64_T,
+        MPI_SUM,
+        MPI_COMM_WORLD);
+    for (std::size_t i = 0U; i < 4U; ++i) {
+      assert(
+          reduced_consensus_values[i] ==
+          local_consensus_values[i] * static_cast<std::uint64_t>(world_size));
+    }
+
     cosmosim::workflows::ReferenceWorkflowOptions resumed_options;
     resumed_options.write_outputs = true;
     resumed_options.restart_state_override = &first_restart;

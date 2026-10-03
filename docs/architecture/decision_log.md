@@ -1052,3 +1052,27 @@ acceptance. Incomplete owner contracts cannot authorize overlap.
 Science snapshots are analysis products, not restart partitions. The authoritative typed `output.snapshot_layout` policy therefore selects one shared HDF5 science file for serial execution and for MPI when the linked HDF5 is Parallel-HDF5 capable. MPI ranks write only owned non-overlapping global hyperslabs; no complete particle state is gathered onto rank zero. The writer uses collective Parallel-HDF5 file/metadata construction with direct MPI-IO hyperslab payload writes, bounded per-rank staging, distributed exact partition readback, collective failure agreement, and atomic publication from `.partial` to `snap_###.hdf5`. Root post-publication validation may omit its otherwise O(N_global) duplicate ID buffer only after the distributed exact readback has established file IDs equal globally unique authoritative runtime IDs.
 
 `sharded` remains an explicit compatibility topology. `aggregated` plus `snapshot_num_files` reserves a future fixed-count I/O topology but fails closed until a real backend is qualified. Restart/checkpoint ownership, schema, rank-local files, and same-topology continuation remain unchanged. This decision changes output topology and operator interoperability only; TreePM, timesteps, particle physical state, deterministic reductions, and restart semantics are unaffected.
+
+## 2026-10-03 — ADR-A2-TREEPM-CADENCE-001: Rank-global PM refresh materialization before TreePM branching
+
+**Status:** Source-level repair implemented; build and runtime qualification pending.
+
+The core integrator remains the owner of PM-refresh opportunity semantics, but
+rank-local predicates are now evidence rather than committed distributed
+cadence truth. `TimeCoordinator`, which already owns workflow-level MPI stage
+dispatch, reduces PM enablement, refresh-boundary legality, local-substep state,
+long-range-field validity, and source-generation mismatch before any
+branch-dependent TreePM collective. It deterministically materializes one
+`PmRefreshDirective` on every rank. Mandatory invalidation is rank-global: any
+source-generation mismatch or invalid PM field requires a shared repair at a
+legal boundary; refresh permission is conservative and must be legal on every
+rank except the existing initial-bootstrap synchronization exception.
+
+`PmSynchronizationState` now supports side-effect-free opportunity preview and
+a separate commit. The committed kick opportunity/version therefore advances
+only after the TreePM callback successfully consumes the globally authorized
+directive. Gravity retains its cadence consensus guard and strengthens exact
+integer/epoch checks to rank min/max agreement; it does not synthesize equality
+for scientifically meaningful source generations. The repair does not force PM
+refresh every step, serialize TreePM, alter force tolerances, or change restart
+schema semantics.

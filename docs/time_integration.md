@@ -41,13 +41,18 @@ cadence records (`pm_sync_surface`, `gravity_kick_opportunity`,
 `field_version`, `last_refresh_opportunity`, `active_particles_kicked`,
 `inactive_particles_skipped`).
 
-For the in-flight refresh, the integrator-issued `PmRefreshDirective` is the
-decision authority until `PmSynchronizationState` commits it. The
-`gravity.pm_long_range_field` event is emitted in that interval, so its
-opportunity, version, build step, and build scale-factor payload must come from
-the directive/solver decision. Reading the still-previous committed cadence
-state there would produce a self-contradictory refresh event. This event fix
-does not move live cadence ownership away from `PmSynchronizationState`.
+For the in-flight refresh, the core integrator first records local evidence in
+`PmRefreshDirective` without advancing `PmSynchronizationState`. In distributed
+execution `TimeCoordinator` collectively converts that evidence into one
+rank-global directive before any branch-dependent TreePM work; in serial
+execution the same directive is materialized locally. That materialized
+directive is the transient decision authority until the solver succeeds and
+`PmSynchronizationState` commits it. The `gravity.pm_long_range_field` event is
+emitted in that interval, so its opportunity, version, build step, and build
+scale-factor payload must come from the directive/solver decision. Reading the
+still-previous committed cadence state there would produce a
+self-contradictory refresh event. This does not move committed cadence ownership
+away from `PmSynchronizationState`.
 
 #### Production refresh and lower-level reuse rule
 
@@ -66,7 +71,9 @@ does not move live cadence ownership away from `PmSynchronizationState`.
   decomposition-layout mode, and window-deconvolution policy. Particle
   ownership/decomposition epoch is intentionally excluded because the cached
   PM field is owned by the fixed FFT slab layout, not particle rows.
-- Refresh/reuse votes and cadence metadata are rank-consensus facts.
+- Refresh/reuse votes and cadence metadata are rank-consensus facts. Rank-local
+  field-validity/source-generation evidence is reduced at the workflow
+  coordination boundary before the gravity runtime may branch on PM cadence.
 
 The scale factor stored with a field is source-epoch/validity metadata. The PM
 and tree kernels are scale-free; cosmological time dependence is applied only
@@ -176,7 +183,10 @@ The Stage 2 invariant framework intentionally traps split-brain timestep ownersh
 - active flags are scheduler caches for an open substep, not serialized live authority;
 - active-set descriptors must match scheduler active elements and source generations;
 - restart import must validate scheduler lanes and reject stale particle or cell `time_bin` mirrors before rebuilding mirrors from scheduler state;
-- PM refresh events must be committed before the next kick opportunity can be registered;
+- PM refresh opportunities may be previewed without mutation for distributed
+  coordination, but an accepted opportunity must be committed after successful
+  solver execution, and a refresh must be committed before the next kick
+  opportunity can be accepted;
 - distributed PM decisions remain rank-consensus metadata;
 - production restart import requires particle and gas schedulers to use
   `max_bin = 0`, with all current/pending bins at zero or unset as appropriate;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -1149,14 +1150,23 @@ class GravityRuntimeImpl final : public GravityRuntime {
       throw std::runtime_error(
           "TreePM initial force bootstrap requested outside an integrator-authorized global boundary");
     }
+    const bool authoritative_pm_refresh =
+        context.pm_refresh_directive.has_sync_event &&
+        context.pm_refresh_directive.refresh_long_range_field;
     const bool is_force_refresh_stage = context.pm_refresh_directive.force_refresh_surface ||
-        needs_initial_force_bootstrap || (is_kick_stage && needs_force_cache_rebuild);
+        needs_initial_force_bootstrap || authoritative_pm_refresh ||
+        (is_kick_stage && needs_force_cache_rebuild);
     if (!is_kick_stage && !is_force_refresh_stage) {
       throw std::logic_error("gravity handler received an unregistered stage");
     }
+    const bool initial_bootstrap_boundary_exception =
+        context.pm_refresh_directive.reason ==
+            core::PmRefreshDirective::Reason::kInitialForceBootstrap &&
+        context.pm_refresh_directive.initial_cache_bootstrap_allowed;
     if (context.pm_refresh_directive.has_sync_event &&
         context.pm_refresh_directive.refresh_long_range_field &&
-        !context.boundary.pm_refresh_allowed) {
+        !context.boundary.pm_refresh_allowed &&
+        !initial_bootstrap_boundary_exception) {
       throw std::runtime_error("TreePM long-range PM refresh reached an illegal integration boundary");
     }
     if (context.stage == core::IntegrationStage::kForceRefresh && !context.pm_refresh_directive.force_refresh_surface) {
@@ -1176,14 +1186,20 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
 
     const auto requireKickConsensus = [&](std::uint64_t local_value, std::string_view name) {
-      const std::uint64_t global_sum = mpi_context.allreduceSumUint64(local_value);
-      if (global_sum != local_value * world_size) {
+      const std::uint64_t global_min = mpi_context.allreduceMinUint64(local_value);
+      const std::uint64_t global_max = mpi_context.allreduceMaxUint64(local_value);
+      if (global_min != global_max) {
         throw std::runtime_error(
             "TreePM cadence rank-consensus failure for " + std::string(name) +
-            ": local=" + std::to_string(local_value) + ", reduced_sum=" + std::to_string(global_sum) +
+            ": local=" + std::to_string(local_value) +
+            ", global_min=" + std::to_string(global_min) +
+            ", global_max=" + std::to_string(global_max) +
             ", world_size=" + std::to_string(world_size));
       }
     };
+    requireKickConsensus(
+        context.pm_refresh_directive.has_sync_event ? 1ULL : 0ULL,
+        "pm_sync_event_presence");
     requireKickConsensus(context.state.gravitySourceGeneration(), "gravity_source_generation");
 
     const internal::SolverGhostRefreshReport gravity_ghost_refresh =
@@ -1659,6 +1675,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
           .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
       };
+      requireKickConsensus(
+          static_cast<std::uint64_t>(context.pm_refresh_directive.sync_stage),
+          "pm_sync_stage");
+      requireKickConsensus(
+          static_cast<std::uint64_t>(context.pm_refresh_directive.reason),
+          "pm_refresh_reason");
       requireKickConsensus(sync_event.gravity_kick_opportunity, "gravity_kick_opportunity");
       const std::uint64_t refresh_vote = sync_event.refresh_long_range_field ? 1ULL : 0ULL;
       const std::uint64_t refresh_vote_sum = mpi_context.allreduceSumUint64(refresh_vote);
@@ -1692,6 +1714,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
     requireKickConsensus(decision.field_version, "long_range_field_version");
     requireKickConsensus(decision.last_refresh_opportunity, "last_long_range_refresh_opportunity");
+    requireKickConsensus(
+        decision.field_built_step_index,
+        "long_range_field_built_step_index");
+    requireKickConsensus(
+        std::bit_cast<std::uint64_t>(decision.field_built_scale_factor),
+        "long_range_field_built_scale_factor_bits");
     double force_evaluation_scale_factor = decision.field_built_scale_factor;
     if (decision.refresh_long_range_field) {
       force_evaluation_scale_factor =
@@ -1708,6 +1736,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
       throw std::runtime_error(
           "TreePM force evaluation requires a finite positive scale factor");
     }
+    requireKickConsensus(
+        std::bit_cast<std::uint64_t>(force_evaluation_scale_factor),
+        "force_evaluation_scale_factor_bits");
     // At a post-drift global refresh this is timeline_step.scale_factor_end,
     // even though IntegratorState.current_scale_factor remains at the step
     // beginning until commitStep(). A reuse retains the integrator-owned field
