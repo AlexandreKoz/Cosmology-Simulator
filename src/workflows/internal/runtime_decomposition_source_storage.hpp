@@ -215,7 +215,11 @@ class RuntimeDecompositionSourceStorage {
     source.particle_owning_rank = m_state.particle_sidecar.owning_rank;
     source.particle_metadata_uniform = m_state.hasHomogeneousDmoMetadata();
     if (source.particle_metadata_uniform) {
-      source.uniform_particle_species_tag = m_state.particleSpeciesTag(0U);
+      // Homogeneous-DMO is representation-level metadata and remains valid
+      // even when this rank owns zero particles. Do not query a nonexistent
+      // particle row merely to recover the representation's species.
+      source.uniform_particle_species_tag =
+          static_cast<std::uint32_t>(core::ParticleSpecies::kDarkMatter);
       source.uniform_particle_owning_rank = static_cast<std::uint32_t>(m_world_rank);
     }
     source.active_particle_mask = m_active_mask;

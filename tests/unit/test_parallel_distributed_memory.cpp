@@ -2503,6 +2503,44 @@ void testExplicitComponentWeightedLoadAuthority() {
   }
 }
 
+void testEmptyCompactDmoRuntimeDecompositionSourceView() {
+  using cosmosim::workflows::internal::RuntimeDecompositionSourceStorage;
+
+  constexpr std::uint32_t k_local_rank = 7U;
+  cosmosim::core::SimulationState dmo;
+  assert(dmo.particles.empty());
+  assert(dmo.compactHomogeneousDmoMetadata(k_local_rank));
+  assert(dmo.hasHomogeneousDmoMetadata());
+  assert(dmo.particle_sidecar.species_tag.empty());
+  assert(dmo.particle_sidecar.owning_rank.empty());
+
+  bool particle_row_rejected = false;
+  try {
+    (void)dmo.particleSpeciesTag(0U);
+  } catch (const std::out_of_range&) {
+    particle_row_rejected = true;
+  }
+  assert(particle_row_rejected);
+
+  const RuntimeDecompositionSourceStorage storage(
+      dmo, static_cast<int>(k_local_rank), {});
+  const auto view = storage.view();
+  assert(view.particle_count == 0U);
+  assert(view.localEntityCount() == 0U);
+  assert(view.particle_metadata_uniform);
+  assert(view.uniform_particle_species_tag ==
+         static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter));
+  assert(view.uniform_particle_owning_rank == k_local_rank);
+  assert(view.particle_species_tag.empty());
+  assert(view.particle_owning_rank.empty());
+
+  // Constructing the borrowed decomposition view must not materialize the
+  // compact metadata sidecars merely because the rank is empty.
+  assert(dmo.hasHomogeneousDmoMetadata());
+  assert(dmo.particle_sidecar.species_tag.empty());
+  assert(dmo.particle_sidecar.owning_rank.empty());
+}
+
 void testRuntimeDecompositionSourceMemoryEstimateMatchesStorage() {
   using cosmosim::parallel::estimateRuntimeDecompositionSourceStorage;
   using cosmosim::parallel::RuntimeDecompositionSourceMemoryEstimate;
@@ -2651,6 +2689,7 @@ int main() {
   testCompactPlannerDenseIndexContract();
   testCompactStartupPlannerTransientAdmission();
   testExplicitComponentWeightedLoadAuthority();
+  testEmptyCompactDmoRuntimeDecompositionSourceView();
   testRuntimeDecompositionSourceMemoryEstimateMatchesStorage();
   testDistributedExecutionTopologyCudaAssignment();
   testDistributedExecutionTopologyRejectsInvalidGpuRequest();
