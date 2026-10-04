@@ -46,6 +46,15 @@ Only one lease can be active. A phase resource can be obtained only while its
 matching lease is active. Lease release invalidates all arena-backed views before
 the next phase can borrow the same storage.
 
+The arena is a physical owner for **distributed gravity payload staging**, not for
+the mere existence of an MPI communicator.  TreePM may execute an agreed
+rank-local-serial mode in an MPI world where each rank owns a complete one-rank
+PM layout.  That mode still participates in communicator-wide consensus and
+failure votes, but it does not configure or lease the shared arena because PM
+routing, PM halo exchange, routed PM interpolation, and residual Tree exchange
+are all local.  The agreed TreePM layout mode therefore gates arena
+estimation/configuration and every payload-bearing lease consistently.
+
 ## Capacity derivation
 
 The physical capacity is source-derived before first distributed use:

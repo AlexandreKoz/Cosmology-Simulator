@@ -2136,6 +2136,14 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     throw std::runtime_error(
         "TreePM peer rank rejected its local input during coordinated preflight");
   }
+  // The hosting MPI world and the selected gravity communication topology are
+  // distinct contracts.  A communicator may contain multiple ranks while each
+  // rank owns a complete serial PM grid.  In that agreed rank-local-serial mode
+  // we still execute communicator-wide consensus/failure votes, but no PM
+  // routing, PM halo, PM interpolation routing, or residual Tree payload uses
+  // the shared communication arena.
+  const bool tree_pm_uses_distributed_payload_communication =
+      tree_pm_entry_world_size > 1 && !tree_pm_rank_local_serial_mode;
   const auto coordinate_tree_pm_failure = [&](std::exception_ptr local_failure,
                                                std::string_view phase) {
     std::uint64_t failure_count = local_failure ? 1U : 0U;
@@ -2259,7 +2267,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   // distributed gravity protocol can borrow it. The capacity is the maximum
   // source-derived live set of the sequential PM-density, halo-staging,
   // interpolation, and short-range Tree exchange phases.
-  if (tree_pm_entry_world_size > 1) {
+  if (tree_pm_uses_distributed_payload_communication) {
     std::exception_ptr arena_configuration_failure;
     try {
       const GravityCommunicationArenaMemoryEstimate arena_estimate =
@@ -2280,21 +2288,18 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 
   const auto run_pm_communication_phase = [&](
       GravityCommunicationArena::Phase phase, const auto& operation) {
-    if (tree_pm_entry_world_size <= 1) {
-      operation();
-      return;
-    }
-
     std::optional<GravityCommunicationArena::Lease> arena_lease;
-    std::exception_ptr lease_failure;
-    try {
-      arena_lease.emplace(m_communication_arena.begin(phase));
-      m_pm_solver.attachCommunicationArena(&m_communication_arena);
-    } catch (...) {
-      m_pm_solver.detachCommunicationArena();
-      lease_failure = std::current_exception();
+    if (tree_pm_uses_distributed_payload_communication) {
+      std::exception_ptr lease_failure;
+      try {
+        arena_lease.emplace(m_communication_arena.begin(phase));
+        m_pm_solver.attachCommunicationArena(&m_communication_arena);
+      } catch (...) {
+        m_pm_solver.detachCommunicationArena();
+        lease_failure = std::current_exception();
+      }
+      coordinate_tree_pm_failure(lease_failure, "PM communication-arena lease");
     }
-    coordinate_tree_pm_failure(lease_failure, "PM communication-arena lease");
 
     std::exception_ptr operation_failure;
     try {
@@ -2302,11 +2307,17 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     } catch (...) {
       operation_failure = std::current_exception();
     }
-    // PmSolver's arena-backed containers have been destroyed on return from
-    // operation(); no MPI request or decoder may retain their storage now.
-    m_pm_solver.detachCommunicationArena();
+    if (tree_pm_uses_distributed_payload_communication) {
+      // PmSolver's arena-backed containers have been destroyed on return from
+      // operation(); no MPI request or decoder may retain their storage now.
+      m_pm_solver.detachCommunicationArena();
+    }
+    // The payload may be rank-local, but an MPI-hosted solve still needs a
+    // coherent failure boundary before peers advance to the next collective.
     coordinate_tree_pm_failure(operation_failure, "PM communication phase");
-    arena_lease->release();
+    if (arena_lease.has_value()) {
+      arena_lease->release();
+    }
   };
 
   // Inclusive PM-phase wall clock: long-range refresh (when requested),
@@ -2346,7 +2357,8 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     } else {
       m_pm_solver.solvePoissonIsolatedOpen(m_grid, pm_options, profile != nullptr ? &profile->pm_profile : nullptr);
     }
-    if (!m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
+    if (tree_pm_uses_distributed_payload_communication &&
+        !m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
       const std::uint64_t exchange_sequence = ++m_pm_halo_exchange_sequence;
       std::exception_ptr halo_cache_prepare_failure;
       try {
@@ -2844,7 +2856,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       accumulator,
       short_range_options,
        softening_view,
-       tree_pm_rank_local_serial_mode,
+       tree_pm_uses_distributed_payload_communication,
        profile != nullptr ? &profile->tree_profile : nullptr);
 
   const auto tree_stop = std::chrono::steady_clock::now();
@@ -3036,7 +3048,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     const TreePmForceAccumulatorView& accumulator,
     const TreePmOptions& options,
      const TreeSofteningView& softening_view,
-     bool rank_local_serial_mode,
+     bool distributed_payload_communication_required,
      TreeGravityProfile* tree_profile) {
 
   ResidualTraversalCounters local_owned_targets;
@@ -3097,7 +3109,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   int tree_mpi_world_rank = 0;
   queryActiveMpiWorld(tree_mpi_world_size, tree_mpi_world_rank);
 #else
-  static_cast<void>(rank_local_serial_mode);
+  static_cast<void>(distributed_payload_communication_required);
   static_cast<void>(tree_mpi_world_size);
 #endif
 
@@ -3434,8 +3446,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 
   bool distributed_short_range = false;
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
-  distributed_short_range =
-      tree_mpi_world_size > 1 && !rank_local_serial_mode;
+  distributed_short_range = distributed_payload_communication_required;
 #endif
   // Integer counters and local short-range sum-of-squares are reduced after
   // join in deterministic block order. No atomics appear in the hot node/pair

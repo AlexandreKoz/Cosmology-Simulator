@@ -334,7 +334,7 @@ class TreePmCoordinator {
       const TreePmForceAccumulatorView& accumulator,
       const TreePmOptions& options,
        const TreeSofteningView& softening_view,
-       bool rank_local_serial_mode,
+       bool distributed_payload_communication_required,
        TreeGravityProfile* tree_profile);
 
 

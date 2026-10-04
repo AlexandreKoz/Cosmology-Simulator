@@ -963,6 +963,69 @@ void testLongRangeCadenceCacheIsFailClosedAndOwnershipCompatible() {
 }
 
 #if COSMOSIM_ENABLE_MPI
+void testRankLocalSerialTreePmInsideMpiWorldSkipsDistributedArena() {
+  int world_size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  if (world_size < 2 || world_size > 8) {
+    return;
+  }
+
+  const cosmosim::gravity::PmGridShape pm_shape =
+      pmShapeForAvailableBackend(8U, 8U);
+  const std::vector<double> pos_x{0.17, 0.63};
+  const std::vector<double> pos_y{0.29, 0.74};
+  const std::vector<double> pos_z{0.41, 0.86};
+  const std::vector<double> mass{1.0, 1.25};
+  const std::vector<std::uint32_t> active{0U, 1U};
+  ForceField force{
+      std::vector<double>(active.size(), 0.0),
+      std::vector<double>(active.size(), 0.0),
+      std::vector<double>(active.size(), 0.0)};
+  const cosmosim::gravity::TreePmForceAccumulatorView accumulator{
+      .active_particle_index = active,
+      .accel_x_comoving = force.ax,
+      .accel_y_comoving = force.ay,
+      .accel_z_comoving = force.az,
+  };
+
+  cosmosim::gravity::TreePmOptions options;
+  options.pm_options.box_size_mpc_comoving = 1.0;
+  options.pm_options.scale_factor = 1.0;
+  options.pm_options.gravitational_constant_code = 1.0;
+  options.tree_options.gravitational_constant_code = 1.0;
+  options.tree_options.softening.epsilon_comoving = 1.0e-3;
+  options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
+      1.25, rcutCellsForAvailableBackend(3.0, 3.0),
+      1.0 / static_cast<double>(pm_shape.nx));
+
+  cosmosim::gravity::TreePmCoordinator coordinator(pm_shape);
+  requireOrThrow(
+      coordinator.slabLayout().world_size == 1 && coordinator.ownsFullPmDomain(),
+      "rank-local-serial TreePM regression requires one-rank full-domain PM ownership");
+
+  cosmosim::gravity::TreePmDiagnostics diagnostics;
+  coordinator.solveActiveSet(
+      pos_x, pos_y, pos_z, mass, accumulator, options, nullptr, &diagnostics);
+
+  requireOrThrow(
+      diagnostics.pm_halo_value_count == 0U,
+      "rank-local-serial TreePM unexpectedly entered PM halo exchange");
+  requireOrThrow(
+      diagnostics.residual_remote_request_packets == 0U &&
+          diagnostics.residual_remote_response_packets == 0U,
+      "rank-local-serial TreePM unexpectedly entered distributed residual exchange");
+
+  const auto memory_report = coordinator.memoryReport();
+  const auto physical_arena = std::find_if(
+      memory_report.entries.begin(), memory_report.entries.end(),
+      [](const auto& entry) {
+        return entry.label == "treepm.communication_arena";
+      });
+  requireOrThrow(
+      physical_arena == memory_report.entries.end(),
+      "rank-local-serial TreePM configured the distributed gravity communication arena");
+}
+
 void testDivergentTreePmLayoutFailsCoordinately() {
   int world_size = 1;
   int world_rank = 0;
@@ -1609,6 +1672,7 @@ int main() {
   testActiveSubsetMatchesFullSolveSingleRank();
   testLongRangeCadenceCacheIsFailClosedAndOwnershipCompatible();
 #if COSMOSIM_ENABLE_MPI
+  testRankLocalSerialTreePmInsideMpiWorldSkipsDistributedArena();
   testDivergentTreePmLayoutFailsCoordinately();
   testDistributedShortRangeExportImportMatchesSingleRankReference();
   testDistributedActiveSubsetMatchesSingleRankReference();
