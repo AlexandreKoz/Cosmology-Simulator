@@ -431,6 +431,28 @@ void testRestartRoundtrip() {
       .deterministic_from_serialized_inputs = true,
   });
 
+  cosmosim::io::GravityForceCachePersistentState force_cache;
+  force_cache.valid = true;
+  force_cache.particle_id = state.particle_sidecar.particle_id;
+  force_cache.gas_cell_id = gasCellIdsByDenseRow(state);
+  force_cache.particle_accel_x_comoving.resize(state.particles.size());
+  force_cache.particle_accel_y_comoving.resize(state.particles.size());
+  force_cache.particle_accel_z_comoving.resize(state.particles.size());
+  for (std::size_t pidx = 0; pidx < state.particles.size(); ++pidx) {
+    force_cache.particle_accel_x_comoving[pidx] = 0.125 + static_cast<double>(pidx);
+    force_cache.particle_accel_y_comoving[pidx] = -0.25 - static_cast<double>(pidx);
+    force_cache.particle_accel_z_comoving[pidx] = 0.5 + 0.5 * static_cast<double>(pidx);
+  }
+  force_cache.cell_accel_x_comoving.resize(state.cells.size());
+  force_cache.cell_accel_y_comoving.resize(state.cells.size());
+  force_cache.cell_accel_z_comoving.resize(state.cells.size());
+  for (std::size_t cidx = 0; cidx < state.cells.size(); ++cidx) {
+    force_cache.cell_accel_x_comoving[cidx] = 1.25 + static_cast<double>(cidx);
+    force_cache.cell_accel_y_comoving[cidx] = -1.5 - static_cast<double>(cidx);
+    force_cache.cell_accel_z_comoving[cidx] = 2.0 + 0.25 * static_cast<double>(cidx);
+  }
+  payload.gravity_force_cache = &force_cache;
+
   const std::filesystem::path checkpoint_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_roundtrip.hdf5");
 
@@ -458,6 +480,21 @@ void testRestartRoundtrip() {
   const cosmosim::io::RestartReadResult restored = cosmosim::io::readRestartCheckpointHdf5(checkpoint_path);
   assert(restored.payload_integrity_algorithm == "sha256-canonical-le-v1");
   assert(restored.payload_integrity_sha256_hex.size() == 64U);
+  assert(restored.gravity_force_cache.valid);
+  assert(restored.gravity_force_cache.particle_id == force_cache.particle_id);
+  assert(restored.gravity_force_cache.gas_cell_id == force_cache.gas_cell_id);
+  assert(restored.gravity_force_cache.particle_accel_x_comoving ==
+         force_cache.particle_accel_x_comoving);
+  assert(restored.gravity_force_cache.particle_accel_y_comoving ==
+         force_cache.particle_accel_y_comoving);
+  assert(restored.gravity_force_cache.particle_accel_z_comoving ==
+         force_cache.particle_accel_z_comoving);
+  assert(restored.gravity_force_cache.cell_accel_x_comoving ==
+         force_cache.cell_accel_x_comoving);
+  assert(restored.gravity_force_cache.cell_accel_y_comoving ==
+         force_cache.cell_accel_y_comoving);
+  assert(restored.gravity_force_cache.cell_accel_z_comoving ==
+         force_cache.cell_accel_z_comoving);
 
   assert(restored.state.validateOwnershipInvariants());
   cosmosim::core::debugAssertGasCellIdentityContract(restored.state);

@@ -4438,8 +4438,11 @@ RestartReadResult readRestartCheckpointHdf5(
   core::HierarchicalTimeBinScheduler verify_gas_cell_scheduler(result.gas_cell_scheduler_state.max_bin);
   verify_gas_cell_scheduler.importPersistentState(result.gas_cell_scheduler_state);
   verify_payload.scheduler = &verify_scheduler;
+  // RestartWritePayload borrows this span-only view during integrity traversal;
+  // keep the view object alive until restartPayloadIntegrityDigestsImpl returns.
+  std::optional<GravityForceCachePersistentView> verify_force_cache_view;
   if (schema_version >= k_restart_schema_v20) {
-    const GravityForceCachePersistentView verify_force_cache_view{
+    verify_force_cache_view.emplace(GravityForceCachePersistentView{
         .valid = result.gravity_force_cache.valid,
         .particle_id = result.gravity_force_cache.particle_id,
         .gas_cell_id = result.gravity_force_cache.gas_cell_id,
@@ -4448,8 +4451,8 @@ RestartReadResult readRestartCheckpointHdf5(
         .particle_accel_z_comoving = result.gravity_force_cache.particle_accel_z_comoving,
         .cell_accel_x_comoving = result.gravity_force_cache.cell_accel_x_comoving,
         .cell_accel_y_comoving = result.gravity_force_cache.cell_accel_y_comoving,
-        .cell_accel_z_comoving = result.gravity_force_cache.cell_accel_z_comoving};
-    verify_payload.gravity_force_cache_view = &verify_force_cache_view;
+        .cell_accel_z_comoving = result.gravity_force_cache.cell_accel_z_comoving});
+    verify_payload.gravity_force_cache_view = &*verify_force_cache_view;
   }
   if (schema_version >= k_restart_schema_v19) {
     verify_payload.gas_cell_scheduler = &verify_gas_cell_scheduler;
