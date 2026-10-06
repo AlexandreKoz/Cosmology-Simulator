@@ -256,14 +256,12 @@ rank counts without changing the target-export protocol or solver ownership.
 
 ## PM cadence and cache validity
 
-Production configuration currently requires both
-`numerics.treepm_update_cadence_steps = 1` and
-`numerics.hierarchical_max_rung = 0`. Every integrator-issued,
-rank-coordinated production force-refresh surface rebuilds the long-range PM
-field. Cadence greater than one lacks a validated predictor/interpolator;
-mixed-rung KDK lacks per-element kick/drift epochs. Both unsupported semantics
-therefore fail at config validation rather than being presented as production
-maturity. The integrator owns the PM synchronization event, kick opportunity,
+Production configuration retains `numerics.treepm_update_cadence_steps=1`.
+Default `numerics.hierarchical_max_rung=0` refreshes PM on every authorized
+force-refresh surface. Optional P6 DMO block KDK instead refreshes at explicit
+coarse endpoints and evaluates Tree-only forces between them, with no PM
+interpolation there. It is source-implemented and unqualified. Cadence greater
+than one still lacks a specified predictor and fails config validation. The integrator owns the PM synchronization event, kick opportunity,
 field version, last refresh opportunity, build step, and build scale factor,
 and the workflow requires rank consensus before collective PM work.
 
@@ -277,7 +275,7 @@ Explicit refresh/reuse votes are reduced first, and a mixed vote throws before
 any rank enters PM density or FFT collectives. This signature is an invalidation
 guard, not a predictor for cadence greater than one.
 
-Tree topology is rebuilt for each current production force call. Its explicit
+Tree topology is rebuilt for each default force call; P6 reuse/refit is opt-in. Its explicit
 `TreeBuildGeneration`, together with `GravitySourceGeneration` and
 `DecompositionEpoch`, prevents stale top-level-domain/LET reuse after source
 mutation, migration, or rebuild. The workflow decomposition epoch advances only after
@@ -441,14 +439,12 @@ restart/snapshot schema; after restart the seed path reinstalls it. Single-rank
 and MPI-disabled builds remain valid; there is no hard-coded world size in the
 refit.
 
-Freshness-token design note (hierarchical KDK, documentation only): current
-P2 uses `GravitySourceGeneration` as the routing-geometry physical-state
-freshness token. That is valid for the current production all-active/rung-zero
-workflow, where every source moves with the single global timestep. A future
-mixed-rung KDK implementation may predict inactive sources to a
-force-evaluation epoch without advancing canonical source generation the same
-way; hierarchical KDK must then revisit routing-geometry freshness to include
-the prediction/evaluation epoch. No scheduler state for that exists today.
+P6 hierarchical freshness rule: all canonical DMO source positions are
+advanced to every fine evaluation epoch. `GravitySourceGeneration` advances
+once after each all-source drift, so P2 geometry refresh and collective fallback
+continue to consume canonical sources, with no predicted-source token alias.
+Lazy inactive prediction would require a separate future contract; it is not
+part of this implementation.
 
 ## Residual traversal counters and timing truth
 
@@ -665,3 +661,71 @@ See `docs/gravity_production_readiness.md` for current pass/limitation status.
   `G_code=1` must construct the frozen-config `UnitSystem` and call this helper;
   standalone gravity tests may still choose an explicit dimensionless `G`.
   This changes no snapshot/restart dataset and adds no second config lane.
+
+## P6 acceptance, source identity and tree retention
+
+**SOURCE-IMPLEMENTED / VALIDATION PENDING.** `kStrictReference` remains default:
+the selected existing MAC, all safety guards, quadrupole-only internal
+acceptance and `width/r < 0.08` remain. Internal monopoles descend in this policy.
+Adaptive mode may accept internal monopoles or quadrupoles, retaining the
+existing complete second moment/trace force expansion, source softening,
+self/inside geometry and complete-node cutoff containment.
+
+For CHUI's screened Plummer residual,
+
+\[
+ F_i=GM d_i f(r),\quad
+ f=(r^2+\epsilon_{pair}^2)^{-3/2}+(S-1)/r^3,
+\quad S=\operatorname{erfc}(q)+2q e^{-q^2}/\sqrt\pi,
+\quad q=r/(2r_s).
+\]
+
+The adaptive accuracy inequality is
+
+\[
+ GM\max\left(l^2/r^4,\frac{\rho^2}{2}
+ [3|f'|+|r f''-f'|]\right)\le\alpha |A_{previous}|,
+\quad l=2h,\quad\rho=\sqrt3h+|COM-center|.
+\]
+
+Derivatives are evaluated for this exact residual kernel. The second-moment
+scale is charged even for quadrupoles. This is an accuracy **proxy**, not a
+proven bound on the omitted quadrupole remainder or a qualified alpha. `A` is
+the prior/reference unscaled total acceleration. It is never replaced by a
+fake floor acceleration. Missing/incompatible, nonfinite or <= floor history
+uses the existing COM-distance geometric criterion. The independent adaptive
+maximum angle defaults to 0.25 and is validated <=0.5; it is an unqualified
+safeguard, not a replacement of strict 0.08 or a claimed scientific constant.
+Rejection reasons are separately observable and may overlap.
+
+Workflow source generation now reaches tree build directly. Trustworthy
+nonzero generation skips the O(N) content hash; zero retains the old hashing
+fallback. Stale-source checks are retained. Exact-generation reuse also
+requires count, softening/build options, boundary/box, ownership epoch and
+nonzero stable source-row layout generation. Saturated generation is not reuse
+authority. Generic views with unknown row layout rebuild.
+
+Motion refit keeps the original periodic unwrap anchor and checks every source
+strictly inside its original octant leaf cell. Original cells are reconstructed
+from four root scalars and immutable octant child slots, without new per-node
+or per-source metadata. Failure rebuilds using the existing largest-gap unwrap
+and Morton/radix path. Success preserves child/source membership, refits
+bounding cubes bottom-up with outward rounding, resets COM/moments and
+recomputes all multipoles, then publishes a new tree-build generation. Logical
+Morton keys are cleared after refit; the leaf permutation remains legal but is
+not advertised as a fresh coordinate Morton order. Refitted bounds may differ
+from a fresh build, so force-error/equivalence and restart roundoff need explicit
+qualification. No bitwise claim is made for optional refit across restart.
+
+`TreeGravityProfile::rebuild_reason` codes: 0 disabled, 1 invalid tree, 2 source
+identity changed/unavailable, 3 frame/ownership change, 4 options/softening,
+5 identical reuse, 6 certified refit, 7 original leaf escape, 8 unknown/changed
+row layout. Rejected membership time survives a subsequent build. Reference
+full rebuild is retained with both switches false.
+
+Accumulator API migration: optional PM-only outputs are active-slot indexed;
+optional Tree-only outputs are source-row indexed and require local indexed
+targets. Ordinary callers leave these spans empty and retain total-force
+behavior. `short_range_only` is an integrator split surface, forbids PM
+refresh/capture and zoom correction, and returns short-range-only diagnostics.
+Existing explicit PM cache-reuse compatibility rules are unchanged.

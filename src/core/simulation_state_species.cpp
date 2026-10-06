@@ -488,7 +488,7 @@ bool SimulationState::compactHomogeneousDmoMetadata(std::uint32_t local_rank) {
   }
   for (std::size_t i = 0; i < count; ++i) {
     if (particle_sidecar.species_tag[i] != dm || particle_sidecar.owning_rank[i] != local_rank ||
-        particle_sidecar.particle_flags[i] != m_uniform_particle_flags || particles.time_bin[i] != 0U ||
+        particle_sidecar.particle_flags[i] != m_uniform_particle_flags ||
         particle_sidecar.last_drift_time_code[i] != m_common_last_drift_time_code ||
         particle_sidecar.last_drift_scale_factor[i] != m_common_last_drift_scale_factor) {
       return false;
@@ -497,7 +497,11 @@ bool SimulationState::compactHomogeneousDmoMetadata(std::uint32_t local_rank) {
   m_particle_metadata_representation = ParticleMetadataRepresentation::kHomogeneousDmo;
   m_uniform_species_tag = dm;
   m_uniform_owning_rank = local_rank;
-  AlignedVector<std::uint8_t>{}.swap(particles.time_bin);
+  // Bin mirrors are independent of uniform species/owner/drift metadata.
+  // Keep the one-byte lane only when a heterogeneous scheduler requires it.
+  if (std::all_of(particles.time_bin.begin(), particles.time_bin.end(), [](std::uint8_t bin) { return bin == 0U; })) {
+    AlignedVector<std::uint8_t>{}.swap(particles.time_bin);
+  }
   AlignedVector<std::uint32_t>{}.swap(particle_sidecar.species_tag);
   AlignedVector<std::uint32_t>{}.swap(particle_sidecar.particle_flags);
   AlignedVector<std::uint32_t>{}.swap(particle_sidecar.owning_rank);
@@ -600,7 +604,7 @@ void SimulationState::commitCompactHomogeneousDmoCandidate(
 void SimulationState::materializeParticleMetadata() {
   if (!hasHomogeneousDmoMetadata()) return;
   const std::size_t count = particles.size();
-  particles.time_bin.assign(count, 0U);
+  if (particles.time_bin.empty()) particles.time_bin.assign(count, 0U);
   particle_sidecar.species_tag.assign(count, m_uniform_species_tag);
   particle_sidecar.particle_flags.assign(count, m_uniform_particle_flags);
   particle_sidecar.owning_rank.assign(count, m_uniform_owning_rank);
@@ -638,7 +642,7 @@ double SimulationState::particleLastDriftScaleFactor(std::size_t particle_index)
 }
 std::uint8_t SimulationState::particleTimeBin(std::size_t particle_index) const {
   if (particle_index >= particles.size()) throw std::out_of_range("particleTimeBin: particle index out of range");
-  return hasHomogeneousDmoMetadata() ? 0U : particles.time_bin[particle_index];
+  return particles.time_bin.empty() && hasHomogeneousDmoMetadata() ? 0U : particles.time_bin[particle_index];
 }
 void SimulationState::updateAllParticleDriftEpoch(double time_code, double scale_factor) {
   if (!std::isfinite(time_code) || !std::isfinite(scale_factor) || scale_factor <= 0.0) {

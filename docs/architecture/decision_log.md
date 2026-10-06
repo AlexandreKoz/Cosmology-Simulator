@@ -1076,3 +1076,26 @@ integer/epoch checks to rank min/max agreement; it does not synthesize equality
 for scientifically meaningful source generations. The repair does not force PM
 refresh every step, serialize TreePM, alter force tolerances, or change restart
 schema semantics.
+
+## P6 optional accuracy, refit and DMO block integration — 20261006
+
+Source implementation; qualification pending. Conservative defaults retain
+strict residual acceptance, full tree rebuild, global KDK and existing
+rank-total decomposition feedback. Numerical opt-ins belong to the existing
+frozen config, not an alternate configuration surface.
+
+Accuracy proxy and geometric convergence guards have separate authority.
+Source generation, row-layout generation, ownership epoch, tree-build generation
+and PM version remain distinct facts. Refit retains immutable leaf membership
+and certifies it geometrically; no equality-of-N or empirical displacement
+threshold permits reuse. Spatial SFC work is bounded derived policy data, not
+particle truth.
+
+Hierarchy extends the existing scheduler/orchestrator using synchronized DMO
+blocks, canonical momentum drift and coarse PM endpoint kicks. Sources share
+each fine epoch; only target forces/kicks are selective. Split caches have explicit
+row/PM epoch checks and are reconstructed at each block start. Publication and
+migration require closed all-active coarse endpoints. Gas/source multirate laws
+and lazy prediction need a separate scientifically specified extension. Core's
+preparation callback accepts generic exception/string_view data; workflow supplies
+its existing collective failure coordinator. No dependency-boundary exception.

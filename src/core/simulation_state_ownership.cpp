@@ -131,7 +131,7 @@ bool SimulationState::validateOwnershipInvariantsImpl(
     return false;
   }
   if (hasHomogeneousDmoMetadata()) {
-    if (!particles.time_bin.empty() || !particle_sidecar.species_tag.empty() ||
+    if ((!particles.time_bin.empty() && particles.time_bin.size() != particles.size()) || !particle_sidecar.species_tag.empty() ||
         !particle_sidecar.particle_flags.empty() || !particle_sidecar.owning_rank.empty() ||
         !particle_sidecar.last_drift_time_code.empty() || !particle_sidecar.last_drift_scale_factor.empty()) {
       return false;

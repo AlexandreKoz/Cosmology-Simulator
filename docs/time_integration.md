@@ -95,11 +95,10 @@ event only after the TreePM callback consumes it successfully.
 
 #### Inactive-particle treatment
 
-- The production workflow currently requires `hierarchical_max_rung = 0`, so
-  mixed-rung inactive-particle kicks are not a supported production path.
-- The lower-level scheduler still records compact active sets and
-  `inactive_particles_skipped` for infrastructure validation. Those lanes do
-  not constitute a production-certified multirate TreePM integrator.
+- The default workflow uses `hierarchical_max_rung=0` and all-active global KDK.
+- P6 adds opt-in collisionless DMO block KDK (`1..12`), described below. Only
+  active targets receive Tree forces/kicks; all source positions share the
+  current fine drift epoch. This source path is not numerically qualified.
 
 #### Restart continuation rule
 
@@ -119,11 +118,11 @@ event only after the TreePM callback consumes it successfully.
 
 Stage 2 uses a single-owner timestep model: `HierarchicalTimeBinScheduler` is the only live authority for per-element bin assignment, next activation, active flags, pending transitions, active-set construction, and PM kick cadence metadata. Solver callbacks may propose timestep candidates and consume scheduler-built active sets, but they must not treat `ParticleSoa::time_bin`, `CellSoa::time_bin`, migration records, or restart mirrors as authority.
 
-Production currently fails closed at `numerics.hierarchical_max_rung = 0`.
-Nonzero rungs are rejected by typed config validation and by the production
-workflow because per-element kick/drift epochs required for mixed-rung KDK are
-not yet authoritative. The scheduler interfaces below remain infrastructure
-for future multirate work, not an enabled production capability.
+The reference path remains `numerics.hierarchical_max_rung=0`. P6 optionally
+uses the same scheduler authority for synchronized DMO blocks, with explicit
+per-row Tree force epochs and common source drift epochs. It remains
+SOURCE-IMPLEMENTED / VALIDATION PENDING; gas/source multirate integration is
+rejected rather than assigned an unspecified operator.
 
 ### Rung-zero global physical timestep
 
@@ -338,3 +337,100 @@ version 20 already persists scheduler/cadence truth needed for deterministic
 continuation plus committed stable-ID-keyed force history. PM mesh/tree scratch
 and coordinator-local cache structures remain transient and are
 deterministically rebuilt.
+
+## P6 synchronized hierarchical DMO KDK
+
+Status: **SOURCE-IMPLEMENTED / VALIDATION PENDING**. Global KDK remains default.
+`StepOrchestrator::executeHierarchicalBlockWithDispatcher` adds an operator to
+existing core orchestration; `TimeCoordinator` retains typed stage dispatch,
+collective failure, output and migration ownership. Distributed callers supply
+the existing failure coordinator through the core preparation callback seam.
+Core has no workflow/MPI dependency.
+
+For the existing force convention,
+
+\[
+\dot x=u/a,\quad \dot u+Hu=A/a^2,\quad p=au,
+\quad \dot x=p/a^2,\quad \dot p=A/a.
+\]
+
+`A` is scale-free Tree+PM acceleration. Hierarchy stores `u=p/a` at the common
+position epoch. Its drift operator holds `p` fixed:
+
+\[
+x_1=x_0+a_0u_0\int_{t_0}^{t_1}dt/a^2,\qquad u_1=u_0a_0/a_1.
+\]
+
+A force endpoint kick adds
+`delta_u = A_endpoint * integral(dt/a) / a_endpoint` over the corresponding
+half interval. The existing `computeComovingDriftFactor` supplies the kick
+integral; the canonical position-drift integral uses the same 64-sample midpoint
+convention in scale factor, `integral da/(a^3 H)`. SI/code time conversion remains
+owned by `CosmologicalTimeline`. The reference global operator is retained with
+its existing factors; this optional canonical formulation needs convergence
+comparison, including free expansion and small-force cases.
+
+At a closed coarse boundary, every particle receives a freshly synchronized
+Tree+PM solve. The coarse duration is at most `2^M * global_min_gravity_dt`,
+further clipped by cosmological limits, explicit workflow dt, next code-time
+output event, and endpoint. The existing gravity criterion uses
+`eta*sqrt(eps/(|A|/a^3))` with its current eta 0.2. The quantum is coarse dt /
+`2^M`. Each bin `b` is the largest permitted power of two no greater than its
+particle criterion, with interval `quantum*2^b`, `b=0..M`, `M<=12`.
+Assignments and quantum are frozen inside the block. Changes occur only after
+all intervals close, so no outstanding old interval is reinterpreted.
+
+The existing scheduler candidate lane holds proposals. Exact bin-list, active
+and radix-scratch capacities are admitted before membership changes. Closure
+clears active flags and sets next activation to the current aligned tick without
+advancing it. Gas's empty scheduler shares the integer tick. No second scheduler
+or dense particle map is added. Rung-zero uses its existing uniform physical
+representation when the hierarchy is disabled. Compact DMO species/ownership/
+drift metadata remain scalar; the optional one-byte bin lane is a mirror.
+
+Each fine tick audits all eight canonical stages. Pre-kick uses the current
+scheduler subset and exact cached Tree force from that endpoint. Drift advances
+**all owned DMO sources**, updates the common drift epoch, and advances source
+generation once. Scheduler subsets then select closing force targets. Their
+Tree forces are refreshed before closing half-kicks. The same subset receives
+its next opening half-kick on the next iteration. Bins never change mid-interval.
+This first architecture deliberately pays O(N) source drift per fine tick; lazy
+inactive-source prediction is not implemented.
+
+PM follows a separate coarse endpoint kick operator. All particles receive
+opening/closing PM half-kicks only at coarse surfaces. Intermediate Tree solves
+use `short_range_only` and do not solve or interpolate PM. This is a defined
+split operator, not extrapolation of a stale mesh. The existing cadence key
+still equals 1, now counting the explicit coarse PM opportunities. Mandatory
+synchronized bootstrap occurs at every block start in uninterrupted and restart
+runs; together with the closing endpoint it costs two PM solves per coarse
+block. Eliminating repeated endpoint bootstrap needs a restart-equivalent
+component-cache contract and is deferred.
+
+Tree-only and PM-only forces are accumulated separately, without total-minus-PM
+subtraction. Each row's Tree generation must exactly equal current source
+generation for a kick. Nonzero PM kick factors additionally require synchronized
+PM source generation and field version. Previous-acceleration history is only
+an accuracy scale: within a block it is current Tree plus the coarse PM
+component, not a claim that the PM field is valid at a fine source epoch. History
+must have stable row identity and lie in the current coarse generation interval;
+incompatible/unavailable history falls back geometrically. The default DMO
+single-drift history path is preserved independently and never legitimizes a
+stale kick.
+
+At final tick all rows are active. Closing kicks complete, scheduler intervals
+close, and the integrator commits the coarse endpoint once. `step_index` counts
+coarse blocks; scheduler ticks count fine drifts. Cosmological endpoint checks
+precede migration/publication. Only then may the existing bounded migration
+run, followed by analysis, snapshot and restart. Migration invalidates row/cache
+identity and reinstalls geometry; the next mandatory bootstrap reconstructs
+split forces. Fine output/checkpoint is forbidden. No mixed-epoch snapshot or
+in-flight restart schema is introduced.
+
+The bounded scale-factor table contains at most 8193 doubles (65544 bytes),
+admitted through the existing process governor. New component caches cost
+56 bytes/local particle plus the optional bin mirror and existing generic
+scheduler lanes. Restart v23 already carries bins, next activation, common
+integration/drift epochs, PM cadence, source generation and synchronized total
+force history. Transient split forces, meshes, trees and the table are rebuilt.
+Exact restart equivalence and multirate convergence remain required tests.

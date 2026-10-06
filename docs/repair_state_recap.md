@@ -1,5 +1,10 @@
 # Repair state recap (post-repair audit snapshot)
 
+P6 campaign label 20261006: source architecture implemented, qualification
+pending. No build, tests, or numerical campaigns executed. Current details:
+[implementation](repair/p6_preproduction_performance_architecture_implementation_20261006.md)
+and [follow-up matrix](repair/p6_validation_campaign_plan_20261006.md).
+
 > **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
 
 

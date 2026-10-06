@@ -380,11 +380,13 @@ void TreeGravitySolver::build(
     m_max_depth = 0U;
   }
 
+  const auto identity_start = std::chrono::steady_clock::now();
   m_build_source_count = pos_x_comoving.size();
   m_build_source_generation = source_generation;
   m_build_source_fingerprint = !source_generation.valid()
       ? sourceFingerprint(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code)
       : 0U;
+  const auto identity_stop = std::chrono::steady_clock::now();
   m_build_multipole_order = options.multipole_order;
   m_build_max_leaf_size = options.max_leaf_size;
   m_build_softening = options.softening;
@@ -426,6 +428,11 @@ void TreeGravitySolver::build(
     if (profile != nullptr) {
       *profile = {};
       profile->build_count = 1U;
+      profile->source_identity_ms =
+          std::chrono::duration<double, std::milli>(identity_stop - identity_start).count();
+      profile->source_softening_ms =
+          std::chrono::duration<double, std::milli>(ordering_start - identity_stop).count();
+      profile->source_identity_used_generation = source_generation.valid() ? 1U : 0U;
       profile->morton_ordering_ms =
           std::chrono::duration<double, std::milli>(ordering_stop - ordering_start).count();
       profile->build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - build_start).count();
@@ -438,6 +445,10 @@ void TreeGravitySolver::build(
   const double center_x_comoving = 0.5 * (bounds.min_x_comoving + bounds.max_x_comoving);
   const double center_y_comoving = 0.5 * (bounds.min_y_comoving + bounds.max_y_comoving);
   const double center_z_comoving = 0.5 * (bounds.min_z_comoving + bounds.max_z_comoving);
+  m_topology_root_x = center_x_comoving;
+  m_topology_root_y = center_y_comoving;
+  m_topology_root_z = center_z_comoving;
+  m_topology_root_half_size = 0.5 * max_extent * (1.0 + 1.0e-8);
 
   // A full octree with non-trivial leaf occupancy needs O(N/leaf_size) nodes,
   // not 2*N nodes. Seed from the expected leaf count and the previous build's
@@ -498,6 +509,12 @@ void TreeGravitySolver::build(
         std::chrono::duration<double, std::milli>(ordering_stop - ordering_start).count();
     profile->topology_build_ms =
         std::chrono::duration<double, std::milli>(topology_stop - topology_start).count();
+    profile->source_identity_ms =
+        std::chrono::duration<double, std::milli>(identity_stop - identity_start).count();
+    profile->source_softening_ms =
+        std::chrono::duration<double, std::milli>(ordering_start - identity_stop).count();
+    profile->source_identity_used_generation = source_generation.valid() ? 1U : 0U;
+    profile->maximum_depth = m_max_depth;
     profile->estimated_node_reserve = static_cast<std::uint64_t>(reserve_nodes);
     profile->actual_node_count = static_cast<std::uint64_t>(m_nodes.size());
     profile->node_capacity_high_water = static_cast<std::uint64_t>(m_node_capacity_high_water);
@@ -821,6 +838,142 @@ TreeBuildGeneration TreeGravitySolver::treeBuildGeneration() const noexcept {
   return m_tree_build_generation;
 }
 
+bool TreeGravitySolver::canReuseIdenticalSource(
+    std::size_t source_count, GravitySourceGeneration generation,
+    const TreeGravityOptions& options) const noexcept {
+  return m_build_valid && !m_construction_in_progress && generation.valid() &&
+      generation.value != std::numeric_limits<std::uint64_t>::max() &&
+      m_source_softening_representation == ResolvedSourceSofteningRepresentation::kUniform &&
+      generation == m_build_source_generation && source_count == m_build_source_count &&
+      options.multipole_order == m_build_multipole_order &&
+      options.max_leaf_size == m_build_max_leaf_size &&
+      options.softening.kernel == m_build_softening.kernel &&
+      options.softening.epsilon_comoving == m_build_softening.epsilon_comoving;
+}
+
+bool TreeGravitySolver::refitWithinOriginalLeafCells(
+    const TreeGravitySourceView& sources, const TreeGravityOptions& options,
+    TreeGravityProfile* profile) {
+  const auto validity_start = std::chrono::steady_clock::now();
+  validateInputSpans(sources.pos_x_comoving, sources.pos_y_comoving,
+      sources.pos_z_comoving, sources.mass_code);
+  validateOptions(options);
+  if (!m_build_valid || m_construction_in_progress || m_nodes.size() == 0U ||
+      !sources.source_generation.valid() || !m_build_source_generation.valid() ||
+      sources.source_generation.value == std::numeric_limits<std::uint64_t>::max() ||
+      sources.source_generation.value < m_build_source_generation.value ||
+      sources.pos_x_comoving.size() != m_build_source_count ||
+      m_source_softening_representation != ResolvedSourceSofteningRepresentation::kUniform ||
+      options.multipole_order != m_build_multipole_order ||
+      options.max_leaf_size != m_build_max_leaf_size ||
+      options.softening.kernel != m_build_softening.kernel ||
+      options.softening.epsilon_comoving != m_build_softening.epsilon_comoving) {
+    return false;
+  }
+  // Original child octants, not refitted bounding cubes, define membership.
+  // Strict inequalities reject boundary ties and numerical rounding ambiguity.
+  // This is a geometric proof of unchanged membership, not a displacement
+  // heuristic or equality-of-N shortcut. Recursion uses bounded build depth.
+  const auto valid_membership = [&](auto&& self, TreeLocalIndex node,
+      double cx, double cy, double cz, double h) -> bool {
+    if (m_nodes.child_count[node] == 0U) {
+      const TreeLocalCount begin = m_nodes.particle_begin[node];
+      const TreeLocalCount end = begin + m_nodes.particle_count[node];
+      for (TreeLocalCount slot = begin; slot < end; ++slot) {
+        const auto row = m_ordering.sorted_particle_index[slot];
+        if (!std::isfinite(sources.mass_code[row]) || sources.mass_code[row] < 0.0) {
+          throw std::invalid_argument("tree refit requires finite nonnegative source mass");
+        }
+        if (!(std::abs(sources.pos_x_comoving[row] - cx) < h &&
+              std::abs(sources.pos_y_comoving[row] - cy) < h &&
+              std::abs(sources.pos_z_comoving[row] - cz) < h)) return false;
+      }
+      return true;
+    }
+    for (std::size_t octant = 0U; octant < 8U; ++octant) {
+      const auto child = m_nodes.child_index[static_cast<std::size_t>(node) * 8U + octant];
+      if (child == kInvalidTreeLocalIndex) continue;
+      const double ch = 0.5 * h;
+      if (!self(self, child, cx + ((octant & 4U) ? ch : -ch),
+          cy + ((octant & 2U) ? ch : -ch), cz + ((octant & 1U) ? ch : -ch), ch)) return false;
+    }
+    return true;
+  };
+  const bool membership_ok = valid_membership(valid_membership, 0U,
+      m_topology_root_x, m_topology_root_y, m_topology_root_z, m_topology_root_half_size);
+  if (profile != nullptr) profile->topology_validity_ms +=
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - validity_start).count();
+  if (!membership_ok) return false;
+  const auto refit_start = std::chrono::steady_clock::now();
+  const auto next_generation = nextGravityIdentity(m_tree_build_generation, "Tree refit generation overflow");
+  m_build_valid = false;
+  // Preorder construction guarantees all descendants have larger indices.
+  // Refit bottom-up into existing cube lanes; no second tree or node scratch.
+  for (std::size_t reverse = m_nodes.size(); reverse > 0U; --reverse) {
+    const std::size_t node = reverse - 1U;
+    std::array<double, 3U> lower{std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+    std::array<double, 3U> upper{-lower[0], -lower[1], -lower[2]};
+    const auto include = [&](double x, double y, double z, double h) {
+      const std::array<double, 3U> center{x, y, z};
+      for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        lower[axis] = std::min(lower[axis], center[axis] - h);
+        upper[axis] = std::max(upper[axis], center[axis] + h);
+      }
+    };
+    if (m_nodes.child_count[node] == 0U) {
+      const TreeLocalCount begin = m_nodes.particle_begin[node];
+      const TreeLocalCount end = begin + m_nodes.particle_count[node];
+      for (TreeLocalCount slot = begin; slot < end; ++slot) {
+        const auto row = m_ordering.sorted_particle_index[slot];
+        include(sources.pos_x_comoving[row], sources.pos_y_comoving[row], sources.pos_z_comoving[row], 0.0);
+      }
+    } else {
+      for (std::size_t octant = 0U; octant < 8U; ++octant) {
+        const auto child = m_nodes.child_index[node * 8U + octant];
+        if (child != kInvalidTreeLocalIndex) include(m_nodes.center_x_comoving[child],
+            m_nodes.center_y_comoving[child], m_nodes.center_z_comoving[child], m_nodes.half_size_comoving[child]);
+      }
+    }
+    const double cx = 0.5 * (lower[0] + upper[0]);
+    const double cy = 0.5 * (lower[1] + upper[1]);
+    const double cz = 0.5 * (lower[2] + upper[2]);
+    // Outward rounding ensures containment even when midpoint subtraction
+    // rounds asymmetrically. Cubes may overlap: membership still comes from
+    // the immutable original octants, while force guards use these envelopes.
+    const double h = std::max({cx - lower[0], upper[0] - cx, cy - lower[1],
+        upper[1] - cy, cz - lower[2], upper[2] - cz, 1.0e-12});
+    m_nodes.center_x_comoving[node] = cx;
+    m_nodes.center_y_comoving[node] = cy;
+    m_nodes.center_z_comoving[node] = cz;
+    m_nodes.half_size_comoving[node] = std::nextafter(h, std::numeric_limits<double>::infinity());
+    m_nodes.com_x_comoving[node] = cx;
+    m_nodes.com_y_comoving[node] = cy;
+    m_nodes.com_z_comoving[node] = cz;
+    if (options.multipole_order == TreeMultipoleOrder::kQuadrupole) {
+      m_nodes.quad_xx[node] = m_nodes.quad_xy[node] = m_nodes.quad_xz[node] = 0.0;
+      m_nodes.quad_yy[node] = m_nodes.quad_yz[node] = m_nodes.quad_zz[node] = 0.0;
+      m_nodes.second_moment_trace[node] = 0.0;
+    }
+  }
+  const auto multipole_start = std::chrono::steady_clock::now();
+  accumulateMultipoles(sources.pos_x_comoving, sources.pos_y_comoving,
+      sources.pos_z_comoving, sources.mass_code, 0U, options.multipole_order);
+  // The permutation is legal leaf membership, not a new Morton ordering.
+  // Never expose stale coordinate keys as current after a motion refit.
+  m_ordering.morton_key.clear();
+  m_build_source_generation = sources.source_generation;
+  m_build_source_fingerprint = 0U;
+  m_tree_build_generation = next_generation;
+  m_build_valid = true;
+  if (profile != nullptr) {
+    profile->refit_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - refit_start).count();
+    profile->multipole_refresh_count = 1U;
+    profile->multipole_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - multipole_start).count();
+  }
+  return true;
+}
+
 ResolvedSourceSofteningView TreeGravitySolver::resolvedSourceSoftening() const noexcept {
   return ResolvedSourceSofteningView{
       .representation = m_source_softening_representation,
@@ -892,7 +1045,7 @@ void TreeGravitySolver::appendMemoryReport(core::MemoryReportBuilder& builder) c
       core::MemorySubsystem::kScratch,
       "tree.construction.key_primary",
       m_ordering.morton_key,
-      "one physical uint64 lane reused by periodic sorting and authoritative Morton keys");
+      "one physical uint64 lane reused by periodic sorting and build Morton keys; logical keys cleared on motion refit");
   add(
       core::MemorySubsystem::kScratch,
       "tree.construction.key_scratch",
@@ -1130,13 +1283,32 @@ void TreeGravitySolver::accumulateMultipoles(
   double wy = 0.0;
   double wz = 0.0;
 
+  // Root branches own disjoint nodes and source ranges. Each subtree keeps
+  // the serial arithmetic order; the join completes all children before the
+  // parent combines them in canonical octant order. At most eight work items,
+  // no level table, duplicate tree or per-source/node atomic updates.
+  const bool root_children_prepared = node_index == 0U;
+  if (root_children_prepared) {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static) if(m_nodes.size() >= 256U)
+#endif
+    for (int octant = 0; octant < 8; ++octant) {
+      const TreeLocalIndex child = m_nodes.child_index[static_cast<std::size_t>(octant)];
+      if (child != kInvalidTreeLocalIndex) {
+        accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving,
+            mass_code, child, multipole_order);
+      }
+    }
+  }
   const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
   for (std::uint8_t octant = 0; octant < 8U; ++octant) {
     const TreeLocalIndex child = m_nodes.child_index[child_offset + octant];
     if (child == kInvalidTreeLocalIndex) {
       continue;
     }
-    accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, child, multipole_order);
+    if (!root_children_prepared) {
+      accumulateMultipoles(pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, child, multipole_order);
+    }
     m_nodes.softening_min_comoving[node_index] =
         std::min(m_nodes.softening_min_comoving[node_index], m_nodes.softening_min_comoving[child]);
     m_nodes.softening_max_comoving[node_index] =

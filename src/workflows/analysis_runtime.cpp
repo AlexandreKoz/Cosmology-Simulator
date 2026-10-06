@@ -47,6 +47,19 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
     const core::StepContext& context = internal::RuntimeStageAccess::analysisContext(
         view,
         {{RuntimeResourceKey::kDiagnostics, RuntimeResourceAccessMode::kWrite}});
+    const auto canonical = core::StageScheduler::kickDriftKickOrder();
+    if (context.stage != canonical[m_audited_stage_count % canonical.size()]) {
+      throw std::logic_error("runtime audit observed a noncanonical KDK stage order");
+    }
+    // Validate every stage, retain only sixteen recent complete step traces.
+    // Lifetime stage totals live in the existing counter registry.
+    constexpr std::size_t k_recent_stage_limit = 128U;
+    if (m_stage_sequence->size() == k_recent_stage_limit) {
+      m_stage_sequence->erase(m_stage_sequence->begin(),
+          m_stage_sequence->begin() + static_cast<std::ptrdiff_t>(canonical.size()));
+    }
+    ++m_audited_stage_count;
+    m_services.profiler.counters().addCount("runtime.audited_stage_count");
     m_stage_sequence->push_back(
         std::string(core::integrationStageName(context.stage)));
   }
@@ -309,6 +322,7 @@ class AnalysisRuntimeImpl final : public AnalysisRuntime {
  private:
   core::SimulationConfig m_config;
   std::vector<std::string>* m_stage_sequence = nullptr;
+  std::uint64_t m_audited_stage_count = 0;
   const RuntimeServices& m_services;
   analysis::DiagnosticsEngine m_diagnostics;
   internal::OptionalDiagnosticCadence m_science_light_pending;

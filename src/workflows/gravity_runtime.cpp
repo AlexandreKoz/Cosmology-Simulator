@@ -411,6 +411,15 @@ class GravityRuntimeImpl final : public GravityRuntime {
         config.numerics.treepm_tree_relative_force_tolerance;
     m_tree_pm_options.tree_options.relative_force_acceleration_floor_code =
         config.numerics.treepm_tree_relative_force_acceleration_floor;
+    m_tree_pm_options.spatial_work_history_enabled = config.parallel.decomposition_spatial_work_enabled;
+    m_tree_pm_options.topology_refit_enabled = config.numerics.treepm_topology_refit_enabled;
+    m_tree_pm_options.identical_source_tree_reuse_enabled =
+        config.numerics.treepm_identical_source_tree_reuse_enabled;
+    m_tree_pm_options.acceptance_policy = config.numerics.treepm_adaptive_acceptance_enabled
+        ? gravity::TreePmAcceptancePolicy::kAdaptiveRelative
+        : gravity::TreePmAcceptancePolicy::kStrictReference;
+    m_tree_pm_options.adaptive_maximum_opening_angle =
+        config.numerics.treepm_adaptive_maximum_opening_angle;
     m_tree_pm_options.tree_options.gravitational_constant_code =
         m_gravitational_constant_code;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
@@ -497,6 +506,29 @@ class GravityRuntimeImpl final : public GravityRuntime {
     active("gravity_runtime.active_accel_y", m_active_accel_y);
     active("gravity_runtime.active_accel_z", m_active_accel_z);
     active("gravity_runtime.active_previous_acceleration", m_active_previous_acceleration_magnitude);
+    persistent("gravity_runtime.recent_cadence_records", m_cadence_records);
+    std::uint64_t cadence_string_bytes = 0U;
+    for (const auto& record : m_cadence_records) {
+      for (const auto* value : {&record.stage_name, &record.pm_sync_surface, &record.pm_refresh_reason}) {
+        cadence_string_bytes = core::checkedMemoryBytesAdd(cadence_string_bytes,
+            core::checkedSizeAdd(value->capacity(), 1U, "cadence string terminator"), "cadence retained strings");
+      }
+    }
+    builder.addEntry(core::MemoryEntry{.subsystem = core::MemorySubsystem::kSidecars,
+        .lifetime = core::MemoryLifetime::kPersistent, .memory_class = core::MemoryClass::kDiagnostic,
+        .label = "gravity_runtime.recent_cadence_strings", .current_size_bytes = cadence_string_bytes,
+        .owned_capacity_bytes = cadence_string_bytes, .high_water_bytes = cadence_string_bytes,
+        .uncertainty_note = "conservative string capacity including SSO; allocator overhead uses process reserve"});
+    const std::uint64_t bounded_feedback_bytes = sizeof(m_last_tree_pm_diagnostics) +
+        sizeof(m_last_decomposition_measurements.spatial_tree_work_per_target);
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kTree,
+        .lifetime = core::MemoryLifetime::kPersistent,
+        .memory_class = core::MemoryClass::kDiagnostic,
+        .label = "gravity_runtime.bounded_force_feedback",
+        .current_size_bytes = bounded_feedback_bytes,
+        .owned_capacity_bytes = bounded_feedback_bytes,
+        .high_water_bytes = bounded_feedback_bytes});
     persistent("gravity_runtime.particle_accel_x", m_particle_accel_x);
     persistent("gravity_runtime.particle_accel_y", m_particle_accel_y);
     persistent("gravity_runtime.particle_accel_z", m_particle_accel_z);
@@ -527,6 +559,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
     active("gravity_runtime.authoritative_top_domain_leaves", m_authoritative_top_domain_leaves);
     persistent("gravity_runtime.authoritative_top_domain_seed_leaves", m_authoritative_top_domain_seed_leaves);
     persistent("gravity_runtime.particle_force_cache_valid", m_particle_force_cache_valid);
+    persistent("gravity_runtime.hierarchical_force_generation", m_hierarchical_force_generation);
+    persistent("gravity_runtime.hierarchical_pm_x", m_hierarchical_pm_x);
+    persistent("gravity_runtime.hierarchical_pm_y", m_hierarchical_pm_y);
+    persistent("gravity_runtime.hierarchical_pm_z", m_hierarchical_pm_z);
+    persistent("gravity_runtime.hierarchical_tree_x", m_hierarchical_tree_x);
+    persistent("gravity_runtime.hierarchical_tree_y", m_hierarchical_tree_y);
+    persistent("gravity_runtime.hierarchical_tree_z", m_hierarchical_tree_z);
     persistent("gravity_runtime.cell_force_cache_valid", m_cell_force_cache_valid);
 
     core::MemoryReport owned_report = std::move(builder).finish();
@@ -701,6 +740,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_source_generation = 0U;
     m_particle_force_cache_valid.clear();
     m_cell_force_cache_valid.clear();
+    m_hierarchical_force_generation.clear();
+    m_hierarchical_pm_source_generation = 0U;
+    m_hierarchical_pm_field_version = 0U;
     m_active_source_indices = {};
     m_borrowed_particle_index_generation = 0U;
     m_borrowed_gravity_source_generation = 0U;
@@ -967,8 +1009,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
                         gravity::PmBoundaryCondition::kPeriodic &&
                     !m_runtime_topology.usesCuda(),
                 .relative_force_mac_enabled =
-                    m_tree_pm_options.tree_options.opening_criterion ==
-                    gravity::TreeOpeningCriterion::kRelativeForceError,
+                    (m_tree_pm_options.acceptance_policy == gravity::TreePmAcceptancePolicy::kAdaptiveRelative ||
+                 m_tree_pm_options.tree_options.opening_criterion ==
+                    gravity::TreeOpeningCriterion::kRelativeForceError),
+                .hierarchical_kdk_enabled = m_config.numerics.hierarchical_max_rung > 0,
                 .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
                 .multipole_order = m_tree_pm_options.tree_options.multipole_order,
                 .pm_shape = m_pm_grid_shape,
@@ -1014,6 +1058,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
       }
       phase_resident_peak -= scratch_index_bytes;
     }
+    // Recent cadence has bounded control-path strings and records. Model its
+    // full warm capacity before any force event grows it; observed capacities
+    // are reconciled through memoryReport(). Opaque allocator costs remain in
+    // the existing process allocator reserve.
+    phase_resident_peak = core::checkedMemoryBytesAdd(phase_resident_peak,
+        256U * (sizeof(ReferenceWorkflowReport::TreePmCadenceRecord) + 256U),
+        "gravity bounded cadence phase model");
     return incrementalMemoryBeyondRetained(
         phase_resident_peak, gravity_baseline_before);
   }
@@ -1031,12 +1082,22 @@ class GravityRuntimeImpl final : public GravityRuntime {
          {RuntimeResourceKey::kSchedulerTruth, RuntimeResourceAccessMode::kRead},
          {RuntimeResourceKey::kGravityAcceleration, RuntimeResourceAccessMode::kWrite},
          {RuntimeResourceKey::kIntegratorTruth, RuntimeResourceAccessMode::kReadWrite}});
+    const bool hierarchical = context.hierarchical_kdk.enabled;
     const bool is_kick_stage = context.stage == core::IntegrationStage::kGravityKickPre ||
         context.stage == core::IntegrationStage::kGravityKickPost;
     const parallel::MpiContext& mpi_context = m_services.mpi_context;
     const std::uint64_t world_size = static_cast<std::uint64_t>(mpi_context.worldSize());
     const std::size_t particle_count = context.state.particles.size();
     const std::size_t cell_count = context.state.cells.size();
+
+    if (hierarchical && (!borrowedHomogeneousDmoBaseEligible(context.state) || cell_count != 0U ||
+        context.particle_scheduler == nullptr)) {
+      throw std::logic_error("hierarchical gravity requires borrowed homogeneous DMO and scheduler authority");
+    }
+    if (hierarchical && is_kick_stage && !context.pm_refresh_directive.force_refresh_surface) {
+      applyHierarchicalKick(context);
+      return;
+    }
 
     // Admit the conservative non-arena gravity high-water before any O(N)
     // cache/vector growth in this phase. The shared communication arena owns
@@ -1112,6 +1173,19 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_cell_force_cache_valid.size() != cell_count;
     const bool source_cache_generation_changed =
         m_force_cache_source_generation != context.state.gravitySourceGeneration();
+    // A previous force is an accuracy scale, never a valid kick cache at the
+    // new epoch. Admit the known single drift transition only on compact DMO
+    // at force_refresh; population/ownership/gas changes and skipped source
+    // generations fall back geometrically. Preserve no second force vector.
+    const bool adaptive_drift_history_compatible =
+        m_tree_pm_options.acceptance_policy == gravity::TreePmAcceptancePolicy::kAdaptiveRelative &&
+        m_force_cache_valid && !particle_cache_generation_changed &&
+        !cell_cache_generation_changed && context.state.hasHomogeneousDmoMetadata() &&
+        m_source_representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo &&
+        context.stage == core::IntegrationStage::kForceRefresh &&
+        m_force_cache_source_generation > 0U &&
+        m_force_cache_source_generation < std::numeric_limits<std::uint64_t>::max() &&
+        context.state.gravitySourceGeneration() == m_force_cache_source_generation + 1U;
 
     if (particle_cache_generation_changed) {
       // Dense-row identity is not a migration payload. A row is compatible only
@@ -1130,9 +1204,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_force_cache_gas_identity_generation = context.state.gasCellIdentityGeneration();
       m_force_cache_valid = false;
     }
-    if (source_cache_generation_changed) {
-      m_particle_force_cache_valid.assign(particle_count, 0U);
-      m_cell_force_cache_valid.assign(cell_count, 0U);
+    if (source_cache_generation_changed && !hierarchical) {
+      if (!adaptive_drift_history_compatible) {
+        m_particle_force_cache_valid.assign(particle_count, 0U);
+        m_cell_force_cache_valid.assign(cell_count, 0U);
+      }
       m_force_cache_valid = false;
     }
     const bool local_force_cache_incompatible = !m_force_cache_valid ||
@@ -1265,7 +1341,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
         source_prediction_epoch != SourcePredictionEpoch::kNone &&
         !isIdentityParticleSpan(context.active_set.particle_indices, particle_count);
     const bool borrowed_homogeneous_dmo_preflight =
-        borrowed_dmo_base_eligible && force_targets_use_identity_scratch &&
+        borrowed_dmo_base_eligible && (force_targets_use_identity_scratch || hierarchical) &&
         !prediction_requires_inactive_coordinates;
 
     // The early phase reservation is allowed to credit the state-only DMO
@@ -1318,8 +1394,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
                     gravity::PmBoundaryCondition::kPeriodic &&
                 !m_runtime_topology.usesCuda(),
             .relative_force_mac_enabled =
-                m_tree_pm_options.tree_options.opening_criterion ==
-                gravity::TreeOpeningCriterion::kRelativeForceError,
+                (m_tree_pm_options.acceptance_policy == gravity::TreePmAcceptancePolicy::kAdaptiveRelative ||
+             m_tree_pm_options.tree_options.opening_criterion ==
+                gravity::TreeOpeningCriterion::kRelativeForceError),
+            .hierarchical_kdk_enabled = m_config.numerics.hierarchical_max_rung > 0,
             .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
             .multipole_order = m_tree_pm_options.tree_options.multipole_order,
             .pm_shape = m_pm_grid_shape,
@@ -1434,8 +1512,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .severity = core::RuntimeEventSeverity::kInfo,
           .subsystem = "core.memory",
           .step_index = context.integrator_state.step_index,
-          .simulation_time_code = context.integrator_state.current_time_code,
-          .scale_factor = context.integrator_state.current_scale_factor,
+          .simulation_time_code = hierarchical ? context.timeline_step.time_end_code : context.integrator_state.current_time_code,
+          .scale_factor = hierarchical ? context.timeline_step.scale_factor_end : context.integrator_state.current_scale_factor,
           .message = "authoritative DMO per-rank process memory preflight",
           .payload = {
               {"known_owned_peak_bytes",
@@ -1600,10 +1678,29 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_tree_pm_options.active_is_high_res = {};
     }
 
+    if (hierarchical) {
+      std::exception_ptr split_cache_failure;
+      try {
+        if (m_hierarchical_force_generation.size() != particle_count) {
+          m_hierarchical_force_generation.assign(particle_count, m_force_cache_valid &&
+              m_force_cache_source_generation == context.state.gravitySourceGeneration()
+              ? context.state.gravitySourceGeneration() : 0U);
+          m_hierarchical_pm_x.assign(particle_count, 0.0);
+          m_hierarchical_pm_y.assign(particle_count, 0.0);
+          m_hierarchical_pm_z.assign(particle_count, 0.0);
+          m_hierarchical_tree_x.assign(particle_count, 0.0);
+          m_hierarchical_tree_y.assign(particle_count, 0.0);
+          m_hierarchical_tree_z.assign(particle_count, 0.0);
+        }
+      } catch (...) { split_cache_failure = std::current_exception(); }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(split_cache_failure,
+          "hierarchical split force cache materialization");
+    }
     m_active_previous_acceleration_magnitude.clear();
     const bool relative_mac_cache_compatible =
-        m_tree_pm_options.tree_options.opening_criterion == gravity::TreeOpeningCriterion::kRelativeForceError &&
-        m_force_cache_valid &&
+        (m_tree_pm_options.tree_options.opening_criterion == gravity::TreeOpeningCriterion::kRelativeForceError ||
+         m_tree_pm_options.acceptance_policy == gravity::TreePmAcceptancePolicy::kAdaptiveRelative) &&
+        (m_force_cache_valid || adaptive_drift_history_compatible || hierarchical) &&
         m_force_cache_particle_index_generation == context.state.particleIndexGeneration() &&
         m_force_cache_cell_index_generation == context.state.cellIndexGeneration() &&
         m_force_cache_gas_identity_generation == context.state.gasCellIdentityGeneration() &&
@@ -1621,7 +1718,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
         const std::uint32_t particle_row = targetParticleRow(target_slot);
         if (particle_row != no_target_row &&
             particle_row < m_particle_force_cache_valid.size() &&
-            m_particle_force_cache_valid[particle_row] != 0U) {
+            (m_particle_force_cache_valid[particle_row] != 0U || adaptive_drift_history_compatible) &&
+            (!hierarchical || (m_hierarchical_force_generation.size() == particle_count &&
+             (m_hierarchical_force_generation[particle_row] >= context.hierarchical_kdk.coarse_source_generation ||
+              context.hierarchical_kdk.force_only_synchronization)))) {
           m_active_previous_acceleration_magnitude[target_slot] = std::sqrt(
               m_particle_accel_x[particle_row] * m_particle_accel_x[particle_row] +
               m_particle_accel_y[particle_row] * m_particle_accel_y[particle_row] +
@@ -1640,12 +1740,22 @@ class GravityRuntimeImpl final : public GravityRuntime {
       }
     }
 
+    const bool capture_pm = hierarchical && context.hierarchical_kdk.include_long_range_force;
+    if (capture_pm && !isIdentityParticleSpan(active_source_indices, particle_count)) {
+      throw std::logic_error("hierarchical PM endpoint must capture all owned target rows");
+    }
     gravity::TreePmForceAccumulatorView accumulator{
         .active_particle_index = active_source_indices,
         .accel_x_comoving = m_active_accel_x,
         .accel_y_comoving = m_active_accel_y,
         .accel_z_comoving = m_active_accel_z,
         .previous_acceleration_magnitude_code = m_active_previous_acceleration_magnitude,
+        .long_range_accel_x_comoving = capture_pm ? std::span<double>(m_hierarchical_pm_x) : std::span<double>{},
+        .long_range_accel_y_comoving = capture_pm ? std::span<double>(m_hierarchical_pm_y) : std::span<double>{},
+        .long_range_accel_z_comoving = capture_pm ? std::span<double>(m_hierarchical_pm_z) : std::span<double>{},
+        .short_range_accel_x_comoving = hierarchical ? std::span<double>(m_hierarchical_tree_x) : std::span<double>{},
+        .short_range_accel_y_comoving = hierarchical ? std::span<double>(m_hierarchical_tree_y) : std::span<double>{},
+        .short_range_accel_z_comoving = hierarchical ? std::span<double>(m_hierarchical_tree_z) : std::span<double>{},
     };
 
     // The integrator owns PM cadence state. At every rank-coordinated force
@@ -1720,7 +1830,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     requireKickConsensus(
         std::bit_cast<std::uint64_t>(decision.field_built_scale_factor),
         "long_range_field_built_scale_factor_bits");
-    double force_evaluation_scale_factor = decision.field_built_scale_factor;
+    double force_evaluation_scale_factor = hierarchical
+        ? context.pm_refresh_directive.force_evaluation_scale_factor : decision.field_built_scale_factor;
     if (decision.refresh_long_range_field) {
       force_evaluation_scale_factor =
           context.pm_refresh_directive.force_evaluation_scale_factor;
@@ -1758,15 +1869,19 @@ class GravityRuntimeImpl final : public GravityRuntime {
     // state?"; force epoch answers "which evaluation opportunity?".
     m_tree_pm_options.source_generation = gravity::GravitySourceGeneration{
         context.state.gravitySourceGeneration()};
+    m_tree_pm_options.source_layout_generation = m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? context.state.particleIndexGeneration() : 0U;
     // Geometry freshness metadata was published by the pre-solve refit; keep
     // the stamp aligned with the authoritative source generation this solve.
     publishAuthoritativeTopDomainLeavesSpan();
     m_tree_pm_options.pm_field_version = gravity::PmFieldVersion{decision.field_version};
+    m_tree_pm_options.short_range_only = hierarchical && !capture_pm;
     m_tree_pm_options.force_epoch = gravity::ForceEvaluationEpoch{
-        .sequence = decision.gravity_kick_opportunity,
+        .sequence = hierarchical ? context.state.gravitySourceGeneration() : decision.gravity_kick_opportunity,
         .scale_factor = force_evaluation_scale_factor,
     };
-    if (!decision.refresh_long_range_field &&
+    if (!decision.refresh_long_range_field && !hierarchical &&
         context.integrator_state.pm_source_generation !=
             context.state.gravitySourceGeneration()) {
       throw std::runtime_error(
@@ -1853,7 +1968,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     const std::uint64_t expected_pm_solve_count =
         decision.refresh_long_range_field ? 1U : 0U;
     if (m_last_tree_pm_diagnostics.pm_solve_count != expected_pm_solve_count ||
-        m_last_tree_pm_diagnostics.pm_reuse_count != 1U - expected_pm_solve_count) {
+        m_last_tree_pm_diagnostics.pm_reuse_count !=
+            (m_tree_pm_options.short_range_only ? 0U : 1U - expected_pm_solve_count)) {
       throw std::runtime_error(
           "TreePM solver PM solve/reuse outcome disagrees with the integrator-owned cadence directive");
     }
@@ -1862,7 +1978,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .tree_pair_evaluations_recent = m_last_tree_pm_diagnostics.residual_pair_evaluations,
         .tree_remote_request_bytes_recent = m_last_tree_pm_diagnostics.residual_remote_request_bytes +
             m_last_tree_pm_diagnostics.residual_remote_response_bytes,
-        .pm_mesh_cells_touched_recent = static_cast<std::uint64_t>(m_tree_pm_coordinator.slabLayout().localCellCount()),
+        .pm_mesh_cells_touched_recent = m_tree_pm_options.short_range_only ? 0U :
+            static_cast<std::uint64_t>(m_tree_pm_coordinator.slabLayout().localCellCount()),
         .pm_fft_transpose_bytes_recent = tree_pm_profile.pm_profile.fft_transpose_bytes,
         .amr_patch_cells_updated_recent = static_cast<std::uint64_t>(context.state.cells.size()),
         .hydro_face_fluxes_recent = 0,
@@ -1878,6 +1995,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .gpu_kernel_ms_recent = tree_pm_profile.pm_profile.device_kernel_ms,
         .accelerator_occupancy_fraction_recent = (tree_pm_profile.pm_profile.device_kernel_ms > 0.0) ? 1.0 : 0.0,
         .has_measurements = true,
+        .has_spatial_tree_work = m_config.parallel.decomposition_spatial_work_enabled &&
+            m_last_tree_pm_diagnostics.spatial_work_history_solves != 0U,
+        .spatial_tree_work_per_target = m_last_tree_pm_diagnostics.spatial_work_per_target,
+        .incoming_tree_pair_evaluations_recent = m_last_tree_pm_diagnostics.incoming_remote_pair_evaluations,
     };
 
     const bool allow_heavy_reference_checks =
@@ -1889,9 +2010,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
         allow_heavy_reference_checks);
 
     if (decision.refresh_long_range_field) {
+      if (hierarchical) {
+        m_hierarchical_pm_source_generation = context.state.gravitySourceGeneration();
+        m_hierarchical_pm_field_version = decision.field_version;
+      }
       m_has_long_range_field = true;
       ++m_long_range_refresh_count;
-    } else {
+    } else if (!m_tree_pm_options.short_range_only) {
       ++m_long_range_reuse_count;
     }
     context.pm_refresh_directive.solver_executed = true;
@@ -1899,6 +2024,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
     const std::uint64_t inactive_particles_skipped = static_cast<std::uint64_t>(
         context.state.particles.size() - m_local_kick_particle_count);
+    // Recent detail is bounded; refresh/reuse counters above remain lifetime
+    // aggregates for the final report. No run-length-sized terminal copy.
+    constexpr std::size_t k_recent_cadence_limit = 256U;
+    if (m_cadence_records.size() == k_recent_cadence_limit) {
+      m_cadence_records.erase(m_cadence_records.begin());
+    }
     m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
@@ -1911,22 +2042,61 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .field_built_scale_factor = decision.field_built_scale_factor,
         .field_age_in_kick_opportunities =
             decision.gravity_kick_opportunity - decision.last_refresh_opportunity,
-        .active_particles_kicked = static_cast<std::uint64_t>(m_local_kick_particle_count),
+        .active_particles_kicked = hierarchical ? 0U : static_cast<std::uint64_t>(m_local_kick_particle_count),
         .inactive_particles_skipped = inactive_particles_skipped,
         .refreshed_long_range_field = decision.refresh_long_range_field,
+        .short_range_only = m_tree_pm_options.short_range_only,
+        .active_force_targets = static_cast<std::uint64_t>(m_local_kick_particle_count),
     });
     if (context.profiler_session != nullptr) {
+      context.profiler_session->counters().addCount("treepm.local.targets", m_last_tree_pm_diagnostics.local_traversal.targets);
+      context.profiler_session->counters().addCount("treepm.local.visited_nodes", m_last_tree_pm_diagnostics.local_traversal.visited_nodes);
+      context.profiler_session->counters().addCount("treepm.local.opened_nodes", m_last_tree_pm_diagnostics.local_traversal.opened_nodes);
+      context.profiler_session->counters().addCount("treepm.local.accepted_internal_multipoles", m_last_tree_pm_diagnostics.local_traversal.accepted_internal_multipoles);
+      context.profiler_session->counters().addCount("treepm.local.accepted_leaves", m_last_tree_pm_diagnostics.local_traversal.accepted_leaves);
+      context.profiler_session->counters().addCount("treepm.local.direct_pair_evaluations", m_last_tree_pm_diagnostics.local_traversal.direct_pair_evaluations);
+      context.profiler_session->counters().addCount("treepm.local.cutoff_pruned_nodes", m_last_tree_pm_diagnostics.local_traversal.cutoff_pruned_nodes);
+      context.profiler_session->counters().addCount("treepm.local.cutoff_skipped_pairs", m_last_tree_pm_diagnostics.local_traversal.cutoff_skipped_pairs);
+      context.profiler_session->counters().addCount("treepm.local.selected_mac_rejections", m_last_tree_pm_diagnostics.local_traversal.selected_mac_rejections);
+      context.profiler_session->counters().addCount("treepm.local.relative_mac_rejections", m_last_tree_pm_diagnostics.local_traversal.relative_mac_rejections);
+      context.profiler_session->counters().addCount("treepm.local.maximum_angle_rejections", m_last_tree_pm_diagnostics.local_traversal.maximum_angle_rejections);
+      context.profiler_session->counters().addCount("treepm.local.strict_envelope_rejections", m_last_tree_pm_diagnostics.local_traversal.strict_envelope_rejections);
+      context.profiler_session->counters().addCount("treepm.local.softening_rejections", m_last_tree_pm_diagnostics.local_traversal.softening_rejections);
+      context.profiler_session->counters().addCount("treepm.local.near_node_rejections", m_last_tree_pm_diagnostics.local_traversal.near_node_rejections);
+      context.profiler_session->counters().addCount("treepm.local.cutoff_containment_rejections", m_last_tree_pm_diagnostics.local_traversal.cutoff_containment_rejections);
+      context.profiler_session->counters().addCount("treepm.local.geometric_history_fallbacks", m_last_tree_pm_diagnostics.local_traversal.geometric_history_fallbacks);
+      context.profiler_session->counters().addCount("treepm.incoming.targets", m_last_tree_pm_diagnostics.incoming_traversal.targets);
+      context.profiler_session->counters().addCount("treepm.incoming.visited_nodes", m_last_tree_pm_diagnostics.incoming_traversal.visited_nodes);
+      context.profiler_session->counters().addCount("treepm.incoming.opened_nodes", m_last_tree_pm_diagnostics.incoming_traversal.opened_nodes);
+      context.profiler_session->counters().addCount("treepm.incoming.accepted_internal_multipoles", m_last_tree_pm_diagnostics.incoming_traversal.accepted_internal_multipoles);
+      context.profiler_session->counters().addCount("treepm.incoming.accepted_leaves", m_last_tree_pm_diagnostics.incoming_traversal.accepted_leaves);
+      context.profiler_session->counters().addCount("treepm.incoming.direct_pair_evaluations", m_last_tree_pm_diagnostics.incoming_traversal.direct_pair_evaluations);
+      context.profiler_session->counters().addCount("treepm.incoming.cutoff_pruned_nodes", m_last_tree_pm_diagnostics.incoming_traversal.cutoff_pruned_nodes);
+      context.profiler_session->counters().addCount("treepm.incoming.cutoff_skipped_pairs", m_last_tree_pm_diagnostics.incoming_traversal.cutoff_skipped_pairs);
+      context.profiler_session->counters().addCount("treepm.incoming.selected_mac_rejections", m_last_tree_pm_diagnostics.incoming_traversal.selected_mac_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.relative_mac_rejections", m_last_tree_pm_diagnostics.incoming_traversal.relative_mac_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.maximum_angle_rejections", m_last_tree_pm_diagnostics.incoming_traversal.maximum_angle_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.strict_envelope_rejections", m_last_tree_pm_diagnostics.incoming_traversal.strict_envelope_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.softening_rejections", m_last_tree_pm_diagnostics.incoming_traversal.softening_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.near_node_rejections", m_last_tree_pm_diagnostics.incoming_traversal.near_node_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.cutoff_containment_rejections", m_last_tree_pm_diagnostics.incoming_traversal.cutoff_containment_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.geometric_history_fallbacks", m_last_tree_pm_diagnostics.incoming_traversal.geometric_history_fallbacks);
       context.profiler_session->recordEvent(core::RuntimeEvent{
-          .event_kind = "gravity.pm_long_range_field",
+          .event_kind = m_tree_pm_options.short_range_only ? "gravity.short_range_force" : "gravity.pm_long_range_field",
           .severity = core::RuntimeEventSeverity::kInfo,
           .subsystem = "gravity.treepm",
           .step_index = context.integrator_state.step_index,
-          .simulation_time_code = context.integrator_state.current_time_code,
-          .scale_factor = context.integrator_state.current_scale_factor,
-          .message = decision.refresh_long_range_field
-              ? "PM long-range field refreshed for gravity kick"
-              : "PM long-range field reused for gravity kick",
-          .payload = {{"stage", std::string(core::integrationStageName(context.stage))},
+          .simulation_time_code = hierarchical ? context.timeline_step.time_end_code : context.integrator_state.current_time_code,
+          .scale_factor = hierarchical ? context.timeline_step.scale_factor_end : context.integrator_state.current_scale_factor,
+          .message = m_tree_pm_options.short_range_only
+              ? "active short-range force evaluated; PM mesh solve and interpolation omitted by the coarse split operator"
+              : (decision.refresh_long_range_field
+                  ? "PM long-range field refreshed for gravity force evaluation"
+                  : "PM long-range field reused for gravity force evaluation"),
+          .payload = {{"short_range_only", m_tree_pm_options.short_range_only ? "true" : "false"},
+                      {"hierarchical_kdk", hierarchical ? "true" : "false"},
+                      {"active_force_targets", std::to_string(m_local_kick_particle_count)},
+                      {"stage", std::string(core::integrationStageName(context.stage))},
                       {"pm_sync_surface", std::string(pmSyncSurfaceName(decision.sync_surface))},
                       {"gravity_kick_opportunity", std::to_string(decision.gravity_kick_opportunity)},
                       {"field_version", std::to_string(decision.field_version)},
@@ -1960,7 +2130,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
                       {"pm_fft_backend", m_pm_backend},
                       {"pm_backend_capability", std::string(gravity::pmBackendCapabilityName(gravity::pmBackendCapability()))},
                       {"gravity_acceptance_profile_id", "unverified_current_source"},
-                      {"active_particles_kicked", std::to_string(m_local_kick_particle_count)},
+                      {"active_particles_kicked", std::to_string(hierarchical ? 0U : m_local_kick_particle_count)},
                       {"gravity_source_representation",
                        m_source_representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
                            ? "borrowed_homogeneous_dmo"
@@ -1994,10 +2164,90 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .severity = core::RuntimeEventSeverity::kInfo,
           .subsystem = "gravity.treepm",
           .step_index = context.integrator_state.step_index,
-          .simulation_time_code = context.integrator_state.current_time_code,
-          .scale_factor = context.integrator_state.current_scale_factor,
+          .simulation_time_code = hierarchical ? context.timeline_step.time_end_code : context.integrator_state.current_time_code,
+          .scale_factor = hierarchical ? context.timeline_step.scale_factor_end : context.integrator_state.current_scale_factor,
           .message = "locality-driven TreePM short-range communication metrics",
           .payload = {
+              {"tree_acceptance_policy", m_config.numerics.treepm_adaptive_acceptance_enabled ? "adaptive_relative" : "strict_reference"},
+              {"adaptive_maximum_opening_angle", formatRuntimeDouble(m_tree_pm_options.adaptive_maximum_opening_angle)},
+              {"tree_full_rebuild_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.full_rebuild_ms)},
+              {"tree_build_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.build_ms)},
+              {"tree_source_identity_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.source_identity_ms)},
+              {"tree_source_softening_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.source_softening_ms)},
+              {"tree_morton_ordering_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.morton_ordering_ms)},
+              {"tree_topology_build_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.topology_build_ms)},
+              {"tree_multipole_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.multipole_ms)},
+              {"tree_source_preprocess_ms", formatRuntimeDouble(tree_pm_profile.source_preprocess_ms)},
+              {"tree_actual_node_count", std::to_string(tree_pm_profile.tree_profile.actual_node_count)},
+              {"tree_maximum_depth", std::to_string(tree_pm_profile.tree_profile.maximum_depth)},
+              {"tree_source_identity_used_generation", std::to_string(tree_pm_profile.tree_profile.source_identity_used_generation)},
+              {"tree_build_count", std::to_string(tree_pm_profile.tree_profile.build_count)},
+              {"tree_reuse_attempted", std::to_string(tree_pm_profile.tree_profile.reuse_attempted)},
+              {"tree_reuse_accepted", std::to_string(tree_pm_profile.tree_profile.reuse_accepted)},
+              {"tree_rebuild_reason", std::to_string(tree_pm_profile.tree_profile.rebuild_reason)},
+              {"tree_topology_validity_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.topology_validity_ms)},
+              {"tree_refit_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.refit_ms)},
+              {"spatial_work_history_solves", std::to_string(m_last_tree_pm_diagnostics.spatial_work_history_solves)},
+              {"local_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.targets)},
+              {"local_visited_nodes", std::to_string(m_last_tree_pm_diagnostics.local_traversal.visited_nodes)},
+              {"local_opened_nodes", std::to_string(m_last_tree_pm_diagnostics.local_traversal.opened_nodes)},
+              {"local_accepted_internal_multipoles", std::to_string(m_last_tree_pm_diagnostics.local_traversal.accepted_internal_multipoles)},
+              {"local_accepted_leaves", std::to_string(m_last_tree_pm_diagnostics.local_traversal.accepted_leaves)},
+              {"local_direct_pair_evaluations", std::to_string(m_last_tree_pm_diagnostics.local_traversal.direct_pair_evaluations)},
+              {"local_cutoff_pruned_nodes", std::to_string(m_last_tree_pm_diagnostics.local_traversal.cutoff_pruned_nodes)},
+              {"local_cutoff_skipped_pairs", std::to_string(m_last_tree_pm_diagnostics.local_traversal.cutoff_skipped_pairs)},
+              {"local_selected_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.selected_mac_rejections)},
+              {"local_relative_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.relative_mac_rejections)},
+              {"local_maximum_angle_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.maximum_angle_rejections)},
+              {"local_strict_envelope_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.strict_envelope_rejections)},
+              {"local_softening_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.softening_rejections)},
+              {"local_near_node_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.near_node_rejections)},
+              {"local_cutoff_containment_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.cutoff_containment_rejections)},
+              {"local_geometric_history_fallbacks", std::to_string(m_last_tree_pm_diagnostics.local_traversal.geometric_history_fallbacks)},
+              {"incoming_targets", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.targets)},
+              {"incoming_visited_nodes", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.visited_nodes)},
+              {"incoming_opened_nodes", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.opened_nodes)},
+              {"incoming_accepted_internal_multipoles", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.accepted_internal_multipoles)},
+              {"incoming_accepted_leaves", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.accepted_leaves)},
+              {"incoming_direct_pair_evaluations", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.direct_pair_evaluations)},
+              {"incoming_cutoff_pruned_nodes", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.cutoff_pruned_nodes)},
+              {"incoming_cutoff_skipped_pairs", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.cutoff_skipped_pairs)},
+              {"incoming_selected_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.selected_mac_rejections)},
+              {"incoming_relative_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.relative_mac_rejections)},
+              {"incoming_maximum_angle_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.maximum_angle_rejections)},
+              {"incoming_strict_envelope_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.strict_envelope_rejections)},
+              {"incoming_softening_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.softening_rejections)},
+              {"incoming_near_node_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.near_node_rejections)},
+              {"incoming_cutoff_containment_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.cutoff_containment_rejections)},
+              {"incoming_geometric_history_fallbacks", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.geometric_history_fallbacks)},
+              {"worker_targets_min", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_targets_min)},
+              {"worker_targets_max", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_targets_max)},
+              {"worker_visits_max", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_visits_max)},
+              {"worker_pairs_max", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_pairs_max)},
+              {"worker_multipoles_max", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_multipoles_max)},
+              {"worker_work_ms_min", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_work_ms_min)},
+              {"worker_work_ms_max", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_work_ms_max)},
+              {"worker_work_ms_sum", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_work_ms_sum)},
+              {"worker_work_ms_mean", formatRuntimeDouble(m_last_tree_pm_diagnostics.worker_region_count == 0U ? 0.0 : m_last_tree_pm_diagnostics.worker_work_ms_sum / static_cast<double>(m_last_tree_pm_diagnostics.worker_region_count))},
+              {"worker_region_count", std::to_string(m_last_tree_pm_diagnostics.worker_region_count)},
+              {"pm_assign_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.assign_ms)},
+              {"pm_density_routing_wait_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.density_routing_wait_ms)},
+              {"pm_fft_forward_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.fft_forward_ms)},
+              {"pm_poisson_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.poisson_ms)},
+              {"pm_gradient_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.gradient_ms)},
+              {"pm_fft_inverse_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.fft_inverse_ms)},
+              {"pm_interpolate_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.interpolate_ms)},
+              {"pm_halo_exchange_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.halo_exchange_ms)},
+              {"pm_total_ms", formatRuntimeDouble(tree_pm_profile.pm_profile.total_ms)},
+              {"pm_gradient_factor_ms_x", formatRuntimeDouble(tree_pm_profile.pm_profile.gradient_factor_ms[0])},
+              {"pm_inverse_axis_ms_x", formatRuntimeDouble(tree_pm_profile.pm_profile.inverse_axis_ms[0])},
+              {"pm_normalization_axis_ms_x", formatRuntimeDouble(tree_pm_profile.pm_profile.normalization_axis_ms[0])},
+              {"pm_gradient_factor_ms_y", formatRuntimeDouble(tree_pm_profile.pm_profile.gradient_factor_ms[1])},
+              {"pm_inverse_axis_ms_y", formatRuntimeDouble(tree_pm_profile.pm_profile.inverse_axis_ms[1])},
+              {"pm_normalization_axis_ms_y", formatRuntimeDouble(tree_pm_profile.pm_profile.normalization_axis_ms[1])},
+              {"pm_gradient_factor_ms_z", formatRuntimeDouble(tree_pm_profile.pm_profile.gradient_factor_ms[2])},
+              {"pm_inverse_axis_ms_z", formatRuntimeDouble(tree_pm_profile.pm_profile.inverse_axis_ms[2])},
+              {"pm_normalization_axis_ms_z", formatRuntimeDouble(tree_pm_profile.pm_profile.normalization_axis_ms[2])},
               {"pm_decomposition_architecture", std::string(
                   gravity::pmDecompositionTopologyName(decomposition_descriptor.topology))},
               {"top_level_domain_leaf_count", std::to_string(m_last_tree_pm_diagnostics.top_level_domain_leaf_count)},
@@ -2044,6 +2294,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   m_last_tree_pm_diagnostics.let_wire_buffer_high_water_bytes)},
               {"let_known_workspace_high_water_bytes", std::to_string(
                   m_last_tree_pm_diagnostics.let_known_workspace_high_water_bytes)},
+              {"communication_arena_capacity_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_capacity_bytes)},
+              {"communication_arena_logical_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_logical_high_water_bytes)},
+              {"exported_targets_per_requested_target", formatRuntimeDouble(m_last_tree_pm_diagnostics.exported_targets_per_requested_target)},
               {"let_discovery_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_discovery_ms)},
               {"let_graph_setup_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_graph_setup_ms)},
               {"let_communication_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_communication_ms)},
@@ -2093,8 +2346,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .severity = core::RuntimeEventSeverity::kInfo,
           .subsystem = "gravity.treepm",
           .step_index = context.integrator_state.step_index,
-          .simulation_time_code = context.integrator_state.current_time_code,
-          .scale_factor = context.integrator_state.current_scale_factor,
+          .simulation_time_code = hierarchical ? context.timeline_step.time_end_code : context.integrator_state.current_time_code,
+          .scale_factor = hierarchical ? context.timeline_step.scale_factor_end : context.integrator_state.current_scale_factor,
           .message = "zoom force decomposition and contamination diagnostics",
           .payload = {
               {"force_l2_pm_global", formatRuntimeDouble(m_last_tree_pm_diagnostics.force_l2_pm_global)},
@@ -2117,8 +2370,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
                     : core::RuntimeEventSeverity::kInfo,
           .subsystem = "gravity.treepm",
           .step_index = context.integrator_state.step_index,
-          .simulation_time_code = context.integrator_state.current_time_code,
-          .scale_factor = context.integrator_state.current_scale_factor,
+          .simulation_time_code = hierarchical ? context.timeline_step.time_end_code : context.integrator_state.current_time_code,
+          .scale_factor = hierarchical ? context.timeline_step.scale_factor_end : context.integrator_state.current_scale_factor,
           .message = "gravity health summary across PM field, force, sync, zoom, and decomposition checks",
           .payload = {
               {"cheap_checks_executed", std::to_string(gravity_health.cheap_checks_executed)},
@@ -2136,7 +2389,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
       });
     }
 
-    if (is_kick_stage) {
+    if (is_kick_stage && !hierarchical) {
       applyActiveKickFromFreshForce(context);
     }
 
@@ -2149,6 +2402,17 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_particle_accel_x[particle_row] = m_active_accel_x[target_slot];
         m_particle_accel_y[particle_row] = m_active_accel_y[target_slot];
         m_particle_accel_z[particle_row] = m_active_accel_z[target_slot];
+        if (hierarchical) {
+          // Keep TOTAL history for relative accuracy/timestep proposals. Fine
+          // solves return only Tree, so add the coarse endpoint PM history;
+          // this value is never mistaken for a fresh long-range force.
+          if (m_tree_pm_options.short_range_only) {
+            m_particle_accel_x[particle_row] += m_hierarchical_pm_x[particle_row];
+            m_particle_accel_y[particle_row] += m_hierarchical_pm_y[particle_row];
+            m_particle_accel_z[particle_row] += m_hierarchical_pm_z[particle_row];
+          }
+          m_hierarchical_force_generation[particle_row] = context.state.gravitySourceGeneration();
+        }
         m_particle_force_cache_valid[particle_row] = 1U;
       }
       const std::uint32_t cell_row = targetCellRow(target_slot);
@@ -2169,7 +2433,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
         static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0));
     const std::uint32_t gas_species_tag =
         static_cast<std::uint32_t>(core::ParticleSpecies::kGas);
-    for (std::size_t particle_index = 0; particle_index < particle_count;
+    for (std::size_t particle_index = 0; !hierarchical && particle_index < particle_count;
          ++particle_index) {
       if (context.state.particleSpeciesTag(particle_index) ==
           gas_species_tag) {
@@ -2192,6 +2456,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         }
       }
     }
+
+    if (is_kick_stage && hierarchical) applyHierarchicalKick(context);
 
     if (gravity_fallback_reservation.valid()) {
       gravity_fallback_reservation.release();
@@ -2343,6 +2609,47 @@ class GravityRuntimeImpl final : public GravityRuntime {
           context.state,
           static_cast<std::uint32_t>(std::max(m_services.mpi_context.worldRank(), 0)),
           "gravity post-kick gas compatibility mirror");
+    }
+  }
+
+  void applyHierarchicalKick(core::StepContext& context) {
+    if (!context.hierarchical_kdk.enabled || context.particle_scheduler == nullptr ||
+        m_force_cache_particle_index_generation != context.state.particleIndexGeneration() ||
+        m_hierarchical_force_generation.size() != context.state.particles.size() ||
+        m_hierarchical_tree_x.size() != context.state.particles.size() ||
+        m_hierarchical_tree_y.size() != context.state.particles.size() ||
+        m_hierarchical_tree_z.size() != context.state.particles.size() ||
+        m_hierarchical_pm_x.size() != context.state.particles.size() ||
+        m_hierarchical_pm_y.size() != context.state.particles.size() ||
+        m_hierarchical_pm_z.size() != context.state.particles.size() ||
+        context.hierarchical_kdk.evaluation_tick != context.particle_scheduler->currentTick()) {
+      throw std::logic_error("hierarchical kick rejected incompatible row/scheduler epoch");
+    }
+    for (const auto row : context.active_set.particle_indices) {
+      if (row >= m_hierarchical_force_generation.size() ||
+          m_hierarchical_force_generation[row] != context.state.gravitySourceGeneration() ||
+          m_particle_force_cache_valid[row] == 0U) {
+        throw std::logic_error("hierarchical kick rejected a Tree force outside its exact source epoch");
+      }
+      const auto bin = context.particle_scheduler->binIndex(row);
+      const double tree_factor = context.hierarchical_kdk.tree_kick_factor_code.at(bin);
+      const double pm_factor = context.hierarchical_kdk.pm_kick_factor_code;
+      if (pm_factor != 0.0 &&
+          (m_hierarchical_pm_source_generation != context.state.gravitySourceGeneration() ||
+           m_hierarchical_pm_field_version != context.integrator_state.pm_sync_state.fieldVersion())) {
+        throw std::logic_error("hierarchical PM kick rejected a component outside its synchronized field epoch");
+      }
+      if (!std::isfinite(tree_factor) || tree_factor <= 0.0 ||
+          !std::isfinite(pm_factor) || pm_factor < 0.0) {
+        throw std::logic_error("hierarchical kick factor is not finite with legal sign");
+      }
+      // PM enters only synchronized coarse endpoint half-kicks. Tree was
+      // accumulated independently; never recover it by PM/total subtraction.
+      applyPeculiarVelocityKick(context.state, row,
+          tree_factor * m_hierarchical_tree_x[row] + pm_factor * m_hierarchical_pm_x[row],
+          tree_factor * m_hierarchical_tree_y[row] + pm_factor * m_hierarchical_pm_y[row],
+          tree_factor * m_hierarchical_tree_z[row] + pm_factor * m_hierarchical_pm_z[row],
+          1.0, 1.0);
     }
   }
 
@@ -2708,7 +3015,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
       bool prediction_requires_inactive_coordinates) const {
     return !prediction_requires_inactive_coordinates &&
         borrowedHomogeneousDmoBaseEligible(context.state) &&
-        isIdentityParticleSpan(active_particles, context.state.particles.size());
+        (context.hierarchical_kdk.enabled ||
+         isIdentityParticleSpan(active_particles, context.state.particles.size()));
   }
 
   void releaseGenericGravityRepresentationCapacity() {
@@ -2780,7 +3088,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
   [[nodiscard]] std::uint32_t targetParticleRow(std::size_t target_slot) const {
     if (m_source_representation ==
         gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
-      return static_cast<std::uint32_t>(target_slot);
+      return m_active_source_indices[target_slot];
     }
     return m_active_target_particle_row.at(target_slot);
   }
@@ -2843,7 +3151,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
           gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo;
       m_borrowed_particle_index_generation = state.particleIndexGeneration();
       m_borrowed_gravity_source_generation = state.gravitySourceGeneration();
-      m_active_source_indices = context.workspace->gravity_particle_index_scratch;
+      m_active_source_indices = context.hierarchical_kdk.enabled
+          ? active_particles : std::span<const std::uint32_t>(context.workspace->gravity_particle_index_scratch);
       m_source_predicted_inactive_count = 0U;
       return;
     }
@@ -3244,6 +3553,17 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::uint64_t m_force_cache_gas_identity_generation = 0U;
   std::uint64_t m_force_cache_source_generation = 0U;
   std::vector<std::uint8_t> m_particle_force_cache_valid;
+  // Optional hierarchy only: current per-target Tree generation and coarse PM
+  // history. No cold particle metadata, duplicate source view, or second tree.
+  std::uint64_t m_hierarchical_pm_source_generation = 0U;
+  std::uint64_t m_hierarchical_pm_field_version = 0U;
+  std::vector<std::uint64_t> m_hierarchical_force_generation;
+  std::vector<double> m_hierarchical_pm_x;
+  std::vector<double> m_hierarchical_pm_y;
+  std::vector<double> m_hierarchical_pm_z;
+  std::vector<double> m_hierarchical_tree_x;
+  std::vector<double> m_hierarchical_tree_y;
+  std::vector<double> m_hierarchical_tree_z;
   std::vector<std::uint8_t> m_cell_force_cache_valid;
   gravity::DecompositionEpoch m_decomposition_epoch{};
   gravity::GravityMemoryEstimate m_last_pre_run_memory_estimate{};

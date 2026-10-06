@@ -1,4 +1,5 @@
 #include "cosmosim/core/profiling.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -605,20 +606,28 @@ const std::vector<ProfileNode>& ProfilerSession::nodes() const {
 std::size_t ProfilerSession::rootNodeIndex() const noexcept { return 0; }
 
 void ProfilerSession::recordEvent(RuntimeEvent event) {
-  ThreadShard& shard = localShard();
-  shard.events.push_back(SequencedEvent{
+  // Events are control-path diagnostics, never node/pair hot counters. One
+  // session-wide ring bounds retention independently of thread/solve count.
+  std::lock_guard lock(m_registration_mutex);
+  ++m_event_severity_totals.at(static_cast<std::size_t>(event.severity));
+  SequencedEvent sequenced{
       .sequence = m_next_event_sequence.fetch_add(1, std::memory_order_relaxed),
       .event = std::move(event),
-  });
+  };
+  if (m_recent_events.size() < k_recent_event_limit) {
+    m_recent_events.push_back(std::move(sequenced));
+  } else {
+    m_recent_events[m_recent_event_cursor] = std::move(sequenced);
+    m_recent_event_cursor = (m_recent_event_cursor + 1U) % k_recent_event_limit;
+  }
 }
 
 void ProfilerSession::rebuildMergedEvents() const {
   std::lock_guard lock(m_registration_mutex);
   std::vector<const SequencedEvent*> ordered;
-  for (const auto& shard : m_shards) {
-    for (const SequencedEvent& event : shard->events) {
-      ordered.push_back(&event);
-    }
+  ordered.reserve(m_recent_events.size());
+  for (const SequencedEvent& event : m_recent_events) {
+    ordered.push_back(&event);
   }
   std::sort(ordered.begin(), ordered.end(), [](const SequencedEvent* lhs, const SequencedEvent* rhs) {
     return lhs->sequence < rhs->sequence;
@@ -633,6 +642,53 @@ void ProfilerSession::rebuildMergedEvents() const {
 const std::vector<RuntimeEvent>& ProfilerSession::events() const {
   rebuildMergedEvents();
   return m_merged_events;
+}
+
+std::array<std::uint64_t, 4U> ProfilerSession::eventSeverityTotals() const {
+  std::lock_guard lock(m_registration_mutex);
+  return m_event_severity_totals;
+}
+
+MemoryReport ProfilerSession::retainedEventMemoryReport() const {
+  std::lock_guard lock(m_registration_mutex);
+  std::uint64_t bytes = ownedCapacityBytesForContainer(m_recent_events);
+  bytes = checkedMemoryBytesAdd(bytes, ownedCapacityBytesForContainer(m_merged_events),
+      "profiler recent event containers");
+  const auto add_event = [&](const RuntimeEvent& event) {
+    const auto add_string = [&](const std::string& value) {
+      // Conservative: SSO capacity is charged too; opaque allocator overhead
+      // remains in the process allocator reserve, not a second budget.
+      bytes = checkedMemoryBytesAdd(bytes, checkedSizeAdd(value.capacity(), 1U,
+          "profiler event string terminator"),
+          "profiler retained event strings");
+    };
+    add_string(event.event_kind);
+    add_string(event.subsystem);
+    add_string(event.message);
+    bytes = checkedMemoryBytesAdd(bytes,
+        checkedSizeMultiply(event.payload.bucket_count(), sizeof(void*),
+            "profiler event payload buckets"), "profiler event payload buckets");
+    for (const auto& [key, value] : event.payload) {
+      bytes = checkedMemoryBytesAdd(bytes,
+          sizeof(decltype(event.payload)::value_type) + 2U * sizeof(void*),
+          "profiler event payload nodes");
+      add_string(key);
+      add_string(value);
+    }
+  };
+  for (const auto& event : m_recent_events) add_event(event.event);
+  for (const auto& event : m_merged_events) add_event(event);
+  MemoryReportBuilder builder;
+  builder.addEntry(MemoryEntry{
+      .subsystem = MemorySubsystem::kSidecars,
+      .lifetime = MemoryLifetime::kPersistent,
+      .memory_class = MemoryClass::kDiagnostic,
+      .label = "profiler.recent_events_and_report_view",
+      .current_size_bytes = bytes,
+      .owned_capacity_bytes = bytes,
+      .high_water_bytes = bytes,
+      .uncertainty_note = "source capacity model including conservative SSO/node charges; allocator metadata uses process reserve"});
+  return std::move(builder).finish();
 }
 
 void ProfilerSession::setMemoryReport(MemoryReport report) {
@@ -654,11 +710,13 @@ void ProfilerSession::reset() {
     shard->nodes.clear();
     shard->nodes.push_back(makeProfileNode("root"));
     shard->scope_stack.clear();
-    shard->events.clear();
   }
   m_counters.reset();
   m_allocator_stats.reset();
   m_next_event_sequence.store(0, std::memory_order_relaxed);
+  m_recent_events.clear();
+  m_recent_event_cursor = 0U;
+  m_event_severity_totals = {};
   m_merged_nodes.clear();
   m_merged_nodes.push_back(makeProfileNode("root"));
   m_merged_events.clear();
@@ -760,25 +818,21 @@ void writeOperationalReportJson(
     std::string_view provenance_config_hash_hex) {
   writeAtomically(output_path, [&](std::ostream& out) {
     const std::vector<RuntimeEvent>& events = session.events();
-    std::uint64_t warning_count = 0;
-    std::uint64_t error_count = 0;
-    std::uint64_t fatal_count = 0;
-    for (const RuntimeEvent& event : events) {
-      if (event.severity == RuntimeEventSeverity::kWarning) {
-        ++warning_count;
-      } else if (event.severity == RuntimeEventSeverity::kError) {
-        ++error_count;
-      } else if (event.severity == RuntimeEventSeverity::kFatal) {
-        ++fatal_count;
-      }
-    }
+    const auto severity_totals = session.eventSeverityTotals();
+    const std::uint64_t warning_count = severity_totals[1];
+    const std::uint64_t error_count = severity_totals[2];
+    const std::uint64_t fatal_count = severity_totals[3];
+    const std::uint64_t event_count = severity_totals[0] + warning_count + error_count + fatal_count;
 
     out << "{\n";
-    out << "  \"schema_version\": 1,\n";
+    out << "  \"schema_version\": 2,\n";
     out << "  \"run_label\": \"" << escapeJson(std::string(run_label)) << "\",\n";
     out << "  \"provenance_config_hash_hex\": \"" << escapeJson(std::string(provenance_config_hash_hex)) << "\",\n";
     out << "  \"summary\": {\n";
-    out << "    \"event_count\": " << events.size() << ",\n";
+    out << "    \"event_count\": " << event_count << ",\n";
+    out << "    \"retained_event_count\": " << events.size() << ",\n";
+    out << "    \"evicted_event_count\": " << event_count - events.size() << ",\n";
+    out << "    \"recent_event_limit\": " << ProfilerSession::k_recent_event_limit << ",\n";
     out << "    \"warning_count\": " << warning_count << ",\n";
     out << "    \"error_count\": " << error_count << ",\n";
     out << "    \"fatal_count\": " << fatal_count << ",\n";

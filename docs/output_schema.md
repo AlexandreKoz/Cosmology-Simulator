@@ -427,3 +427,19 @@ authoritative byte storage without changing the dataset type, shape, contents
 or schema. No snapshot/restart schema version or normalized configuration key
 changes are introduced. Other writer metadata and readback capacity growth
 remain subject to their existing owner contracts and external-runtime reserve.
+
+## P6 operational report version 2
+
+Science snapshot schema and Parallel-HDF5 single-file publication are unchanged.
+Optional hierarchical snapshots occur only after all coarse intervals/kicks
+close and ownership migration commits; no mixed-epoch snapshot is published.
+Existing step/code-time scheduling is preserved; hierarchical step cadence counts
+coarse blocks. Explicit redshift/scale-factor target lists are not added.
+
+`operational_report.json` advances `schema_version` from 1 to 2. Its summary
+`event_count`, warning/error/fatal counts are lifetime totals; recent event detail
+is limited to 256. Added summary fields are `retained_event_count`,
+`evicted_event_count`, and `recent_event_limit`. Consumers must not infer lifetime
+counts from the event array. Existing event records remain readable; ordinary
+profiler JSON stays version 1. These source changes require consumer/fixture
+qualification; no output or restart tests were executed in P6.

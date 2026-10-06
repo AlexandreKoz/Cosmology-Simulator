@@ -205,3 +205,11 @@ cmake -S /path/to/consumer -B /tmp/cosmosim-consumer \
   -DCMAKE_PREFIX_PATH=/tmp/cosmosim-install
 cmake --build /tmp/cosmosim-consumer
 ```
+
+## P6 follow-up qualification
+
+The P6 source campaign deliberately executed no configure/build/compiler,
+tests, MPI runs, benchmarks or scientific validation. Existing build/test floors
+remain required for the second campaign. The exact staged matrix and evidence
+requirements are in [p6_validation_campaign_plan_20261006.md](repair/p6_validation_campaign_plan_20261006.md).
+Optional modes must not become defaults until those gates are accepted.

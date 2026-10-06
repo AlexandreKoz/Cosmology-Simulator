@@ -203,11 +203,12 @@ Einstein-de Sitter (`omega_matter=1`, `omega_lambda=0`) is accepted.
 - `t_code_begin`, `t_code_end`
 - `a_begin`, `a_end`, `z_begin`, `z_end`, `t_phys_begin`, `t_phys_end`, `integrator_time_variable`
 - `max_global_steps`, `hierarchical_max_rung`, `amr_max_level`
-  - `hierarchical_max_rung` defaults to and currently requires `0` for the
-    production `ReferenceWorkflow`. Nonzero values fail validation because the
-    production KDK state does not yet carry per-element kick/drift epochs needed
-    to advance mixed rungs without skipping elapsed time. Standalone scheduler
-    APIs/tests remain available; they are not production multirate evidence.
+  - `hierarchical_max_rung=0` retains the default global KDK path.
+    Values `1..12` explicitly select source-implemented, unqualified DMO block
+    KDK in `cosmo_cube`. Gas, stars, black holes, tracers, and enabled source
+    physics are rejected. Bins are fixed inside each coarse block; code-time
+    output events and cosmological limits clip the coarse interval. See the
+    P6 operator and restart contract in `docs/time_integration.md`.
 - `gravity_softening` / `gravity_softening_kpc_comoving`
   - the production gravity timestep combines this comoving length with
     comoving-coordinate acceleration `|A|/a^3`, not directly with scale-free
@@ -305,9 +306,10 @@ All three criteria, the opening threshold, relative tolerance, and acceleration 
 `treepm_update_cadence_steps` is production-restricted to `1`:
 
 - Values other than `1` fail config validation with an explicit production-safety error.
-- Together with required `hierarchical_max_rung=0`, every
-  integrator-issued rank-coordinated production force-refresh surface rebuilds
-  PM.
+- In default `hierarchical_max_rung=0`, every integrator-issued
+  rank-coordinated force-refresh surface rebuilds PM. The optional hierarchy
+  instead has explicit coarse PM endpoint surfaces; fine Tree-only solves
+  perform no PM interpolation and are not PM cache-reuse calls.
 - The coordinator's explicit lower-level reuse API requires a transient cache
   signature match for force epoch, force-evaluation scale factor, `G_code`,
   split scale, all three box axes, assignment scheme, boundary condition, PM
@@ -628,3 +630,30 @@ Diffusion requires `hierarchical_max_rung = 0`. Enabling diffusion with model
 `none`, a non-positive coefficient, invalid stage limits, or invalid coefficient
 bounds is rejected during typed configuration loading. See
 `docs/metals_enrichment_and_mixing.md` for current AMR/MPI scope.
+
+## P6 optional numerical and performance policies
+
+All options use the existing `.param.txt` typed freeze, validation and normalized
+dump. No new parser or budget authority is introduced. **Validation pending.**
+
+| Key | Default | Authority / constraints |
+| --- | --- | --- |
+| `numerics.treepm_adaptive_acceptance_enabled` | `false` | Select adaptive relative residual accuracy plus independent guards; false retains strict reference policy. |
+| `numerics.treepm_adaptive_maximum_opening_angle` | `0.25` | Finite `(0,0.5]`; adaptive convergence safeguard, not the primary accuracy tolerance. This is an unqualified CHUI policy default. |
+| `numerics.treepm_identical_source_tree_reuse_enabled` | `false` | Exact generation/count/build/frame/ownership/row-identity match required. |
+| `numerics.treepm_topology_refit_enabled` | `false` | Certify every source inside its original leaf cell, fixed unwrap frame and row membership; rebuild on rejection. |
+| `parallel.decomposition_spatial_work_enabled` | `false` | Fixed periodic `cosmo_cube`, 64 bounded SFC bins; reference feedback retained when false. |
+| `numerics.hierarchical_max_rung` (existing) | `0` | `1..12`: optional collisionless DMO block KDK; 0 remains reference. |
+
+Adaptive mode reuses `treepm_tree_relative_force_tolerance`,
+`treepm_tree_relative_force_acceleration_floor`, and
+`treepm_tree_opening_theta`. Missing, incompatible, tiny, zero or nonfinite
+history selects geometric fallback without manufacturing an acceleration.
+The kernel inequality is documented in `docs/tree_pm_coupling.md`.
+
+The added normalized fields change the config hash even when defaults are
+selected. Legacy restart files still use their existing reader/schema path,
+but strict workflow config-hash checks are retained: old normalized provenance
+is not silently treated as the new config. Qualification must establish an
+explicit fixture/config migration if needed. No config tests were added or run
+in this source-only campaign; they are required in the second campaign.

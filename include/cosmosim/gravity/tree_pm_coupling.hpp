@@ -26,8 +26,31 @@ namespace cosmosim::gravity {
 inline constexpr std::size_t kTreePmShortRangeRequestWireBytes = 96U;
 inline constexpr std::size_t kTreePmShortRangeResponseWireBytes = 80U;
 inline constexpr std::size_t kTreePmResidualBlockSize = 64U;
-inline constexpr std::size_t kTreePmResidualCounterBytes =
-    sizeof(std::uint64_t) * 7U;
+// One bundle per worker; no pair/node hot-path atomics or shared cache lines.
+struct alignas(64) TreePmTraversalCounters {
+  std::uint64_t visited_nodes = 0;
+  std::uint64_t accepted_nodes = 0;  // compatibility: leaves + internal nodes
+  std::uint64_t opened_nodes = 0;
+  std::uint64_t direct_pair_evaluations = 0;
+  std::uint64_t cutoff_pruned_nodes = 0;
+  std::uint64_t cutoff_skipped_pairs = 0;
+  std::uint64_t remote_pairs_pruned_by_bounds = 0;
+  std::uint64_t accepted_internal_multipoles = 0;
+  std::uint64_t accepted_leaves = 0;
+  std::uint64_t selected_mac_rejections = 0;
+  std::uint64_t relative_mac_rejections = 0;
+  std::uint64_t maximum_angle_rejections = 0;
+  std::uint64_t strict_envelope_rejections = 0;
+  std::uint64_t softening_rejections = 0;
+  std::uint64_t near_node_rejections = 0;
+  std::uint64_t cutoff_containment_rejections = 0;
+  std::uint64_t geometric_history_fallbacks = 0;
+  std::uint64_t targets = 0;
+  double elapsed_work_ms = 0.0;
+  std::array<std::uint64_t, parallel::k_spatial_work_bin_count> spatial_work{};
+  std::array<std::uint64_t, parallel::k_spatial_work_bin_count> spatial_targets{};
+};
+inline constexpr std::size_t kTreePmResidualCounterBytes = sizeof(TreePmTraversalCounters);
 
 // Why TreePM declined the installed authoritative top-domain geometry and
 // used the conservative local-tree root packet instead.
@@ -79,15 +102,45 @@ struct TreePmForceAccumulatorView {
   std::span<const double> target_pos_x_comoving{};
   std::span<const double> target_pos_y_comoving{};
   std::span<const double> target_pos_z_comoving{};
+  // Optional compact PM-only output, captured before the residual is added.
+  // All three spans must cover the active set. Empty for ordinary KDK.
+  std::span<double> long_range_accel_x_comoving{};
+  std::span<double> long_range_accel_y_comoving{};
+  std::span<double> long_range_accel_z_comoving{};
+  // Optional source-indexed Tree-only lanes. Each active source row is reset
+  // and accumulated directly, avoiding subtraction of nearly equal PM/total
+  // values. Requires indexed local source targets, not independent positions.
+  std::span<double> short_range_accel_x_comoving{};
+  std::span<double> short_range_accel_y_comoving{};
+  std::span<double> short_range_accel_z_comoving{};
 
   void reset() const;
   void addToActiveSlot(std::size_t active_slot, double ax_comoving, double ay_comoving, double az_comoving) const;
+  void addShortRangeToActiveSlot(std::size_t active_slot, double ax_comoving, double ay_comoving, double az_comoving) const;
+};
+
+enum class TreePmAcceptancePolicy : std::uint8_t {
+  kStrictReference,
+  kAdaptiveRelative,
 };
 
 struct TreePmOptions {
   PmSolveOptions pm_options{};
   TreeGravityOptions tree_options{};
   TreePmSplitPolicy split_policy{};
+  TreePmAcceptancePolicy acceptance_policy = TreePmAcceptancePolicy::kStrictReference;
+  double adaptive_maximum_opening_angle = 0.25;
+  bool spatial_work_history_enabled = false;
+  // Exact snapshot reuse and certified motion refit are independent policies.
+  bool identical_source_tree_reuse_enabled = false;
+  bool topology_refit_enabled = false;
+  // Nonzero certifies unchanged dense source-row identity. Rank-local token,
+  // not a collective generation; unknown/reordered views reject motion refit.
+  std::uint64_t source_layout_generation = 0U;
+  // Integrator split operator: evaluate ONLY the complementary short-range
+  // force, without interpolating or reusing a stale PM field. Long-range kicks
+  // have separate synchronized endpoint authority in hierarchical KDK.
+  bool short_range_only = false;
   bool enable_zoom_long_range_correction = false;
   PmGridShape zoom_focused_pm_shape{};
   std::span<const std::uint8_t> source_is_high_res;
@@ -122,6 +175,21 @@ struct TreePmOptions {
 };
 
 struct TreePmDiagnostics {
+  TreePmTraversalCounters local_traversal{};
+  TreePmTraversalCounters incoming_traversal{};
+  std::array<double, parallel::k_spatial_work_bin_count> spatial_work_per_target{};
+  std::uint64_t spatial_work_history_solves = 0;
+  // Nonempty worker-region summaries for the current force only. Work time
+  // is summed target traversal time, not an additive force-phase wall timer.
+  std::uint64_t worker_region_count = 0;
+  double worker_targets_min = 0.0;
+  double worker_targets_max = 0.0;
+  double worker_visits_max = 0.0;
+  double worker_pairs_max = 0.0;
+  double worker_multipoles_max = 0.0;
+  double worker_work_ms_min = 0.0;
+  double worker_work_ms_max = 0.0;
+  double worker_work_ms_sum = 0.0;
   std::uint64_t local_source_count = 0;
   std::uint64_t local_active_target_count = 0;
   std::uint64_t empty_source_rank_count = 0;
@@ -152,6 +220,9 @@ struct TreePmDiagnostics {
   std::uint64_t let_high_water_bytes = 0;
   std::uint64_t let_wire_buffer_high_water_bytes = 0;
   std::uint64_t let_known_workspace_high_water_bytes = 0;
+  std::uint64_t communication_arena_capacity_bytes = 0;
+  std::uint64_t communication_arena_logical_high_water_bytes = 0;
+  double exported_targets_per_requested_target = 0.0;
   double let_discovery_ms = 0.0;
   double let_graph_setup_ms = 0.0;
   double let_communication_ms = 0.0;
@@ -310,18 +381,7 @@ class TreePmCoordinator {
   // Per-target-family residual traversal bundle. The coordinator maintains
   // one instance for locally owned targets and one for incoming remote
   // targets so pair evaluations can be reported without double counting.
-  struct ResidualTraversalCounters {
-    std::uint64_t visited_nodes = 0;
-    std::uint64_t accepted_nodes = 0;
-    std::uint64_t opened_nodes = 0;
-    std::uint64_t direct_pair_evaluations = 0;
-    std::uint64_t cutoff_pruned_nodes = 0;
-    std::uint64_t cutoff_skipped_pairs = 0;
-    // Remote-target cutoff-prune tally produced inside the residual evaluator.
-    // Kept on the counters bundle so OpenMP workers never mutate shared
-    // coordinator stats; the coordinator merges exact integer sums after join.
-     std::uint64_t remote_pairs_pruned_by_bounds = 0;
-   };
+  using ResidualTraversalCounters = TreePmTraversalCounters;
    static_assert(sizeof(ResidualTraversalCounters) == kTreePmResidualCounterBytes,
                  "TreePM residual counter storage contract changed");
 
@@ -339,6 +399,7 @@ class TreePmCoordinator {
 
 
   struct ResidualTraversalStats {
+    TreePmDiagnostics traversal_summary{};
     std::uint64_t pruned_nodes = 0;
     std::uint64_t pair_skips_cutoff = 0;
     // Exact identity: pair_evaluations =
@@ -407,6 +468,16 @@ class TreePmCoordinator {
   PmGridStorage m_grid;
   PmSolver m_pm_solver;
   TreeGravitySolver m_tree_solver;
+  // Bounded derived planner feedback; survives ownership changes because bins
+  // address fixed coordinates. Never force truth or restart continuation state.
+  std::array<double, parallel::k_spatial_work_bin_count> m_spatial_work_history{};
+  std::array<double, parallel::k_spatial_work_bin_count> m_spatial_target_history{};
+  std::uint64_t m_spatial_work_history_solves = 0;
+  DecompositionEpoch m_tree_decomposition_epoch{};
+  PmBoundaryCondition m_tree_boundary = PmBoundaryCondition::kPeriodic;
+  std::array<double, 3U> m_tree_box_lengths{};
+  std::array<double, 3U> m_tree_unwrap_anchor{};
+  std::uint64_t m_tree_source_layout_generation = 0U;
 
   // Periodic tree-build coordinates are transient derived state. PM assignment
   // and particle truth continue to use the caller-owned wrapped coordinates.

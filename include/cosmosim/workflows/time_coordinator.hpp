@@ -139,6 +139,11 @@ class TimeCoordinator {
       bool update_all_elements);
 
  private:
+  void runHierarchicalSegment(
+      const core::SimulationConfig&, const ReferenceWorkflowOptions&,
+      core::SimulationState&, const core::LambdaCdmBackground*,
+      std::vector<std::uint64_t>&, ReferenceWorkflowReport&, core::ProfilerSession&,
+      const core::ModePolicy&);
   void coordinatePmRefreshDirective(core::StepContext& context);
   void dispatchStage(
       core::StepContext& context,

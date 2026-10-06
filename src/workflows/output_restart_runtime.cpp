@@ -928,32 +928,55 @@ void validateRestartResumeTopologyOrThrowImpl(
     const core::SimulationConfig& config,
     const core::FrozenConfig& frozen_config,
     const parallel::MpiContext& mpi_context) {
-  const auto require_bin_zero_scheduler = [](
-      const core::TimeBinPersistentState& scheduler_state,
-      std::string_view label) {
-    if (scheduler_state.max_bin != 0U) {
-      throw std::runtime_error(
-          "ReferenceWorkflow restart topology validation failed: " +
-          std::string(label) + " max_bin must be zero for production KDK");
+  const std::uint8_t expected_max_bin = static_cast<std::uint8_t>(config.numerics.hierarchical_max_rung);
+  const auto require_scheduler = [&](const core::TimeBinPersistentState& scheduler, std::string_view label) {
+    if (scheduler.max_bin != expected_max_bin) {
+      throw std::runtime_error("restart scheduler hierarchy differs from typed configuration: " + std::string(label));
     }
-    for (const std::uint8_t bin : scheduler_state.bin_index) {
-      if (bin != 0U) {
-        throw std::runtime_error(
-            "ReferenceWorkflow restart topology validation failed: " +
-            std::string(label) + " contains a nonzero committed time bin");
+    if (expected_max_bin == 0U) {
+      for (const auto bin : scheduler.bin_index) if (bin != 0U) throw std::runtime_error("reference restart has nonzero bin");
+      for (const auto pending : scheduler.pending_bin_index) {
+        if (pending != 0U && pending != core::HierarchicalTimeBinScheduler::k_unset_pending_bin) {
+          throw std::runtime_error("reference restart has nonzero pending bin");
+        }
       }
+      return;
     }
-    for (const std::uint8_t pending : scheduler_state.pending_bin_index) {
-      if (pending != 0U &&
-          pending != core::HierarchicalTimeBinScheduler::k_unset_pending_bin) {
-        throw std::runtime_error(
-            "ReferenceWorkflow restart topology validation failed: " +
-            std::string(label) + " contains a nonzero pending time bin");
+    if (scheduler.next_activation_tick.size() != scheduler.bin_index.size() ||
+        scheduler.active_flag.size() != scheduler.bin_index.size() ||
+        scheduler.pending_bin_index.size() != scheduler.bin_index.size()) {
+      throw std::runtime_error("hierarchical restart scheduler lanes have inconsistent extents");
+    }
+    const auto period = 1ULL << expected_max_bin;
+    if (scheduler.current_tick % period != 0U) throw std::runtime_error("hierarchical restart is not at a coarse synchronization tick");
+    for (std::size_t row = 0U; row < scheduler.bin_index.size(); ++row) {
+      if (scheduler.bin_index[row] > expected_max_bin || scheduler.active_flag[row] != 0U ||
+          scheduler.pending_bin_index[row] != core::HierarchicalTimeBinScheduler::k_unset_pending_bin ||
+          scheduler.next_activation_tick[row] != scheduler.current_tick) {
+        throw std::runtime_error("hierarchical restart contains an open particle interval or pending transition");
       }
     }
   };
-  require_bin_zero_scheduler(restart.scheduler_state, "particle scheduler");
-  require_bin_zero_scheduler(restart.gas_cell_scheduler_state, "gas-cell scheduler");
+  require_scheduler(restart.scheduler_state, "particles");
+  require_scheduler(restart.gas_cell_scheduler_state, "gas cells");
+  if (expected_max_bin > 0U) {
+    if (restart.state.cells.size() != 0U || restart.integrator_state.inside_kdk_step ||
+        !restart.integrator_state.last_completed_restart_safe ||
+        restart.scheduler_state.current_tick != restart.gas_cell_scheduler_state.current_tick ||
+        restart.integrator_state.time_bins.max_bin != expected_max_bin ||
+        restart.integrator_state.last_completed_boundary_kind != core::StepBoundaryKind::kGlobalSynchronizationPoint ||
+        restart.scheduler_state.bin_index.size() != restart.state.particles.size() ||
+        !restart.gas_cell_scheduler_state.bin_index.empty()) {
+      throw std::runtime_error("hierarchical restart requires closed collisionless synchronized KDK authority");
+    }
+    for (std::size_t row = 0U; row < restart.state.particles.size(); ++row) {
+      if (restart.state.particleSpeciesTag(row) != static_cast<std::uint32_t>(core::ParticleSpecies::kDarkMatter) ||
+          restart.state.particleLastDriftTimeCode(row) != restart.integrator_state.current_time_code ||
+          restart.state.particleLastDriftScaleFactor(row) != restart.integrator_state.current_scale_factor) {
+        throw std::runtime_error("hierarchical restart mixes species or particle drift epochs");
+      }
+    }
+  }
   if (restart.normalized_config_hash_hex != frozen_config.provenance.config_hash_hex) {
     throw std::runtime_error(
         "ReferenceWorkflow restart topology validation failed: normalized config hash mismatch: expected=" +

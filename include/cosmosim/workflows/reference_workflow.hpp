@@ -80,6 +80,8 @@ struct ReferenceWorkflowReport {
     std::uint64_t active_particles_kicked = 0;
     std::uint64_t inactive_particles_skipped = 0;
     bool refreshed_long_range_field = false;
+    bool short_range_only = false;
+    std::uint64_t active_force_targets = 0U;
   };
 
   bool config_compatible = false;
@@ -125,6 +127,8 @@ struct ReferenceWorkflowReport {
   std::size_t treepm_pm_grid_nz = 0;
   std::string treepm_pm_grid_shape;
   int treepm_update_cadence_steps = 1;
+  // Recent stage/cadence details only (128 stages / 256 force decisions).
+  // Lifetime counts remain in the profiler and refresh/reuse totals.
   std::vector<std::string> stage_sequence;
   std::vector<TreePmCadenceRecord> treepm_cadence_records;
   std::filesystem::path shared_run_directory;

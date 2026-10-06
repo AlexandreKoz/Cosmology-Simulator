@@ -2142,6 +2142,9 @@ class PmSolver::Impl {
     const std::size_t nz_complex = shape.nz / 2U + 1U;
     std::size_t visited = 0U;
     if (plan.spectral_transposed) {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static) reduction(+ : visited)
+#endif
       for (std::size_t local_iy = 0; local_iy < plan.transposed_local_ny; ++local_iy) {
         const std::size_t iy = plan.transposed_begin_y + local_iy;
         for (std::size_t ix = 0; ix < shape.nx; ++ix) {
@@ -2156,6 +2159,9 @@ class PmSolver::Impl {
       }
     } else {
       const std::size_t global_x_begin = plan.layout.owned_x.begin_x;
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static) reduction(+ : visited)
+#endif
       for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
         const std::size_t ix = global_x_begin + local_ix;
         for (std::size_t iy = 0; iy < shape.ny; ++iy) {
@@ -2940,6 +2946,13 @@ void PmProfiler::append(const PmProfileEvent& event) {
       std::max(m_totals.isolated_open_root_workspace_limit_bytes,
                event.isolated_open_root_workspace_limit_bytes);
   m_totals.isolated_open_gather_bytes += event.isolated_open_gather_bytes;
+  m_totals.density_routing_wait_ms += event.density_routing_wait_ms;
+  m_totals.halo_exchange_ms += event.halo_exchange_ms;
+  for (std::size_t axis = 0; axis < 3U; ++axis) {
+    m_totals.gradient_factor_ms[axis] += event.gradient_factor_ms[axis];
+    m_totals.inverse_axis_ms[axis] += event.inverse_axis_ms[axis];
+    m_totals.normalization_axis_ms[axis] += event.normalization_axis_ms[axis];
+  }
   m_totals.assign_ms += event.assign_ms;
   m_totals.fft_forward_ms += event.fft_forward_ms;
   m_totals.poisson_ms += event.poisson_ms;
@@ -4022,6 +4035,7 @@ void PmSolver::assignDensityImpl(
       profile->routed_workspace_high_water_bytes = std::max(
           profile->routed_workspace_high_water_bytes, workspace_high_water);
       profile->routed_mpi_wait_ms += routed_mpi_wait_ms;
+      profile->density_routing_wait_ms += routed_mpi_wait_ms;
       profile->bytes_moved += total_wire_sent + total_wire_received;
     }
 #endif
@@ -4180,6 +4194,9 @@ void PmSolver::solvePoissonPeriodicImpl(
 #endif
   const double mean_density =
       global_density_sum / static_cast<double>(m_shape.cellCount());
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
   for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
     for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
       const std::size_t fft_base =
@@ -4216,12 +4233,16 @@ void PmSolver::solvePoissonPeriodicImpl(
 
   std::copy(fourier.begin(), fourier.end(), potential_k.begin());
 
-  auto inverse_current_spectrum_into = [this, profile, &plan, &grid](std::span<double> dst) {
+  auto inverse_current_spectrum_into = [this, profile, &plan, &grid](std::span<double> dst, int axis = -1) {
     const double fft_time = m_impl->inverseFft();
+    const auto normalization_start = std::chrono::steady_clock::now();
     auto real_values = m_impl->realGrid();
 #if COSMOSIM_ENABLE_FFTW
     const double normalization = 1.0 / static_cast<double>(m_shape.cellCount());
     if (plan.is_distributed) {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
       for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
         const std::size_t global_ix = plan.layout.globalXFromLocal(local_ix);
         for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
@@ -4233,6 +4254,9 @@ void PmSolver::solvePoissonPeriodicImpl(
         }
       }
     } else {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
       for (std::size_t i = 0; i < dst.size(); ++i) {
         dst[i] = real_values[i] * normalization;
       }
@@ -4241,6 +4265,12 @@ void PmSolver::solvePoissonPeriodicImpl(
     std::copy(real_values.begin(), real_values.end(), dst.begin());
 #endif
     if (profile != nullptr) {
+      if (axis >= 0) {
+        profile->inverse_axis_ms[static_cast<std::size_t>(axis)] += fft_time;
+        profile->normalization_axis_ms[static_cast<std::size_t>(axis)] +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - normalization_start).count();
+      }
       profile->fft_inverse_ms += fft_time;
       if (plan.spectral_transposed) {
         profile->fft_transpose_ms += fft_time;
@@ -4255,12 +4285,18 @@ void PmSolver::solvePoissonPeriodicImpl(
     inverse_current_spectrum_into(grid.potential());
   }
 
-  m_impl->fillGradientSpectrum(plan, lengths, m_shape, 0);
-  inverse_current_spectrum_into(grid.force_x());
-  m_impl->fillGradientSpectrum(plan, lengths, m_shape, 1);
-  inverse_current_spectrum_into(grid.force_y());
-  m_impl->fillGradientSpectrum(plan, lengths, m_shape, 2);
-  inverse_current_spectrum_into(grid.force_z());
+  const std::array<std::span<double>, 3U> force_lanes{
+      grid.force_x(), grid.force_y(), grid.force_z()};
+  for (int axis = 0; axis < 3; ++axis) {
+    const auto factor_start = std::chrono::steady_clock::now();
+    m_impl->fillGradientSpectrum(plan, lengths, m_shape, axis);
+    if (profile != nullptr) {
+      profile->gradient_factor_ms[static_cast<std::size_t>(axis)] +=
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - factor_start).count();
+    }
+    inverse_current_spectrum_into(force_lanes[static_cast<std::size_t>(axis)], axis);
+  }
   const auto grad_stop = std::chrono::steady_clock::now();
   if (profile != nullptr) {
     profile->gradient_ms += std::chrono::duration<double, std::milli>(grad_stop - grad_start).count();
@@ -4975,6 +5011,9 @@ void PmSolver::interpolateForcesImpl(
   }
 
   if (!distributed_slabs) {
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static) if(target_count >= 1024U)
+#endif
     for (std::size_t p = 0; p < target_count; ++p) {
       const std::size_t source_row = coordinate_row(p);
       const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;

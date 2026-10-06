@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <optional>
@@ -368,7 +369,22 @@ struct StepContext {
   StepBoundaryState boundary;
   PmRefreshDirective pm_refresh_directive;
   IntegrationStage stage = IntegrationStage::kGravityKickPre;
+  // Transient integrator-issued block KDK directive. Rung/bin authority stays
+  // in HierarchicalTimeBinScheduler; these factors describe one kick surface.
+  // Forces use scale-free A, velocities store p/a at the common position epoch.
+  struct HierarchicalKdkDirective {
+    bool enabled = false;
+    bool include_long_range_force = false;
+    bool synchronization_end = false;
+    bool force_only_synchronization = false;
+    std::uint64_t coarse_source_generation = 0U;
+    std::uint64_t evaluation_tick = 0U;
+    std::array<double, 13U> tree_kick_factor_code{};
+    double pm_kick_factor_code = 0.0;
+  } hierarchical_kdk;
 };
+
+inline constexpr std::size_t k_hierarchical_timeline_capacity = 8193U;
 
 // Materialize a previously requested PM cadence event without committing it.
 // The caller supplies the authoritative long-range-validity verdict: serial
@@ -414,6 +430,20 @@ class StageScheduler {
 class StepOrchestrator {
  public:
   explicit StepOrchestrator(StageScheduler scheduler = {});
+  // Collisionless synchronized-block KDK. All positions share each fine
+  // epoch; target kicks/forces use scheduler subsets. Bins remain fixed within
+  // a coarse block, and PM kicks occur only at its two endpoint surfaces.
+  // Distributed callers supply their existing collective failure authority
+  // for local preparation between stage dispatches; empty is serial-only.
+  void executeHierarchicalBlockWithDispatcher(
+      SimulationState& state, IntegratorState& integrator_state,
+      HierarchicalTimeBinScheduler& particle_scheduler,
+      HierarchicalTimeBinScheduler& gas_cell_scheduler,
+      const StageDispatchFunction& dispatcher,
+      const LambdaCdmBackground* cosmology_background,
+      TransientStepWorkspace& workspace, const ModePolicy* mode_policy,
+      ProfilerSession* profiler_session = nullptr,
+      const std::function<void(std::exception_ptr, std::string_view)>& preparation_failure_sync = {}) const;
 
   void registerCallback(IntegrationCallback& callback);
   [[nodiscard]] std::size_t callbackCount() const noexcept;

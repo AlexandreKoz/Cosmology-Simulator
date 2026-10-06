@@ -1,4 +1,5 @@
 #include "cosmosim/gravity/tree_ordering.hpp"
+#include "cosmosim/core/build_config.hpp"
 
 #include <algorithm>
 #include <array>
@@ -151,6 +152,9 @@ void buildMortonOrderingInPlace(
   const double extent = std::max(bounds.maxExtentComoving(), 1.0e-12);
   constexpr double k_grid = static_cast<double>((1U << 21U) - 1U);
 
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static) if(pos_x_comoving.size() >= 1024U)
+#endif
   for (std::size_t i = 0; i < pos_x_comoving.size(); ++i) {
     const double nx = std::clamp((pos_x_comoving[i] - bounds.min_x_comoving) / extent, 0.0, 1.0);
     const double ny = std::clamp((pos_y_comoving[i] - bounds.min_y_comoving) / extent, 0.0, 1.0);
@@ -158,7 +162,8 @@ void buildMortonOrderingInPlace(
     const std::uint32_t qx = static_cast<std::uint32_t>(std::llround(nx * k_grid));
     const std::uint32_t qy = static_cast<std::uint32_t>(std::llround(ny * k_grid));
     const std::uint32_t qz = static_cast<std::uint32_t>(std::llround(nz * k_grid));
-    ordering.sorted_particle_index[i] = checkedTreeLocalIndex(i, "Tree Morton particle index exceeds local-index policy");
+    // Population bound was checked before the parallel region.
+    ordering.sorted_particle_index[i] = static_cast<TreeLocalIndex>(i);
     ordering.morton_key[i] = morton3D(qx, qy, qz);
   }
 

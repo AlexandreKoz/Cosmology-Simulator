@@ -36,6 +36,7 @@
 
 // shared hot tree interaction invariants
 #include "internal/tree_interaction_common.hpp"
+#include "internal/tree_pm_acceptance.hpp"
 #include "internal/tree_pm_transport_planner.hpp"
 
 namespace cosmosim::gravity {
@@ -133,7 +134,7 @@ void radixSortNonNegativeDoubleBits(
 // contains all sources. The interval begins immediately after the largest
 // circular gap. This gives topology, COMs, quadrupoles, MAC geometry, and
 // exported hierarchy bounds one coherent unwrapped frame.
-void unwrapPeriodicAxis(
+double unwrapPeriodicAxis(
     std::span<const double> input,
     double box_size_comoving,
     std::vector<double>& output,
@@ -144,7 +145,7 @@ void unwrapPeriodicAxis(
   }
   output.resize(input.size());
   if (input.empty()) {
-    return;
+    return 0.0;
   }
   if (ordered_bits.size() < input.size() || radix_scratch_bits.size() < input.size()) {
     throw std::logic_error(
@@ -153,9 +154,14 @@ void unwrapPeriodicAxis(
   ordered_bits = ordered_bits.first(input.size());
   radix_scratch_bits = radix_scratch_bits.first(input.size());
 
+  int non_finite_coordinate = 0;
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static) reduction(| : non_finite_coordinate) if(input.size() >= 1024U)
+#endif
   for (std::size_t i = 0; i < input.size(); ++i) {
     if (!std::isfinite(input[i])) {
-      throw std::invalid_argument("Periodic TreePM tree geometry requires finite source coordinates");
+      non_finite_coordinate = 1;
+      continue;
     }
     double value = input[i] - box_size_comoving * std::floor(input[i] / box_size_comoving);
     if (value >= box_size_comoving) {
@@ -165,6 +171,9 @@ void unwrapPeriodicAxis(
     }
     output[i] = value;
     ordered_bits[i] = std::bit_cast<std::uint64_t>(value);
+  }
+  if (non_finite_coordinate != 0) {
+    throw std::invalid_argument("Periodic TreePM tree geometry requires finite source coordinates");
   }
 
   radixSortNonNegativeDoubleBits(ordered_bits, radix_scratch_bits);
@@ -188,11 +197,15 @@ void unwrapPeriodicAxis(
     anchor = best_anchor;
   }
 
-  for (double& wrapped_value : output) {
-    if (wrapped_value < anchor) {
-      wrapped_value += box_size_comoving;
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static) if(output.size() >= 1024U)
+#endif
+  for (std::size_t i = 0; i < output.size(); ++i) {
+    if (output[i] < anchor) {
+      output[i] += box_size_comoving;
     }
   }
+  return anchor;
 }
 
 [[nodiscard]] double norm3(double x, double y, double z) {
@@ -211,7 +224,12 @@ void unwrapPeriodicAxis(
       accumulator.active_particle_index.size() == accumulator.accel_z_comoving.size() &&
       (accumulator.previous_acceleration_magnitude_code.empty() ||
        accumulator.active_particle_index.size() == accumulator.previous_acceleration_magnitude_code.size()) &&
-      (explicit_targets_absent || explicit_targets_complete);
+      (explicit_targets_absent || explicit_targets_complete) &&
+      ((accumulator.long_range_accel_x_comoving.empty() && accumulator.long_range_accel_y_comoving.empty() &&
+        accumulator.long_range_accel_z_comoving.empty()) ||
+       (accumulator.long_range_accel_x_comoving.size() == target_count &&
+        accumulator.long_range_accel_y_comoving.size() == target_count &&
+        accumulator.long_range_accel_z_comoving.size() == target_count));
 }
 
 void validateTreePmPreflight(
@@ -222,6 +240,14 @@ void validateTreePmPreflight(
     const TreePmForceAccumulatorView& accumulator,
     const TreePmOptions& options,
     const TreeSofteningView& softening_view) {
+  const bool short_output_absent = accumulator.short_range_accel_x_comoving.empty() &&
+      accumulator.short_range_accel_y_comoving.empty() && accumulator.short_range_accel_z_comoving.empty();
+  if (!short_output_absent && (accumulator.short_range_accel_x_comoving.size() != pos_x_comoving.size() ||
+      accumulator.short_range_accel_y_comoving.size() != pos_x_comoving.size() ||
+      accumulator.short_range_accel_z_comoving.size() != pos_x_comoving.size() ||
+      !accumulator.target_pos_x_comoving.empty())) {
+    throw std::invalid_argument("Tree component output requires source-indexed full source extents");
+  }
   if (!forceAccumulatorShapeValid(accumulator)) {
     throw std::invalid_argument(
         "TreePM force accumulator spans must have matching active-set extent");
@@ -262,6 +288,9 @@ void validateTreePmPreflight(
       !std::isfinite(
           options.tree_options.relative_force_acceleration_floor_code) ||
       options.tree_options.relative_force_acceleration_floor_code <= 0.0 ||
+      !std::isfinite(options.adaptive_maximum_opening_angle) ||
+      options.adaptive_maximum_opening_angle <= 0.0 ||
+      options.adaptive_maximum_opening_angle > 0.5 ||
       options.tree_options.max_leaf_size == 0U ||
       !std::isfinite(options.tree_options.softening.epsilon_comoving) ||
       options.tree_options.softening.epsilon_comoving < 0.0 ||
@@ -275,6 +304,17 @@ void validateTreePmPreflight(
       break;
     default:
       throw std::invalid_argument("TreePM tree opening criterion is invalid");
+  }
+  switch (options.acceptance_policy) {
+    case TreePmAcceptancePolicy::kStrictReference:
+    case TreePmAcceptancePolicy::kAdaptiveRelative:
+      break;
+    default:
+      throw std::invalid_argument("TreePM acceptance policy is invalid");
+  }
+  if (options.spatial_work_history_enabled &&
+      options.pm_options.boundary_condition != PmBoundaryCondition::kPeriodic) {
+    throw std::invalid_argument("TreePM spatial work history requires a fixed periodic domain");
   }
   switch (options.tree_options.multipole_order) {
     case TreeMultipoleOrder::kMonopole:
@@ -448,6 +488,12 @@ void validateTreePmPreflight(
   mix(static_cast<std::uint64_t>(effective_pm_options.data_residency));
   mix(effective_pm_options.routing_exchange_batch_bytes);
   mix(effective_pm_options.isolated_open_root_workspace_limit_bytes);
+  mix(options.identical_source_tree_reuse_enabled ? 1U : 0U);
+  mix(options.topology_refit_enabled ? 1U : 0U);
+  mix(options.short_range_only ? 1U : 0U);
+  mix(options.spatial_work_history_enabled ? 1U : 0U);
+  mix(static_cast<std::uint64_t>(options.acceptance_policy));
+  mix_double(options.adaptive_maximum_opening_angle);
   mix(static_cast<std::uint64_t>(options.tree_options.opening_criterion));
   mix(static_cast<std::uint64_t>(options.tree_options.multipole_order));
   mix_double(options.tree_options.opening_theta);
@@ -1829,6 +1875,17 @@ TreePmCoordinator::TreePmCoordinator(
 
 TreePmCoordinator::~TreePmCoordinator() = default;
 
+void TreePmForceAccumulatorView::addShortRangeToActiveSlot(
+    std::size_t slot, double ax, double ay, double az) const {
+  addToActiveSlot(slot, ax, ay, az);
+  if (!short_range_accel_x_comoving.empty()) {
+    const auto row = active_particle_index[slot];
+    short_range_accel_x_comoving[row] += ax;
+    short_range_accel_y_comoving[row] += ay;
+    short_range_accel_z_comoving[row] += az;
+  }
+}
+
 void TreePmCoordinator::shutdownMpiResources() {
   m_pm_solver.shutdownBackendResources();
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
@@ -1860,6 +1917,17 @@ core::MemoryReport TreePmCoordinator::memoryReport() const {
   m_grid.appendMemoryReport(builder);
   m_pm_solver.appendMemoryReport(builder);
   m_tree_solver.appendMemoryReport(builder);
+  const std::uint64_t fixed_feedback_bytes = sizeof(m_spatial_work_history) +
+      sizeof(m_spatial_target_history) + sizeof(m_last_residual_stats.traversal_summary);
+  builder.addEntry(core::MemoryEntry{
+      .subsystem = core::MemorySubsystem::kTree,
+      .lifetime = core::MemoryLifetime::kPersistent,
+      .memory_class = core::MemoryClass::kDiagnostic,
+      .label = "treepm.bounded_spatial_work_and_traversal_summary",
+      .current_size_bytes = fixed_feedback_bytes,
+      .owned_capacity_bytes = fixed_feedback_bytes,
+      .high_water_bytes = fixed_feedback_bytes});
+
   const auto add_active = [&builder](
                               std::string label,
                               const auto& container,
@@ -2171,6 +2239,13 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   };
   const auto start = std::chrono::steady_clock::now();
   accumulator.reset();
+  if (!accumulator.short_range_accel_x_comoving.empty()) {
+    for (const auto row : accumulator.active_particle_index) {
+      accumulator.short_range_accel_x_comoving[row] = 0.0;
+      accumulator.short_range_accel_y_comoving[row] = 0.0;
+      accumulator.short_range_accel_z_comoving[row] = 0.0;
+    }
+  }
 
   // PM owns long-range force via explicit Gaussian Fourier filter. Cadence-aware callers
   // may choose to reuse the previously solved PM mesh field.
@@ -2241,8 +2316,12 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         m_long_range_field_validity.window_deconvolution == pm_options.enable_window_deconvolution;
   };
 
+  if (options.short_range_only && (refresh_long_range_field || options.enable_zoom_long_range_correction ||
+      !accumulator.long_range_accel_x_comoving.empty())) {
+    throw std::invalid_argument("short-range split surface cannot request a PM refresh/capture or zoom correction");
+  }
   bool perform_long_range_refresh = refresh_long_range_field;
-  if (tree_pm_entry_world_size > 1) {
+  if (!options.short_range_only && tree_pm_entry_world_size > 1) {
     const std::uint64_t requested_refresh_votes =
         m_mpi_context.allreduceSumUint64(refresh_long_range_field ? 1U : 0U);
     const std::uint64_t world_size =
@@ -2258,7 +2337,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
           "TreePM long-range reuse requested without a compatible PM field on every rank");
     }
     perform_long_range_refresh = requested_refresh_votes == world_size;
-  } else if (!refresh_long_range_field && !cache_matches_request()) {
+  } else if (!options.short_range_only && !refresh_long_range_field && !cache_matches_request()) {
     throw std::runtime_error(
         "TreePM long-range reuse requested without a compatible PM field");
   }
@@ -2359,6 +2438,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     }
     if (tree_pm_uses_distributed_payload_communication &&
         !m_grid.ownsFullDomain() && m_grid.slabLayout().world_size > 1) {
+      const auto halo_start = std::chrono::steady_clock::now();
       const std::uint64_t exchange_sequence = ++m_pm_halo_exchange_sequence;
       std::exception_ptr halo_cache_prepare_failure;
       try {
@@ -2444,6 +2524,10 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       }
       coordinate_tree_pm_failure(
           halo_cache_commit_failure, "PM halo-cache commit");
+      if (profile != nullptr) {
+        profile->pm_profile.halo_exchange_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - halo_start).count();
+      }
     }
     m_long_range_field_validity = LongRangeFieldValidity{
         .valid = true,
@@ -2463,7 +2547,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         .window_deconvolution = pm_options.enable_window_deconvolution,
     };
   }
-  if (!m_long_range_field_validity.valid) {
+  if (!options.short_range_only && !m_long_range_field_validity.valid) {
     throw std::runtime_error("TreePM long-range mesh field is unavailable for reuse");
   }
 
@@ -2548,7 +2632,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         : pos_z_comoving[accumulator.active_particle_index[active_i]];
   };
 
-  run_pm_communication_phase(
+  if (!options.short_range_only) run_pm_communication_phase(
       GravityCommunicationArena::Phase::kPmInterpolation, [&] {
     m_pm_solver.interpolateForces(
         m_grid,
@@ -2574,6 +2658,11 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         pm_options,
         profile != nullptr ? &profile->pm_profile : nullptr);
       });
+  if (!accumulator.long_range_accel_x_comoving.empty()) {
+    std::copy(accumulator.accel_x_comoving.begin(), accumulator.accel_x_comoving.end(), accumulator.long_range_accel_x_comoving.begin());
+    std::copy(accumulator.accel_y_comoving.begin(), accumulator.accel_y_comoving.end(), accumulator.long_range_accel_y_comoving.begin());
+    std::copy(accumulator.accel_z_comoving.begin(), accumulator.accel_z_comoving.end(), accumulator.long_range_accel_z_comoving.begin());
+  }
   const double pm_force_l2_global = l2NormFromComponents(
       accumulator.accel_x_comoving,
       accumulator.accel_y_comoving,
@@ -2794,36 +2883,129 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   std::span<const double> tree_source_z = pos_z_comoving;
   std::exception_ptr local_tree_build_failure;
   try {
-    const auto source_preprocess_start = std::chrono::steady_clock::now();
-    if (options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
-      const PeriodicBoxLengths box_lengths = effectivePeriodicBoxLengths(options.pm_options);
-      const auto construction_scratch =
-          m_tree_solver.beginConstructionWorkspace(pos_x_comoving.size());
-      unwrapPeriodicAxis(
-          pos_x_comoving, box_lengths.lx, m_tree_source_x_comoving,
-          construction_scratch.key_primary, construction_scratch.key_scratch);
-      unwrapPeriodicAxis(
-          pos_y_comoving, box_lengths.ly, m_tree_source_y_comoving,
-          construction_scratch.key_primary, construction_scratch.key_scratch);
-      unwrapPeriodicAxis(
-          pos_z_comoving, box_lengths.lz, m_tree_source_z_comoving,
-          construction_scratch.key_primary, construction_scratch.key_scratch);
-      tree_source_x = m_tree_source_x_comoving;
-      tree_source_y = m_tree_source_y_comoving;
-      tree_source_z = m_tree_source_z_comoving;
+    const auto box = effectivePeriodicBoxLengths(options.pm_options);
+    const std::array<double, 3U> box_lengths{box.lx, box.ly, box.lz};
+    const bool frame_matches = m_tree_boundary == options.pm_options.boundary_condition &&
+        m_tree_box_lengths == box_lengths &&
+        m_tree_decomposition_epoch == options.decomposition_epoch;
+    const bool uniform_softening_contract = softening_view.source_particle_epsilon_comoving.empty() &&
+        softening_view.source_particle_epsilon_override_mask.empty() &&
+        (!softening_view.species_policy.enabled || softening_view.source_species_tag.empty());
+    const bool layout_matches = options.source_layout_generation != 0U &&
+        options.source_layout_generation == m_tree_source_layout_generation;
+    const bool build_options_match =
+        short_range_options.tree_options.multipole_order == m_tree_solver.m_build_multipole_order &&
+        short_range_options.tree_options.max_leaf_size == m_tree_solver.m_build_max_leaf_size &&
+        short_range_options.tree_options.softening.kernel == m_tree_solver.m_build_softening.kernel &&
+        short_range_options.tree_options.softening.epsilon_comoving == m_tree_solver.m_build_softening.epsilon_comoving;
+    const bool reuse = options.identical_source_tree_reuse_enabled && frame_matches && layout_matches &&
+        uniform_softening_contract &&
+        m_tree_solver.canReuseIdenticalSource(pos_x_comoving.size(),
+            options.source_generation, short_range_options.tree_options);
+    std::uint64_t reason = 0U;
+    if (options.identical_source_tree_reuse_enabled || options.topology_refit_enabled) {
+      if (reuse) reason = 5U;
+      else if (!m_tree_solver.m_build_valid || m_tree_solver.m_nodes.size() == 0U) reason = 1U;
+      else if (!frame_matches) reason = 3U;
+      else if (!layout_matches) reason = 8U;
+      else if (!uniform_softening_contract || !build_options_match) reason = 4U;
+      else if (!options.source_generation.valid() ||
+          options.source_generation.value == std::numeric_limits<std::uint64_t>::max() ||
+          options.source_generation.value < m_tree_solver.m_build_source_generation.value ||
+          options.source_generation != m_tree_solver.m_build_source_generation ||
+          pos_x_comoving.size() != m_tree_solver.m_build_source_count) reason = 2U;
+    }
+    bool refitted = false;
+    if (!reuse && options.topology_refit_enabled && frame_matches &&
+        uniform_softening_contract && build_options_match && layout_matches &&
+        pos_x_comoving.size() == m_tree_solver.m_build_source_count &&
+        m_tree_solver.m_build_valid && m_tree_solver.m_nodes.size() != 0U && options.source_generation.valid() &&
+        options.source_generation.value != std::numeric_limits<std::uint64_t>::max() &&
+        m_tree_solver.m_build_source_generation.valid() &&
+        options.source_generation.value >= m_tree_solver.m_build_source_generation.value) {
+      const auto preprocess_start = std::chrono::steady_clock::now();
+      if (options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+        // Preserve the original unwrap frame. No periodic sorting workspace is
+        // borrowed until refit is rejected, so the old membership stays valid.
+        const auto unwrap_fixed = [](std::span<const double> in, double length,
+            double anchor, std::vector<double>& out) {
+          out.resize(in.size());
+          for (std::size_t row = 0U; row < in.size(); ++row) {
+            if (!std::isfinite(in[row])) throw std::invalid_argument("tree refit source is nonfinite");
+            double value = in[row] - length * std::floor(in[row] / length);
+            if (value >= length) value = 0.0;
+            if (value < 0.0) value += length;
+            out[row] = value < anchor ? value + length : value;
+          }
+        };
+        unwrap_fixed(pos_x_comoving, box.lx, m_tree_unwrap_anchor[0], m_tree_source_x_comoving);
+        unwrap_fixed(pos_y_comoving, box.ly, m_tree_unwrap_anchor[1], m_tree_source_y_comoving);
+        unwrap_fixed(pos_z_comoving, box.lz, m_tree_unwrap_anchor[2], m_tree_source_z_comoving);
+        tree_source_x = m_tree_source_x_comoving;
+        tree_source_y = m_tree_source_y_comoving;
+        tree_source_z = m_tree_source_z_comoving;
+      }
+      if (profile != nullptr) profile->source_preprocess_ms += std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - preprocess_start).count();
+      refitted = m_tree_solver.refitWithinOriginalLeafCells(
+          {.pos_x_comoving = tree_source_x, .pos_y_comoving = tree_source_y,
+           .pos_z_comoving = tree_source_z, .mass_code = mass_code,
+           .source_generation = options.source_generation}, short_range_options.tree_options,
+          profile != nullptr ? &profile->tree_profile : nullptr);
+      reason = refitted ? 6U : 7U; // certified motion refit / original leaf escape
+    }
+    if (!reuse && !refitted) {
+      const auto source_preprocess_start = std::chrono::steady_clock::now();
+      if (options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic) {
+        const PeriodicBoxLengths box_lengths = effectivePeriodicBoxLengths(options.pm_options);
+        const auto construction_scratch =
+            m_tree_solver.beginConstructionWorkspace(pos_x_comoving.size());
+        m_tree_unwrap_anchor[0] = unwrapPeriodicAxis(
+            pos_x_comoving, box_lengths.lx, m_tree_source_x_comoving,
+            construction_scratch.key_primary, construction_scratch.key_scratch);
+        m_tree_unwrap_anchor[1] = unwrapPeriodicAxis(
+            pos_y_comoving, box_lengths.ly, m_tree_source_y_comoving,
+            construction_scratch.key_primary, construction_scratch.key_scratch);
+        m_tree_unwrap_anchor[2] = unwrapPeriodicAxis(
+            pos_z_comoving, box_lengths.lz, m_tree_source_z_comoving,
+            construction_scratch.key_primary, construction_scratch.key_scratch);
+        tree_source_x = m_tree_source_x_comoving;
+        tree_source_y = m_tree_source_y_comoving;
+        tree_source_z = m_tree_source_z_comoving;
+      }
+      if (profile != nullptr) {
+        profile->source_preprocess_ms += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - source_preprocess_start).count();
+      }
+      const double rejected_validity_ms = profile != nullptr ? profile->tree_profile.topology_validity_ms : 0.0;
+      m_tree_solver.build(
+          tree_source_x,
+          tree_source_y,
+          tree_source_z,
+          mass_code,
+          short_range_options.tree_options,
+          profile != nullptr ? &profile->tree_profile : nullptr,
+          softening_view,
+          options.source_generation);
+      if (profile != nullptr) {
+        profile->tree_profile.topology_validity_ms += rejected_validity_ms;
+        profile->tree_profile.full_rebuild_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - source_preprocess_start).count();
+      }
+      m_tree_boundary = options.pm_options.boundary_condition;
+      m_tree_box_lengths = box_lengths;
+      m_tree_decomposition_epoch = options.decomposition_epoch;
+      m_tree_source_layout_generation = options.source_layout_generation;
     }
     if (profile != nullptr) {
-      profile->source_preprocess_ms += std::chrono::duration<double, std::milli>(
-          std::chrono::steady_clock::now() - source_preprocess_start).count();
+      profile->tree_profile.reuse_attempted = (options.identical_source_tree_reuse_enabled || options.topology_refit_enabled) ? 1U : 0U;
+      profile->tree_profile.reuse_accepted = (reuse || refitted) ? 1U : 0U;
+      profile->tree_profile.rebuild_reason = reason;
+      profile->tree_profile.actual_node_count = m_tree_solver.m_nodes.size();
+      profile->tree_profile.maximum_depth = m_tree_solver.maxDepth();
+      profile->tree_profile.source_identity_used_generation = options.source_generation.valid() ? 1U : 0U;
     }
-    m_tree_solver.build(
-        tree_source_x,
-        tree_source_y,
-        tree_source_z,
-        mass_code,
-        short_range_options.tree_options,
-        profile != nullptr ? &profile->tree_profile : nullptr,
-        softening_view);
+
   } catch (...) {
     local_tree_build_failure = std::current_exception();
   }
@@ -2871,6 +3053,32 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   if (diagnostics != nullptr) {
     const PeriodicBoxLengths diagnostic_box_lengths = effectivePeriodicBoxLengths(options.pm_options);
     *diagnostics = computeTreePmDiagnostics(options.split_policy);
+    diagnostics->communication_arena_capacity_bytes = m_communication_arena.capacityBytes();
+    for (const auto phase : {GravityCommunicationArena::Phase::kPmDensity,
+                            GravityCommunicationArena::Phase::kPmHalo,
+                            GravityCommunicationArena::Phase::kPmInterpolation,
+                            GravityCommunicationArena::Phase::kTreeExchange}) {
+      diagnostics->communication_arena_logical_high_water_bytes = std::max(
+          diagnostics->communication_arena_logical_high_water_bytes,
+          m_communication_arena.logicalHighWater(phase));
+    }
+    diagnostics->exported_targets_per_requested_target =
+        m_last_residual_stats.remote_targets_with_requests > 0U
+        ? static_cast<double>(m_last_residual_stats.let_exported_target_count) /
+            static_cast<double>(m_last_residual_stats.remote_targets_with_requests) : 0.0;
+    diagnostics->spatial_work_per_target = m_last_residual_stats.traversal_summary.spatial_work_per_target;
+    diagnostics->spatial_work_history_solves = m_last_residual_stats.traversal_summary.spatial_work_history_solves;
+    diagnostics->local_traversal = m_last_residual_stats.traversal_summary.local_traversal;
+    diagnostics->incoming_traversal = m_last_residual_stats.traversal_summary.incoming_traversal;
+    diagnostics->worker_region_count = m_last_residual_stats.traversal_summary.worker_region_count;
+    diagnostics->worker_targets_min = m_last_residual_stats.traversal_summary.worker_targets_min;
+    diagnostics->worker_targets_max = m_last_residual_stats.traversal_summary.worker_targets_max;
+    diagnostics->worker_visits_max = m_last_residual_stats.traversal_summary.worker_visits_max;
+    diagnostics->worker_pairs_max = m_last_residual_stats.traversal_summary.worker_pairs_max;
+    diagnostics->worker_multipoles_max = m_last_residual_stats.traversal_summary.worker_multipoles_max;
+    diagnostics->worker_work_ms_min = m_last_residual_stats.traversal_summary.worker_work_ms_min;
+    diagnostics->worker_work_ms_max = m_last_residual_stats.traversal_summary.worker_work_ms_max;
+    diagnostics->worker_work_ms_sum = m_last_residual_stats.traversal_summary.worker_work_ms_sum;
     diagnostics->domain_geometry_source_generation =
         m_last_residual_stats.domain_geometry_source_generation;
     diagnostics->current_gravity_source_generation =
@@ -2887,7 +3095,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->local_active_target_count = static_cast<std::uint64_t>(active_count);
     diagnostics->local_tree_node_count = static_cast<std::uint64_t>(m_tree_solver.nodes().size());
     diagnostics->pm_solve_count = perform_long_range_refresh ? 1U : 0U;
-    diagnostics->pm_reuse_count = perform_long_range_refresh ? 0U : 1U;
+    diagnostics->pm_reuse_count = (perform_long_range_refresh || options.short_range_only) ? 0U : 1U;
     diagnostics->pm_halo_value_count = static_cast<std::uint64_t>(
         2U * m_last_pm_slab_halo_exchange.halo_depth_x * m_shape.ny * m_shape.nz);
     diagnostics->pm_local_nx = static_cast<std::uint64_t>(m_grid.slabLayout().local_nx());
@@ -3299,6 +3507,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                                          double target_softening_comoving,
                                          bool previous_acceleration_available,
                                          double previous_acceleration_magnitude_code) {
+    const auto target_work_start = std::chrono::steady_clock::now();
+    ++counters.targets;
+    const std::uint64_t visits_begin = counters.visited_nodes;
+    const std::uint64_t pairs_begin = counters.direct_pair_evaluations;
+
     double ax = 0.0;
     if (nodes.size() == 0) {
       return std::array<double, 3>{0.0, 0.0, 0.0};
@@ -3342,7 +3555,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const double center_dy = nodes.center_y_comoving[node_index] - nodes.com_y_comoving[node_index];
       const double center_dz = nodes.center_z_comoving[node_index] - nodes.com_z_comoving[node_index];
       const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
-      const bool target_inside_node = skip_self && !is_leaf &&
+      const bool target_inside_node = !is_leaf &&
+          (skip_self || options.acceptance_policy == TreePmAcceptancePolicy::kAdaptiveRelative) &&
           internal::targetInsideNodeAabbFromCenterDelta(
               minimumImageDelta(nodes.center_x_comoving[node_index] - px, box_lengths.lx),
               minimumImageDelta(nodes.center_y_comoving[node_index] - py, box_lengths.ly),
@@ -3357,7 +3571,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           nodes.center_z_comoving[node_index],
           half_size,
           box_lengths) <= cutoff_radius_comoving);
-      const bool common_tree_accept = internal::acceptNodeByCommonTreePolicy(
+      const bool accept = internal::acceptTreePmNode(
           internal::TreeNodeAcceptanceInput{
               .is_leaf = is_leaf,
               .target_inside_node = target_inside_node,
@@ -3370,24 +3584,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               .target_softening_comoving = target_softening_comoving,
               .node_softening_min_comoving = nodes.softening_min_comoving[node_index],
               .node_softening_max_comoving = nodes.softening_max_comoving[node_index],
-          },
-          options.tree_options);
-      // A rank-local forest does not have the same topology as the serial
-      // tree.  Bound the residual multipole truncation independently of that
-      // topology so changing rank ownership cannot amplify the configured
-      // MAC's approximation error past the distributed-equivalence floor.
-      // Monopoles recurse to exact leaves; screened quadrupoles retain a small
-      // decomposition-independent geometric envelope.
-      constexpr double k_screened_quadrupole_width_over_distance_limit = 0.08;
-      const bool decomposition_stable_accept = is_leaf ||
-          (options.tree_options.multipole_order == TreeMultipoleOrder::kQuadrupole &&
-           (2.0 * half_size / r) < k_screened_quadrupole_width_over_distance_limit);
-      const bool accept =
-          common_tree_accept && node_within_cutoff && decomposition_stable_accept;
+          }, node_within_cutoff, options, counters);
 
       if (accept) {
         ++counters.accepted_nodes;
         if (is_leaf) {
+          ++counters.accepted_leaves;
           const TreeLocalIndex begin = nodes.particle_begin[node_index];
           const TreeLocalIndex end = begin + nodes.particle_count[node_index];
           for (TreeLocalIndex sorted_i = begin; sorted_i < end; ++sorted_i) {
@@ -3421,6 +3623,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             ++counters.direct_pair_evaluations;
           }
         } else {
+          ++counters.accepted_internal_multipoles;
           // Same softened-residual contract as the leaf pair path, applied to accepted nodes.
           const auto contrib =
               monopolePlusQuadrupoleAccelPeriodic(
@@ -3441,6 +3644,19 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         pushChildrenNearFirstPeriodic(nodes, node_index, px, py, pz, box_lengths, stack);
       }
     }
+    if (options.spatial_work_history_enabled && skip_self) {
+      parallel::DecompositionConfig domain;
+      domain.domain_x_max_comov = box_lengths.lx;
+      domain.domain_y_max_comov = box_lengths.ly;
+      domain.domain_z_max_comov = box_lengths.lz;
+      const std::size_t bin = parallel::spatialWorkBinForSfcKey(
+          parallel::sfcKeyForPosition(px, py, pz, domain));
+      counters.spatial_work[bin] += (counters.visited_nodes - visits_begin) +
+          (counters.direct_pair_evaluations - pairs_begin);
+      ++counters.spatial_targets[bin];
+    }
+    counters.elapsed_work_ms += std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - target_work_start).count();
     return std::array<double, 3>{ax, ay, az};
   };
 
@@ -3460,6 +3676,40 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     dst.cutoff_pruned_nodes += src.cutoff_pruned_nodes;
     dst.cutoff_skipped_pairs += src.cutoff_skipped_pairs;
     dst.remote_pairs_pruned_by_bounds += src.remote_pairs_pruned_by_bounds;
+    dst.accepted_internal_multipoles += src.accepted_internal_multipoles;
+    dst.accepted_leaves += src.accepted_leaves;
+    dst.selected_mac_rejections += src.selected_mac_rejections;
+    dst.relative_mac_rejections += src.relative_mac_rejections;
+    dst.maximum_angle_rejections += src.maximum_angle_rejections;
+    dst.strict_envelope_rejections += src.strict_envelope_rejections;
+    dst.softening_rejections += src.softening_rejections;
+    dst.near_node_rejections += src.near_node_rejections;
+    dst.cutoff_containment_rejections += src.cutoff_containment_rejections;
+    dst.geometric_history_fallbacks += src.geometric_history_fallbacks;
+    dst.targets += src.targets;
+    dst.elapsed_work_ms += src.elapsed_work_ms;
+    for (std::size_t bin = 0; bin < parallel::k_spatial_work_bin_count; ++bin) {
+      dst.spatial_work[bin] += src.spatial_work[bin];
+      dst.spatial_targets[bin] += src.spatial_targets[bin];
+    }
+  };
+  const auto summarize_worker = [&](const ResidualTraversalCounters& worker) {
+    if (worker.targets == 0U) return;
+    auto& summary = m_last_residual_stats.traversal_summary;
+    const double targets = static_cast<double>(worker.targets);
+    if (summary.worker_region_count == 0U) {
+      summary.worker_targets_min = targets;
+      summary.worker_work_ms_min = worker.elapsed_work_ms;
+    }
+    ++summary.worker_region_count;
+    summary.worker_targets_min = std::min(summary.worker_targets_min, targets);
+    summary.worker_targets_max = std::max(summary.worker_targets_max, targets);
+    summary.worker_visits_max = std::max(summary.worker_visits_max, static_cast<double>(worker.visited_nodes));
+    summary.worker_pairs_max = std::max(summary.worker_pairs_max, static_cast<double>(worker.direct_pair_evaluations));
+    summary.worker_multipoles_max = std::max(summary.worker_multipoles_max, static_cast<double>(worker.accepted_internal_multipoles));
+    summary.worker_work_ms_min = std::min(summary.worker_work_ms_min, worker.elapsed_work_ms);
+    summary.worker_work_ms_max = std::max(summary.worker_work_ms_max, worker.elapsed_work_ms);
+    summary.worker_work_ms_sum += worker.elapsed_work_ms;
   };
   if (!distributed_short_range) {
     const std::size_t target_count = accumulator.active_particle_index.size();
@@ -3523,7 +3773,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               target_softening,
               previous_acceleration_available,
               previous_acceleration_magnitude_code);
-          accumulator.addToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
+          accumulator.addShortRangeToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
           local_sum_sq +=
               local_accel[0] * local_accel[0] + local_accel[1] * local_accel[1] +
               local_accel[2] * local_accel[2];
@@ -3549,6 +3799,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     }
     for (const ResidualTraversalCounters& counters : m_worker_counter_storage) {
       merge_counters(local_owned_targets, counters);
+      summarize_worker(counters);
     }
     for (std::size_t block = 0; block < block_count; ++block) {
       m_last_residual_stats.local_short_range_sum_sq +=
@@ -4379,7 +4630,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                      target_softening,
                      previous_acceleration_available,
                      previous_acceleration_magnitude_code);
-                 accumulator.addToActiveSlot(
+                 accumulator.addShortRangeToActiveSlot(
                      batch_begin + batch_slot,
                      local_accel[0],
                      local_accel[1],
@@ -4412,6 +4663,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
            }
            for (const ResidualTraversalCounters& counters : m_worker_counter_storage) {
              merge_counters(local_owned_targets, counters);
+             summarize_worker(counters);
            }
            for (std::size_t block = 0; block < local_block_count; ++block) {
              m_last_residual_stats.local_short_range_sum_sq +=
@@ -4662,6 +4914,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           }
           for (const ResidualTraversalCounters& counters : m_worker_counter_storage) {
             merge_counters(incoming_remote_targets, counters);
+            summarize_worker(counters);
           }
           incoming_evaluated_target_count +=
               static_cast<std::uint64_t>(incoming_count);
@@ -4933,7 +5186,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         if (received_response_count[batch_slot] == 0U) {
           continue;
         }
-        accumulator.addToActiveSlot(
+        accumulator.addShortRangeToActiveSlot(
             batch_begin + batch_slot,
             remote_batch_ax[batch_slot],
             remote_batch_ay[batch_slot],
@@ -4959,11 +5212,50 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   }
 #endif
 
+  if (options.spatial_work_history_enabled) {
+    auto work = local_owned_targets.spatial_work;
+    auto targets = local_owned_targets.spatial_targets;
+#if COSMOSIM_ENABLE_MPI
+    if (tree_mpi_world_size > 1) {
+      requireTreePmMpiSuccess(
+          MPI_Allreduce(MPI_IN_PLACE, work.data(), static_cast<int>(work.size()),
+              MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD), "TreePM spatial work reduction");
+      requireTreePmMpiSuccess(
+          MPI_Allreduce(MPI_IN_PLACE, targets.data(), static_cast<int>(targets.size()),
+              MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD), "TreePM spatial target reduction");
+    }
+#endif
+    // Fixed half-life of one force solve; deterministic integer measurements
+    // are merged before this floating update, independent of worker schedule.
+    for (std::size_t bin = 0; bin < work.size(); ++bin) {
+      m_spatial_work_history[bin] = 0.5 * m_spatial_work_history[bin] +
+          0.5 * static_cast<double>(work[bin]);
+      m_spatial_target_history[bin] = 0.5 * m_spatial_target_history[bin] +
+          0.5 * static_cast<double>(targets[bin]);
+      m_last_residual_stats.traversal_summary.spatial_work_per_target[bin] =
+          m_spatial_target_history[bin] > 0.0
+          ? m_spatial_work_history[bin] / m_spatial_target_history[bin] : 0.0;
+    }
+    ++m_spatial_work_history_solves;
+    m_last_residual_stats.traversal_summary.spatial_work_history_solves = m_spatial_work_history_solves;
+  }
+  m_last_residual_stats.traversal_summary.local_traversal = local_owned_targets;
+  m_last_residual_stats.traversal_summary.incoming_traversal = incoming_remote_targets;
   if (tree_profile != nullptr) {
     tree_profile->visited_nodes +=
         local_owned_targets.visited_nodes + incoming_remote_targets.visited_nodes;
     tree_profile->accepted_nodes +=
         local_owned_targets.accepted_nodes + incoming_remote_targets.accepted_nodes;
+    tree_profile->accepted_internal_multipoles += local_owned_targets.accepted_internal_multipoles + incoming_remote_targets.accepted_internal_multipoles;
+    tree_profile->accepted_leaves += local_owned_targets.accepted_leaves + incoming_remote_targets.accepted_leaves;
+    tree_profile->selected_mac_rejections += local_owned_targets.selected_mac_rejections + incoming_remote_targets.selected_mac_rejections;
+    tree_profile->relative_mac_rejections += local_owned_targets.relative_mac_rejections + incoming_remote_targets.relative_mac_rejections;
+    tree_profile->maximum_angle_rejections += local_owned_targets.maximum_angle_rejections + incoming_remote_targets.maximum_angle_rejections;
+    tree_profile->strict_envelope_rejections += local_owned_targets.strict_envelope_rejections + incoming_remote_targets.strict_envelope_rejections;
+    tree_profile->softening_rejections += local_owned_targets.softening_rejections + incoming_remote_targets.softening_rejections;
+    tree_profile->near_node_rejections += local_owned_targets.near_node_rejections + incoming_remote_targets.near_node_rejections;
+    tree_profile->cutoff_containment_rejections += local_owned_targets.cutoff_containment_rejections + incoming_remote_targets.cutoff_containment_rejections;
+    tree_profile->geometric_history_fallbacks += local_owned_targets.geometric_history_fallbacks + incoming_remote_targets.geometric_history_fallbacks;
     tree_profile->opened_nodes +=
         local_owned_targets.opened_nodes + incoming_remote_targets.opened_nodes;
     tree_profile->particle_particle_interactions +=

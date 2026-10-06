@@ -3,8 +3,9 @@
 ## OpenMP concurrency contract
 
 `ProfilerSession` and `CounterRegistry` use per-thread shards. Worker threads
-record scopes, events, byte counts, and counters without a global mutex on each
-operation. The first use by a thread registers its shard under a short mutex;
+record scopes, byte counts, and counters without a global mutex on each
+operation. Control-path operational events use a session-wide bounded ring
+under a short mutex; no event is recorded per node or pair. The first use by a thread registers its shard under a short mutex;
 report generation and reset are quiescent-boundary operations that merge shards
 deterministically after worker activity has joined. `AllocatorStats` uses atomic
 accounting. Callers must not request a report/reset while worker threads are
@@ -350,3 +351,54 @@ Production `AnalysisRuntime` distinguishes rank-local operational state from sha
 Only rank 0 publishes ordinary shared diagnostic JSON/CSV files after those reductions complete, using `.part` then rename transactional publication. Memory reporting preserves publisher-rank local ownership while also exposing distributed rank-sum, rank-max, and imbalance fields; RSS/local ownership is never relabeled as one global process value. Large particle state is not gathered to the publisher.
 
 A correct MPI power spectrum requires a global density field and global/distributed FFT. Until that contract exists, distributed diagnostics record `unsupported_under_mpi_requires_global_density_fft` and publish no averaged rank-local spectrum. Serial power-spectrum behavior is unchanged. Floating reductions retain the repository tolerance-equivalence contract rather than promising bitwise rank-count invariance; integer counts and boolean outcomes are exact.
+
+## P6 force observability and bounded retention (unqualified)
+
+Each `gravity.treepm_let` event reports source preprocessing, identity/hash,
+softening resolution, Morton order, topology, multipoles, node count, depth,
+reuse attempt/result/reason, membership-check time and refit time. Full rebuild
+and refit timings are inclusive; multipole time is a child. They must not be
+added again to inclusive Tree residual phase time.
+
+Local-owned and incoming-target counter families are separate. Accepted
+internal multipoles and accepted leaves are separate; `accepted_nodes` remains
+a compatibility sum. Direct pairs count actual kernel evaluations. Node visits,
+opened nodes, cutoff-pruned nodes/skipped pairs, selected/relative MAC,
+maximum-angle/strict-envelope, softening, near-node and cutoff-containment
+rejections are exposed. Rejection families overlap; opened nodes count unique
+descents. Pair identity remains `combined = local + incoming`.
+
+Aligned worker bundles avoid hot-path atomics and intentional false sharing.
+Current-force nonempty worker-region summaries report target min/max, visit,
+pair and multipole maxima, work-time min/max/sum and region count. Means can be
+computed from aggregate totals / region count. Work time is summed traversal
+work, not force-phase wall time. Fixed 64-bin counters are not a retained
+per-target or per-block history.
+
+PM `total_ms` is inclusive. `assign_ms` includes deposition, routing and
+normalization; `density_routing_wait_ms` is its nested MPI wait. Forward FFT and
+spectral operator are distinct. Each axis exposes factor sweep, inverse FFT and
+normalization; these lie inside `gradient_ms`. `fft_inverse_ms` also includes
+an optional potential inverse. Halo exchange is separately labeled inside PM
+phase; interpolation is inclusive. FFT transpose counters/timers may be nested
+inside FFT time. This is not an additive ledger.
+
+LET retains candidate/export/import peers and targets, geometry fallback reason,
+domain/graph cache hits, wire bytes, communication arena capacity/high-water,
+and exported targets per requested target. Fine hierarchical events use
+`gravity.short_range_force`, `short_range_only=true`, zero PM solve/reuse counts,
+and the actual force-evaluation time/scale factor. Cadence records add
+`active_force_targets` and `short_range_only`; their legacy kick-count field is
+zero for hierarchical force-only surfaces. In the reference force records it
+retains its historical planned-kick-target meaning; traversal target counters
+and `active_force_targets` are the actual force work authority.
+
+Recent operational events are capped at 256, force-cadence records at 256 and
+stage traces at 128 (16 canonical eight-stage sequences). Every stage is still
+audited. Lifetime severity totals and fixed-name work/stage counters survive
+eviction. Operational-report JSON is version 2: `event_count` is lifetime total,
+with retained/evicted counts and retention limit. Ordinary profiler JSON remains
+version 1. `ProfilerSession::events()` now returns recent ordered detail only;
+consumers needing lifetime counts must use severity totals/counters. Retained
+payload/string capacity is included in memory reports; prospective admission of
+each dynamic event payload remains a follow-up limitation.

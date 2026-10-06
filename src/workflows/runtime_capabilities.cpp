@@ -139,14 +139,18 @@ RuntimeCapabilityReport buildRuntimeCapabilityReport(
        .requested = true, .compiled = true, .dependency_available = true,
        .runtime_available = true, .active = config.numerics.hierarchical_max_rung == 0,
        .detail = "Production ReferenceWorkflow KDK with hierarchical_max_rung=0."},
-      {.name = "adaptive_global_timestep", .status = RuntimeCapabilityStatus::kUnsupported,
-       .requested = false, .compiled = false, .dependency_available = true,
-       .runtime_available = false, .active = false,
-       .detail = "Criteria constrain scheduler bins; they do not yet resize the global base interval."},
-      {.name = "production_hierarchical_local_timestep", .status = RuntimeCapabilityStatus::kUnsupported,
-       .requested = config.numerics.hierarchical_max_rung != 0, .compiled = false,
-       .dependency_available = true, .runtime_available = false, .active = false,
-       .detail = "Per-element drift/kick epochs are not yet complete in the production KDK path."},
+      {.name = "adaptive_global_timestep", .status = RuntimeCapabilityStatus::kSupported,
+       .requested = config.numerics.hierarchical_max_rung == 0, .compiled = true,
+       .dependency_available = true, .runtime_available = true,
+       .active = config.numerics.hierarchical_max_rung == 0,
+       .detail = "TimeCoordinator resizes global KDK intervals using collective physical criteria and endpoint/output clipping; local hierarchical integration is a separate optional DMO capability."},
+      {.name = "production_hierarchical_local_timestep", .status = RuntimeCapabilityStatus::kProvisional,
+       .requested = config.numerics.hierarchical_max_rung != 0, .compiled = true,
+       .dependency_available = true, .runtime_available = true,
+       .active = config.numerics.hierarchical_max_rung != 0,
+       .implementation_maturity = RuntimeImplementationMaturity::kReference,
+       .scientific_maturity = RuntimeScientificMaturity::kProvisional,
+       .detail = "Source-implemented synchronized power-of-two DMO KDK with coarse PM endpoint kicks; validation pending, gas/source multirate integration unavailable."},
       {.name = "canonical_external_ic_import",
 #if COSMOSIM_ENABLE_HDF5
        .status = RuntimeCapabilityStatus::kSupported, .requested = !config.mode.ic_file.empty(),
@@ -311,8 +315,7 @@ void validateRequestedRuntimeCapabilities(
     const core::SimulationConfig& config,
     const RuntimeCapabilityReport& report) {
   if (config.numerics.hierarchical_max_rung != 0 &&
-      report.require("production_hierarchical_local_timestep").status !=
-          RuntimeCapabilityStatus::kSupported) {
+      !report.require("production_hierarchical_local_timestep").runtime_available) {
     throw std::invalid_argument(
         "runtime capability production_hierarchical_local_timestep is unsupported: " +
         report.require("production_hierarchical_local_timestep").detail);

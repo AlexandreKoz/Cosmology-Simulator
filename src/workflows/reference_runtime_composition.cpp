@@ -51,7 +51,7 @@ class DriftRuntime final {
     core::StepContext& context = RuntimeStageAccess::driftContext(
         view,
         {{RuntimeResourceKey::kParticlePosition, RuntimeResourceAccessMode::kReadWrite},
-         {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kRead},
+         {RuntimeResourceKey::kParticleVelocity, RuntimeResourceAccessMode::kReadWrite},
          {RuntimeResourceKey::kMigrationOwnership, RuntimeResourceAccessMode::kRead}});
     if (context.stage != core::IntegrationStage::kDrift) {
       throw std::logic_error("drift task received a non-drift stage");
@@ -79,6 +79,14 @@ class DriftRuntime final {
           context.state.particles.velocity_y_peculiar[particle_index] * drift_factor;
       context.state.particles.position_z_comoving[particle_index] +=
           context.state.particles.velocity_z_peculiar[particle_index] * drift_factor;
+
+      if (context.hierarchical_kdk.enabled) {
+        // Canonical p=a*u remains fixed under the drift operator.
+        const double drag = context.timeline_step.hubble_drag_factor;
+        context.state.particles.velocity_x_peculiar[particle_index] *= drag;
+        context.state.particles.velocity_y_peculiar[particle_index] *= drag;
+        context.state.particles.velocity_z_peculiar[particle_index] *= drag;
+      }
 
       // Canonical particle coordinates in a periodic cosmological domain must
       // remain in [0,L). Gravity/decomposition already use periodic-equivalent
@@ -282,7 +290,7 @@ namespace {
           .ordinal = 0,
           .view_kind = RuntimeStageViewKind::kDriftParticles,
           .resources = {readWrite(RuntimeResourceKey::kParticlePosition),
-                        read(RuntimeResourceKey::kParticleVelocity),
+                        readWrite(RuntimeResourceKey::kParticleVelocity),
                         read(RuntimeResourceKey::kMigrationOwnership)},
           .dependencies = {"gravity::gravity.gravity_kick_pre"},
           .scheduling = schedulingProfile(

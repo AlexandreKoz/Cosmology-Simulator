@@ -416,3 +416,35 @@ authoritative ID population. Full source metadata, AMR geometry/ghost/flux
 coexistence, and all writer/readback metadata remain incomplete owner models.
 The existing serial dispatcher, local physical leases, incomplete-contract
 overlap refusal, and external-runtime reserve remain authoritative.
+
+## P6 owners and coexistence (source only)
+
+The process ceiling and existing governor remain authoritative. New optional
+owners coexist with compact records/migration, PM/spectral storage, tree lanes,
+worker DFS scratch and the communication arena; none supplies a separate cap.
+
+| Owner | Scale / element | Capacity and lifetime | Admission / coexistence |
+| --- | --- | --- | --- |
+| Gravity runtime Tree/PM split caches | six double lanes + uint64 generation = 56 bytes/local particle; two PM identity scalars | Only hierarchy; retained across fine solves, invalidated by migration | Both shared gravity estimates and phase reservations include 56N; actual vector capacities reconciled. Coexists with existing total-force history. |
+| Scheduler hierarchy | existing byte/uint64/size_t/candidate/member lanes; typically 33 bytes/particle live, ABI dependent | Enabled max rung >0; exact bin occupancy reserves; retained capacities governed | Initial process reservation models lanes/bin tables; subsequent bin changes use RetainedCapacityTransaction. Migration uses existing generic bounded transaction. |
+| DMO bin mirror | one uint8/local particle | Allocated for hierarchy; uniform species/owner/drift remain scalar | Existing state owner, initial and block capacity transactions; not scheduler truth. |
+| Timeline | 8193 doubles maximum, 65544 bytes | Stack during one hierarchical block | PhaseResident reservation precedes entry; coexists with solve and endpoint publication. |
+| Tree refit certificate | four root doubles plus unwrap/frame/identity scalars | Solver/coordinator lifetime | O(1); existing coordinate and node lanes reused; no second tree/N scratch. |
+| Worker counters | `sizeof(TreePmTraversalCounters)` per worker, alignas(64), includes two 64-bin uint64 arrays | Current force / retained bounded worker workspace | Shared worker estimate uses actual sizeof; existing bounded DFS scratch and arena. |
+| Spatial EMA | two 64-double arrays plus bounded current-force/planner views | Coordinator lifetime | Fixed feedback estimate/report entries; no population/run-length owner. |
+| Cadence detail | at most 256 records with three control-path strings each | Recent history + bounded final report copy | Gravity phase model includes warm capacity; actual record/string capacities reported. |
+| Operational events | 256 recent records; bounded merged report view | Profiler lifetime | Source capacity model includes strings/map buckets/nodes and lifetime scalar counts. Per-event prospective admission is not implemented. |
+| Stage audit | at most 128 stage-name strings plus lifetime scalar | Workflow report lifetime | Bounded; small control metadata uses existing process/allocator reserve, not a new allocator or cap. |
+
+Hierarchy uses existing uint32 identity scratch for all-source drift, explicitly
+admitted by the workspace arena. Reports include its governed commitment and
+exclude it from baseline owned bytes, avoiding double reservation. No full tree
+or PM mesh per worker, gas-zero owners or homogeneous cold lanes are restored.
+
+Finite resulting-rank fit is still stronger than compact planner transient fit.
+P6 admits new scheduler/force owners at materialization and reconciles runtime
+process baseline, but does not add a predictive full resulting-rank live-set
+model to SFC cuts. Oversized future ranks can still be rejected at runtime.
+Qualification must exercise simultaneous planner, migration, hierarchy, PM,
+Tree, arena and output/restart peaks under finite budgets; allocator/backend
+unknowns retain existing reserves. These are limitations, not a 256^3 fit claim.
