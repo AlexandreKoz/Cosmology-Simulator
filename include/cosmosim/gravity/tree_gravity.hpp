@@ -59,6 +59,29 @@ struct TreeGravityProfile {
   std::uint64_t node_capacity_high_water = 0;
   double morton_ordering_ms = 0.0;
   double topology_build_ms = 0.0;
+  double source_identity_ms = 0.0;
+  double source_softening_ms = 0.0;
+  std::uint64_t source_identity_used_generation = 0;
+  std::uint64_t maximum_depth = 0;
+  std::uint64_t accepted_internal_multipoles = 0;
+  std::uint64_t accepted_leaves = 0;
+  std::uint64_t selected_mac_rejections = 0;
+  std::uint64_t relative_mac_rejections = 0;
+  std::uint64_t maximum_angle_rejections = 0;
+  std::uint64_t strict_envelope_rejections = 0;
+  std::uint64_t softening_rejections = 0;
+  std::uint64_t near_node_rejections = 0;
+  std::uint64_t cutoff_containment_rejections = 0;
+  std::uint64_t geometric_history_fallbacks = 0;
+  std::uint64_t reuse_attempted = 0;
+  std::uint64_t reuse_accepted = 0;
+  // 0=disabled; 1=no valid tree; 2=source identity changed/unavailable;
+  // 3=ownership/frame changed; 4=build options/softening changed; 5=identical reuse;
+  // 6=certified motion refit; 7=original leaf escape; 8=row layout unknown/changed.
+  std::uint64_t rebuild_reason = 0;
+  double full_rebuild_ms = 0.0;  // inclusive periodic prep + build + multipoles
+  double topology_validity_ms = 0.0;
+  double refit_ms = 0.0;
 };
 
 // Compact SoA tree node representation with fixed 8-way child fanout sidecars.
@@ -165,8 +188,21 @@ class TreeGravitySolver {
       GravitySourceGeneration source_generation = {}) const;
 
   [[nodiscard]] const TreeNodeSoa& nodes() const;
+  // Motion refit preserves the legal leaf permutation and clears logical
+  // Morton keys; keys describe a full build, never current refitted positions.
   [[nodiscard]] const TreeMortonOrdering& ordering() const;
   [[nodiscard]] TreeBuildGeneration treeBuildGeneration() const noexcept;
+  [[nodiscard]] bool canReuseIdenticalSource(
+      std::size_t source_count, GravitySourceGeneration generation,
+      const TreeGravityOptions& options) const noexcept;
+  // Caller must certify unchanged dense source-row membership/ownership and
+  // coordinate frame. Motion is admitted only inside the original octant leaf
+  // cells, reconstructed from the build root and child slots without a sidecar.
+  // A failed membership check leaves the tree untouched; a successful refit
+  // refreshes bounding cubes and all moments before publishing the generation.
+  [[nodiscard]] bool refitWithinOriginalLeafCells(
+      const TreeGravitySourceView& sources, const TreeGravityOptions& options,
+      TreeGravityProfile* profile = nullptr);
   // Build-time resolved source softening. Uniform source populations retain
   // one scalar; heterogeneous policies retain the exact materialized lane.
   // Worker-safe residual evaluation consumes this representation-aware view
@@ -229,6 +265,10 @@ class TreeGravitySolver {
   TreeMultipoleOrder m_build_multipole_order = TreeMultipoleOrder::kMonopole;
   std::size_t m_build_max_leaf_size = 0;
   TreeSofteningPolicy m_build_softening{};
+  double m_topology_root_x = 0.0;
+  double m_topology_root_y = 0.0;
+  double m_topology_root_z = 0.0;
+  double m_topology_root_half_size = 0.0;
   std::size_t m_construction_source_count = 0U;
   bool m_construction_in_progress = false;
   bool m_build_valid = false;

@@ -262,6 +262,14 @@ class HierarchicalTimeBinScheduler {
 
   std::span<const std::uint32_t> beginSubstep();
   void endSubstep();
+  // Close an all-active aligned block endpoint without advancing its tick.
+  // Every interval is closed; next block may change bins and reopen here.
+  void closeSynchronizationPoint();
+  // Reconcile an entire closed aligned block using already-submitted physical
+  // candidates. Reserve exact bin occupancies before changing membership;
+  // reuse the existing candidate lane, without another N-element bin array.
+  void planSynchronizedCandidateCapacity(RetainedCapacityTransaction& plan);
+  void commitSynchronizedCandidates();
 
   [[nodiscard]] const TimeBinHotMetadata& hotMetadata() const noexcept;
   [[nodiscard]] const TimeBinDiagnostics& diagnostics() const noexcept;

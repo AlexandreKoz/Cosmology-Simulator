@@ -1,5 +1,22 @@
 # Repair open issues
 
+## P6 qualification pending — campaign label 20261006
+
+P6 is source implementation only. No P6 subsystem has new validation evidence.
+Both conservative motion refit and hierarchical DMO KDK now have optional
+source paths; neither is certified. Required gates are in
+[p6_validation_campaign_plan_20261006.md](repair/p6_validation_campaign_plan_20261006.md).
+
+Remaining implementation scope: gas/source multirate KDK needs a coupled
+hydro/source synchronization law; motion refit deliberately rejects unknown
+row identity and heterogeneous softening; spatial feedback is cold after
+restart; duplicate owner discovery is retained to avoid population-scale
+peer storage or a protocol rewrite. Deposition/FFTW threading and resulting-rank
+process-fit prediction remain deferred. Bounded event payload memory is
+reported but does not have prospective per-event admission. New defaults stay
+conservative. These statements supersede earlier roadmap intent, not earlier
+independent qualification evidence.
+
 > **Historical / non-authoritative.** This document records an earlier campaign state. Use [`CURRENT_STATUS.md`](../CURRENT_STATUS.md) for current repository truth.
 
 

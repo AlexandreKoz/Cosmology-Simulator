@@ -664,3 +664,26 @@ The existing `MemoryGovernor` is the only budget authority. The runtime registry
 For an all-rank-proven homogeneous-DMO state with a uniform-rung-zero particle scheduler and no heterogeneous sidecar/softening/AMR exception, migration now has a distinct `compact_homogeneous_dmo` transaction representation. Decomposition `item_index` is the authoritative local-row selector; compact scalar metadata remains transaction-level truth and is communicator-consensus checked. The transaction streams fixed DMO wire records directly from canonical rows into a compact candidate, validates before publication, then commits by swap while preserving compact metadata and existing generation invalidation semantics. Unsupported states continue through `generic_full_physics` and the existing `ParticleMigrationRecord`/AMR compatibility transaction.
 
 Exact global ownership validation remains authoritative but is now a hard-bounded derived diagnostic: deterministic hash-owner/radix buckets are refined until each exact sort/compare fits the 64 MiB/rank workspace contract. `ExactOwnershipPartitionReport` owns exact duplicate/missing/extra counts plus bounded diagnostic samples; compact-DMO callers borrow the canonical particle-ID lane rather than materializing an N-sized ID copy.
+
+## P6 optional authority additions (source only, qualification pending)
+
+Scheduler remains the sole bin/activation/active-set authority. Hierarchical
+quantum and coarse endpoint belong to IntegratorState/CosmologicalTimeline;
+transient StepContext factors describe one operator surface. Sources are all
+drifted to each fine epoch, and SimulationState advances source generation once.
+Uniform DMO drift epoch remains scalar. The optional particle bin byte lane is a
+mirror, not an independent clock.
+
+Gravity runtime owns derived PM/Tree component caches. Tree kicks require the
+row's exact current source generation and row identity; PM endpoint kicks also
+require its source generation and committed PM version. Previous total force is
+only a MAC scale and cannot authorize a kick. Fine cached MAC scales may combine
+fine Tree and coarse PM components. Migration invalidates row identity; mandatory
+coarse bootstrap reconstructs split caches in normal and restart paths.
+
+Tree solver retains original octant geometry/membership as a refit certificate;
+coordinator owns fixed periodic unwrap/frame and source-layout checks. Refitted
+bounds/moments publish a new build generation only when complete. P2 routing
+geometry continues to refresh from canonical current sources independently of
+ownership. Spatial work EMA and profiler rings are bounded derived diagnostics;
+spatial history is cold after restart and is not force truth.

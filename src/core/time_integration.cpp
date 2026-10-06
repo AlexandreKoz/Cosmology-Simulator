@@ -1318,6 +1318,225 @@ void StepOrchestrator::executeSingleStepWithDispatcher(
   }
 }
 
+void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
+    SimulationState& state, IntegratorState& integrator,
+    HierarchicalTimeBinScheduler& particles, HierarchicalTimeBinScheduler& cells,
+    const StageDispatchFunction& dispatcher, const LambdaCdmBackground* background,
+    TransientStepWorkspace& workspace, const ModePolicy* mode_policy,
+    ProfilerSession* profiler,
+    const std::function<void(std::exception_ptr, std::string_view)>& preparation_failure_sync) const {
+  // Core owns the operator; the workflow supplies its existing collective
+  // failure authority. No rank may enter the next solver collective after a
+  // peer failed local scheduler/timeline preparation.
+  const auto prepare = [&](std::string_view phase, auto&& operation) {
+    std::exception_ptr failure;
+    try { operation(); } catch (...) { failure = std::current_exception(); }
+    if (preparation_failure_sync) preparation_failure_sync(failure, phase);
+    else if (failure) std::rethrow_exception(failure);
+  };
+  std::uint64_t periods = 0U;
+  std::uint64_t start_tick = 0U;
+  std::uint64_t source_begin = 0U;
+  CosmologicalStepFactors coarse{};
+  const CosmologicalTimeline timeline(background, integrator.time_si_per_code);
+  std::array<double, k_hierarchical_timeline_capacity> scale{};
+  const auto all_rows = std::span<const std::uint32_t>(workspace.gravity_particle_index_scratch);
+  std::span<const std::uint32_t> active;
+  prepare("hierarchical block timeline and scheduler preparation", [&] {
+    if (particles.maxBin() == 0U || particles.maxBin() > 12U ||
+        cells.maxBin() != particles.maxBin() || cells.elementCount() != 0U ||
+        state.cells.size() != 0U || !state.hasHomogeneousDmoMetadata() ||
+        particles.elementCount() != state.particles.size() ||
+        particles.currentTick() != cells.currentTick() || integrator.inside_kdk_step) {
+      throw std::logic_error("hierarchical KDK requires synchronized homogeneous DMO scheduler/state");
+    }
+    periods = particles.binPeriodTicks(particles.maxBin());
+    start_tick = particles.currentTick();
+    if (start_tick % periods != 0U || start_tick > std::numeric_limits<std::uint64_t>::max() - periods ||
+        state.gravitySourceGeneration() >= std::numeric_limits<std::uint64_t>::max() - periods) {
+      throw std::overflow_error("hierarchical KDK block is unaligned or its epoch would overflow");
+    }
+    coarse = timeline.prepareStep(integrator.current_time_code,
+        integrator.current_scale_factor, integrator.dt_time_code * static_cast<double>(periods));
+    source_begin = state.gravitySourceGeneration();
+    // Bounded by maxBin<=12, independent of N. The workflow reserves this stack
+    // live set through the process MemoryGovernor before entering this method.
+    scale[0] = coarse.scale_factor_begin;
+    for (std::size_t half_tick = 1U; half_tick < 2U * periods; ++half_tick) {
+      scale[half_tick] = background != nullptr
+          ? advanceScaleFactorByCosmicTime(*background, coarse.scale_factor_begin,
+              0.5 * static_cast<double>(half_tick) * integrator.dt_time_code * integrator.time_si_per_code)
+          : coarse.scale_factor_begin;
+    }
+    scale[2U * periods] = coarse.scale_factor_end;
+    for (std::size_t i = 1U; i <= 2U * periods; ++i) {
+      if (!std::isfinite(scale[i]) || scale[i] <= 0.0 || scale[i] < scale[i - 1U]) {
+        throw std::runtime_error("hierarchical cosmological timeline is not finite positive monotonic");
+      }
+    }
+    if (all_rows.size() != state.particles.size()) throw std::logic_error("hierarchical drift identity scratch is not admitted");
+    integrator.inside_kdk_step = true;
+    integrator.last_completed_restart_safe = false;
+    active = particles.beginSubstep();
+    static_cast<void>(cells.beginSubstep());
+    if (active.size() != all_rows.size()) throw std::logic_error("block start is not all-active");
+  });
+  const auto kick_integral = [&](std::size_t begin, std::size_t end, double a_now) {
+    // dp/dt=A/a. Store u=p/a at the COMMON current position epoch, so kick
+    // increments are integral(dt/a)/a_now, without a separate Hubble drag.
+    return background != nullptr
+        ? computeComovingDriftFactor(*background, scale[begin], scale[end], 64U) /
+            (integrator.time_si_per_code * a_now)
+        : 0.5 * static_cast<double>(end - begin) * integrator.dt_time_code;
+  };
+  try {
+    for (std::uint64_t offset = 0U; offset < periods; ++offset) {
+      StepContext context{.state = state, .integrator_state = integrator};
+      prepare("hierarchical opening kick preparation", [&] {
+        const double a_begin = scale[2U * offset];
+        const double a_end = scale[2U * (offset + 1U)];
+        CosmologicalStepFactors fine = coarse;
+        fine.time_begin_code = coarse.time_begin_code + static_cast<double>(offset) * integrator.dt_time_code;
+        fine.time_end_code = offset + 1U == periods ? coarse.time_end_code
+            : coarse.time_begin_code + static_cast<double>(offset + 1U) * integrator.dt_time_code;
+        fine.dt_time_code = fine.time_end_code - fine.time_begin_code;
+        if (!(fine.dt_time_code > 0.0) || !std::isfinite(fine.dt_time_code)) {
+          throw std::runtime_error("hierarchical fine interval is not finite positive representable");
+        }
+        fine.dt_time_si = fine.dt_time_code * integrator.time_si_per_code;
+        fine.scale_factor_begin = a_begin;
+        fine.scale_factor_midpoint = scale[2U * offset + 1U];
+        fine.scale_factor_end = a_end;
+        fine.redshift_begin = 1.0 / a_begin - 1.0;
+        fine.redshift_end = 1.0 / a_end - 1.0;
+        fine.hubble_begin_code = background != nullptr ? background->hubbleSi(a_begin) * integrator.time_si_per_code : 0.0;
+        fine.hubble_end_code = background != nullptr ? background->hubbleSi(a_end) * integrator.time_si_per_code : 0.0;
+        fine.hubble_drag_factor = a_begin / a_end;
+        // D: x += p integral(dt/a^2). Since u=p/a_begin, multiply that
+        // integral by a_begin. This retains exact free Hubble drag in D.
+        if (background != nullptr) {
+          constexpr std::uint32_t k_samples = 64U;
+          const double da = (a_end - a_begin) / k_samples;
+          double drift = 0.0;
+          for (std::uint32_t sample = 0U; sample < k_samples; ++sample) {
+            const double a = a_begin + (static_cast<double>(sample) + 0.5) * da;
+            drift += 1.0 / (a * a * a * background->hubbleSi(a));
+          }
+          fine.drift_factor_code = a_begin * drift * da / integrator.time_si_per_code;
+        } else fine.drift_factor_code = fine.dt_time_code;
+        context.active_set = makeSchedulerActiveSetDescriptor(particles, state, active, {});
+        context.active_gravity_particles = {};
+        context.has_active_gravity_particles = false;
+        context.workspace = &workspace;
+        context.cosmology_background = background;
+        context.mode_policy = mode_policy;
+        context.profiler_session = profiler;
+        context.timeline_step = fine;
+
+        context.hierarchical_kdk.enabled = true;
+        context.hierarchical_kdk.coarse_source_generation = source_begin;
+        context.hierarchical_kdk.evaluation_tick = particles.currentTick();
+        context.active_set.has_global_synchronization_metadata = true;
+        context.active_set.globally_complete_active_set = offset == 0U;
+        context.boundary = {.kind = StepBoundaryKind::kLocalActiveBinStep,
+            .restart_safe = false, .output_safe = false, .pm_refresh_allowed = false, .local_substep = true};
+        integrator.current_boundary_kind = context.boundary.kind;
+        for (std::uint8_t bin = 0U; bin <= particles.maxBin(); ++bin) {
+          const auto period = particles.binPeriodTicks(bin);
+          if (offset % period == 0U) context.hierarchical_kdk.tree_kick_factor_code[bin] =
+              kick_integral(2U * offset, 2U * offset + period, a_begin);
+        }
+        if (offset == 0U) context.hierarchical_kdk.pm_kick_factor_code = kick_integral(0U, periods, a_begin);
+        context.stage = IntegrationStage::kGravityKickPre;
+      });
+      dispatcher(context, false);
+      prepare("hierarchical all-source drift preparation", [&] {
+        particles.endSubstep();
+        cells.endSubstep();
+        context.stage = IntegrationStage::kDrift;
+        context.active_set = {.particle_indices = all_rows, .cell_indices = {}};
+        context.active_gravity_particles = buildGravityParticleKernelViewAllParticlesDirect(state, workspace);
+        context.has_active_gravity_particles = true;
+      });
+      dispatcher(context, false);
+      prepare("hierarchical closing force preparation", [&] {
+        state.bumpGravitySourceGeneration();
+        state.updateAllParticleDriftEpoch(context.timeline_step.time_end_code, context.timeline_step.scale_factor_end);
+        if (state.gravitySourceGeneration() != source_begin + offset + 1U) {
+          throw std::logic_error("hierarchical source epoch changed outside the authorized all-source drift");
+        }
+        active = particles.beginSubstep();
+        static_cast<void>(cells.beginSubstep());
+        context.active_set = makeSchedulerActiveSetDescriptor(particles, state, active, {});
+        context.active_set.has_global_synchronization_metadata = true;
+        context.active_set.globally_complete_active_set = offset + 1U == periods;
+        context.has_active_gravity_particles = false;
+        context.hierarchical_kdk.evaluation_tick = particles.currentTick();
+        context.hierarchical_kdk.synchronization_end = offset + 1U == periods;
+        context.hierarchical_kdk.include_long_range_force = offset + 1U == periods;
+        context.hierarchical_kdk.tree_kick_factor_code.fill(0.0);
+        for (std::uint8_t bin = 0U; bin <= particles.maxBin(); ++bin) {
+          const auto period = particles.binPeriodTicks(bin);
+          if ((offset + 1U) % period == 0U) context.hierarchical_kdk.tree_kick_factor_code[bin] =
+              kick_integral(2U * (offset + 1U) - period, 2U * (offset + 1U), context.timeline_step.scale_factor_end);
+        }
+        context.hierarchical_kdk.pm_kick_factor_code = offset + 1U == periods
+            ? kick_integral(periods, 2U * periods, context.timeline_step.scale_factor_end) : 0.0;
+        context.boundary.pm_refresh_allowed = offset + 1U == periods;
+        context.pm_refresh_directive = {.force_refresh_surface = true,
+            .cadence_opportunity_allowed = offset + 1U == periods,
+            .sync_event_requested = offset + 1U == periods,
+            .force_evaluation_scale_factor = context.timeline_step.scale_factor_end,
+            .reason = PmRefreshDirective::Reason::kScheduledForceRefreshStage};
+        context.stage = IntegrationStage::kForceRefresh;
+      });
+      dispatcher(context, false);
+      prepare("hierarchical PM endpoint commit", [&] {
+        if (context.pm_refresh_directive.has_sync_event) {
+          const auto& d = context.pm_refresh_directive;
+          if (!d.solver_executed || !d.refresh_long_range_field) throw std::logic_error("coarse PM endpoint did not refresh");
+          const PmSyncEvent event{d.gravity_kick_opportunity, d.refresh_long_range_field,
+              d.field_version, d.last_refresh_opportunity, d.field_built_step_index, d.field_built_scale_factor};
+          integrator.pm_sync_state.commitKickOpportunity(event);
+          integrator.pm_sync_state.commitRefresh(event);
+          integrator.pm_long_range_field_valid = true;
+          integrator.pm_source_generation = state.gravitySourceGeneration();
+        }
+        context.pm_refresh_directive = {};
+        context.stage = IntegrationStage::kHydroUpdate;
+      });
+      dispatcher(context, false);
+      context.stage = IntegrationStage::kSourceTerms;
+      dispatcher(context, false);
+      context.stage = IntegrationStage::kGravityKickPost;
+      dispatcher(context, false);
+      prepare("hierarchical synchronization commit", [&] {
+        context.stage = IntegrationStage::kAnalysisHooks;
+        if (offset + 1U == periods) {
+          particles.closeSynchronizationPoint();
+          cells.closeSynchronizationPoint();
+          integrator.inside_kdk_step = false;
+          timeline.commitStep(integrator, coarse);
+          integrator.current_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
+          integrator.last_completed_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
+          integrator.last_completed_restart_safe = true;
+          state.metadata.step_index = integrator.step_index;
+          state.metadata.scale_factor = integrator.current_scale_factor;
+          context.boundary = {.kind = StepBoundaryKind::kGlobalSynchronizationPoint};
+        }
+      });
+      dispatcher(context, false);
+      context.stage = IntegrationStage::kOutputCheck;
+      dispatcher(context, offset + 1U == periods);
+    }
+  } catch (...) {
+    integrator.inside_kdk_step = false;
+    integrator.last_completed_restart_safe = false;
+    integrator.current_boundary_kind = StepBoundaryKind::kLocalActiveBinStep;
+    throw;
+  }
+}
+
 void TimeStepCriteriaRegistry::registerCflHook(CriteriaHook hook) { m_hooks.cfl_hook = std::move(hook); }
 
 void TimeStepCriteriaRegistry::registerGravityHook(CriteriaHook hook) { m_hooks.gravity_hook = std::move(hook); }
@@ -1417,6 +1636,7 @@ void HierarchicalTimeBinScheduler::reset(
     m_candidate_source.assign(element_count, TimeStepCandidateSource::kUserClamp);
     m_position_in_bin.resize(element_count, 0);
     m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
+    m_elements_by_bin[clamped_bin].reserve(element_count);
     for (std::uint32_t element = 0; element < element_count; ++element) {
       m_position_in_bin[element] = m_elements_by_bin[clamped_bin].size();
       m_elements_by_bin[clamped_bin].push_back(element);
@@ -1794,6 +2014,82 @@ void HierarchicalTimeBinScheduler::endSubstep() {
 #endif
 }
 
+void HierarchicalTimeBinScheduler::planSynchronizedCandidateCapacity(RetainedCapacityTransaction& plan) {
+  if (m_substep_open || m_current_tick % binPeriodTicks(m_max_bin) != 0U || m_max_bin > 12U) {
+    throw std::logic_error("block bin assignment requires closed aligned scheduler authority");
+  }
+  std::array<std::size_t, 13U> counts{};
+  for (std::uint32_t row = 0U; row < m_element_count; ++row) {
+    const auto bin = m_candidate_bin_index[row];
+    if (bin == k_unset_pending_bin || bin > m_max_bin ||
+        m_hot.next_activation_tick[row] != m_current_tick || m_hot.active_flag[row] != 0U ||
+        m_hot.pending_bin_index[row] != k_unset_pending_bin) {
+      throw std::logic_error("synchronized bin assignment has incomplete candidates or an open particle interval");
+    }
+    ++counts[bin];
+  }
+  for (std::uint8_t bin = 0U; bin <= m_max_bin; ++bin) plan.add(m_elements_by_bin[bin], counts[bin]);
+  plan.add(m_active_elements, m_element_count);
+  plan.add(m_active_sort_scratch, m_element_count);
+}
+
+void HierarchicalTimeBinScheduler::commitSynchronizedCandidates() {
+  if (m_substep_open || m_current_tick % binPeriodTicks(m_max_bin) != 0U) {
+    throw std::logic_error("synchronized bin commit is outside its legal boundary");
+  }
+  std::array<std::size_t, 13U> counts{};
+  if (m_max_bin > 12U) throw std::logic_error("block bin commit exceeds bounded hierarchy");
+  for (std::uint32_t row = 0U; row < m_element_count; ++row) {
+    const auto bin = m_candidate_bin_index[row];
+    if (bin == k_unset_pending_bin || bin > m_max_bin ||
+        m_hot.active_flag[row] != 0U || m_hot.next_activation_tick[row] != m_current_tick ||
+        m_hot.pending_bin_index[row] != k_unset_pending_bin) {
+      throw std::logic_error("block bin candidate is missing or its interval is open");
+    }
+    ++counts[bin];
+  }
+  if (m_active_elements.capacity() < m_element_count || m_active_sort_scratch.capacity() < m_element_count) {
+    throw std::logic_error("block active-set storage was not admitted");
+  }
+  for (std::uint8_t bin = 0U; bin <= m_max_bin; ++bin) {
+    if (counts[bin] > m_elements_by_bin[bin].capacity()) throw std::logic_error("block bin storage was not admitted");
+    m_elements_by_bin[bin].clear();
+  }
+  for (std::uint32_t row = 0U; row < m_element_count; ++row) {
+    const auto bin = m_candidate_bin_index[row];
+    auto& members = m_elements_by_bin[bin];
+    m_position_in_bin[row] = members.size();
+    members.push_back(row);
+    m_hot.bin_index[row] = bin;
+    m_hot.next_activation_tick[row] = m_current_tick;
+    m_hot.pending_bin_index[row] = k_unset_pending_bin;
+    m_candidate_bin_index[row] = k_unset_pending_bin;
+    m_candidate_source[row] = TimeStepCandidateSource::kUserClamp;
+  }
+  m_last_reconciliation = {};
+  refreshOwnedCapacityHighWater();
+  validateInternalState("HierarchicalTimeBinScheduler::commitSynchronizedCandidates");
+}
+
+void HierarchicalTimeBinScheduler::closeSynchronizationPoint() {
+  if (!m_substep_open || m_current_tick % binPeriodTicks(m_max_bin) != 0U ||
+      m_active_elements.size() != m_element_count) {
+    throw std::logic_error("scheduler block closure requires an open aligned all-active synchronization point");
+  }
+  if (m_representation != SchedulerRepresentation::kUniformRungZero) {
+    for (const auto row : m_active_elements) {
+      if (m_hot.pending_bin_index[row] != k_unset_pending_bin ||
+          m_candidate_bin_index[row] != k_unset_pending_bin) {
+        throw std::logic_error("block closure cannot discard an uncommitted bin transition");
+      }
+      m_hot.active_flag[row] = 0U;
+      m_hot.next_activation_tick[row] = m_current_tick;
+    }
+  }
+  m_substep_open = false;
+  validateInternalState("HierarchicalTimeBinScheduler::closeSynchronizationPoint");
+}
+
 const TimeBinHotMetadata& HierarchicalTimeBinScheduler::hotMetadata() const noexcept { return m_hot; }
 
 const TimeBinDiagnostics& HierarchicalTimeBinScheduler::diagnostics() const noexcept { return m_diagnostics; }
@@ -1987,6 +2283,11 @@ void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistent
   m_elements_by_bin.assign(static_cast<std::size_t>(m_max_bin) + 1U, {});
   m_position_in_bin.assign(m_hot.bin_index.size(), 0);
 
+  std::array<std::size_t, 256U> import_occupancy{};
+  for (const auto bin : m_hot.bin_index) ++import_occupancy[clampBin(bin)];
+  for (std::size_t bin = 0U; bin < m_elements_by_bin.size(); ++bin) {
+    m_elements_by_bin[bin].reserve(import_occupancy[bin]);
+  }
   for (std::size_t element_index = 0; element_index < m_hot.bin_index.size(); ++element_index) {
     const std::uint8_t bin = clampBin(m_hot.bin_index[element_index]);
     m_hot.bin_index[element_index] = bin;
@@ -2628,7 +2929,12 @@ void syncTimeBinMirrorsFromScheduler(
     SimulationState& state,
     TimeBinMirrorDomain domain) {
   auto sync_particles = [&]() {
-    if (state.hasHomogeneousDmoMetadata()) return;
+    if (state.hasHomogeneousDmoMetadata() && scheduler.maxBin() == 0U && state.particles.time_bin.empty()) return;
+    // A heterogeneous scheduler needs only the existing one-byte bin mirror;
+    // uniform species/ownership/drift metadata remains physically compact.
+    if (state.hasHomogeneousDmoMetadata() && state.particles.time_bin.empty()) {
+      state.particles.time_bin.resize(state.particles.size(), 0U);
+    }
     if (scheduler.elementCount() < state.particles.size()) {
       throw std::invalid_argument("syncTimeBinMirrorsFromScheduler: scheduler lacks particle bin entries");
     }

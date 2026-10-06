@@ -27,6 +27,12 @@ class MemoryGovernor;
 namespace cosmosim::parallel {
 
 struct DecompositionConfig;
+inline constexpr std::size_t k_spatial_work_bin_count = 64U;
+// Decomposition uses 10 bits/axis (30 total), independent of tree Morton
+// ordering. The six most significant bits select 4x4x4 coarse SFC regions.
+[[nodiscard]] inline std::size_t spatialWorkBinForSfcKey(std::uint64_t key) noexcept {
+  return static_cast<std::size_t>((key >> 24U) & 63U);
+}
 
 enum class DecompositionEntityKind : std::uint8_t {
   kParticle = 0,
@@ -486,6 +492,13 @@ struct DecompositionRuntimeMeasurements {
   double gpu_kernel_ms_recent = 0.0;
   double accelerator_occupancy_fraction_recent = 0.0;
   bool has_measurements = false;
+  bool has_spatial_tree_work = false;
+  // Decayed global work per local-target activation in fixed spatial bins.
+  // One unit = one node visit or one actual leaf-pair evaluation. These are
+  // deterministic operation counts, not milliseconds; coefficients remain
+  // policy weights. Incoming service work retains rank-total feedback.
+  std::array<double, k_spatial_work_bin_count> spatial_tree_work_per_target{};
+  std::uint64_t incoming_tree_pair_evaluations_recent = 0;
 };
 
 struct DecompositionFeedbackCoefficients {

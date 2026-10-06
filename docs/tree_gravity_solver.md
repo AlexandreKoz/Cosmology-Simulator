@@ -216,3 +216,27 @@ The isolated integration thresholds remain `max_relative_error < 0.02` and
 `mean_relative_error < 0.01` for the tight opening in the covered fixtures.
 These are regression limits for those tests, not a universal astrophysical
 force-error guarantee.
+
+## P6 construction and optional motion refit
+
+Source implementation only; validation pending. Independent Morton-key/index
+preparation is OpenMP static. Root multipole branches are disjoint and joined
+before the parent sum; each subtree retains its existing source/octant sum
+order. There is no per-worker tree, source/node atomics, or new level table.
+
+`refitWithinOriginalLeafCells` requires the caller to certify unchanged dense
+row identity/ownership and coordinate frame. It checks all rows against the
+original octant cells using strict inequalities, rejecting boundary ambiguity,
+nonfinite/negative mass, unavailable/regressed/saturated generation, count or
+build-policy changes, and nonuniform softening. Before membership succeeds,
+node state is untouched. During refit the tree is invalid, so a failed moment
+refresh cannot expose partial truth. Existing cubes are refitted in reverse
+preorder, with outward rounding, then all moments refreshed. Original root
+geometry remains a four-scalar membership certificate. There is no second tree
+or N-sized identity history. `ordering().morton_key` is empty after motion refit;
+`sorted_particle_index` is retained legal leaf membership. Full build repopulates
+Morton keys using existing shared construction lanes. These are additive public
+interfaces; ordinary full-build callers preserve their contracts.
+
+The workflow-owned opt-ins and periodic-frame checks are documented in
+`docs/tree_pm_coupling.md`; default behavior remains full rebuild.

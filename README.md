@@ -1,5 +1,11 @@
 # CHUÍ
 
+P6 optional performance/integration architecture is **SOURCE-IMPLEMENTED /
+VALIDATION PENDING**. Conservative defaults remain in effect. Read the
+[implementation report](docs/repair/p6_preproduction_performance_architecture_implementation_20261006.md)
+before enabling new modes; the [qualification campaign](docs/repair/p6_validation_campaign_plan_20261006.md)
+has not been executed.
+
 CHUÍ is a desktop-first and small-cluster-first cosmological simulation framework written in C++20. 
 
 The project is designed to maximize scientifically useful cosmological simulation capability under explicit memory and reproducibility constraints while preserving a path to MPI/HPC execution. The long-term science target is galaxy formation from cosmological initial conditions; the current operational milestone is the dark-matter-only (DMO) TreePM path.

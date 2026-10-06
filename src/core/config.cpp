@@ -1178,6 +1178,10 @@ struct ConfigKeySpec {
       {"numerics.treepm_tree_opening_theta", "0.7"},
       {"numerics.treepm_tree_relative_force_tolerance", "0.005"},
       {"numerics.treepm_tree_relative_force_acceleration_floor", "1.0e-30"},
+      {"numerics.treepm_adaptive_acceptance_enabled", "false"},
+      {"numerics.treepm_adaptive_maximum_opening_angle", "0.25"},
+      {"numerics.treepm_identical_source_tree_reuse_enabled", "false"},
+      {"numerics.treepm_topology_refit_enabled", "false"},
       {"numerics.treepm_assignment_scheme", "tsc"},
       {"numerics.treepm_enable_window_deconvolution", "true"},
       {"numerics.treepm_update_cadence_steps", "1"},
@@ -1300,6 +1304,7 @@ struct ConfigKeySpec {
       {"parallel.decomposition_gpu_occupancy_weight", "0.0"},
       {"parallel.decomposition_generic_work_weight", "0.5"},
       {"parallel.decomposition_runtime_rebalance_enabled", "true"},
+      {"parallel.decomposition_spatial_work_enabled", "false"},
       {"parallel.decomposition_debug_exact_ownership_audit", "false"},
       {"parallel.decomposition_rebalance_imbalance_trigger", "1.25"},
       {"parallel.decomposition_rebalance_memory_trigger", "1.50"},
@@ -1508,10 +1513,19 @@ void validateConfig(const SimulationConfig& config) {
   if (config.numerics.max_global_steps <= 0) {
     throw ConfigError("numerics.max_global_steps must be > 0");
   }
-  if (config.numerics.hierarchical_max_rung != 0) {
-    throw ConfigError(
-        "numerics.hierarchical_max_rung must be 0: production ReferenceWorkflow "
-        "does not yet carry per-element kick/drift epochs for mixed-rung KDK integration");
+  if (config.numerics.hierarchical_max_rung < 0 || config.numerics.hierarchical_max_rung > 12) {
+    throw ConfigError("numerics.hierarchical_max_rung must be in [0, 12]; 0 retains reference global KDK");
+  }
+  if (config.numerics.hierarchical_max_rung > 0 &&
+      (config.mode.mode != SimulationMode::kCosmoCube || config.physics.enable_cooling ||
+       config.physics.enable_star_formation || config.physics.enable_feedback ||
+       config.physics.enable_stellar_evolution || config.physics.enable_black_hole_agn ||
+       config.physics.enable_tracers || config.physics.enable_metal_diffusion)) {
+    throw ConfigError("hierarchical KDK currently requires cosmo_cube collisionless DMO with source physics disabled");
+  }
+  if (config.parallel.decomposition_spatial_work_enabled &&
+      config.mode.mode != SimulationMode::kCosmoCube) {
+    throw ConfigError("parallel.decomposition_spatial_work_enabled currently requires cosmo_cube fixed periodic domains");
   }
   if (config.output.snapshot_interval_steps < 0) {
     throw ConfigError("output.snapshot_interval_steps must be >= 0");
@@ -1814,6 +1828,11 @@ void validateConfig(const SimulationConfig& config) {
   if (!std::isfinite(config.numerics.treepm_tree_opening_theta) ||
       config.numerics.treepm_tree_opening_theta <= 0.0) {
     throw ConfigError("numerics.treepm_tree_opening_theta must be finite and > 0");
+  }
+  if (!std::isfinite(config.numerics.treepm_adaptive_maximum_opening_angle) ||
+      config.numerics.treepm_adaptive_maximum_opening_angle <= 0.0 ||
+      config.numerics.treepm_adaptive_maximum_opening_angle > 0.5) {
+    throw ConfigError("numerics.treepm_adaptive_maximum_opening_angle must be finite and in (0, 0.5]");
   }
   if (!std::isfinite(config.numerics.treepm_tree_relative_force_tolerance) ||
       config.numerics.treepm_tree_relative_force_tolerance <= 0.0) {
@@ -2297,6 +2316,14 @@ class NormalizedConfigStream {
          << frozen.config.numerics.treepm_tree_relative_force_tolerance << '\n';
   stream << "treepm_tree_relative_force_acceleration_floor = "
          << frozen.config.numerics.treepm_tree_relative_force_acceleration_floor << '\n';
+  stream << "treepm_adaptive_acceptance_enabled = "
+         << (frozen.config.numerics.treepm_adaptive_acceptance_enabled ? "true" : "false") << '\n';
+  stream << "treepm_adaptive_maximum_opening_angle = "
+         << frozen.config.numerics.treepm_adaptive_maximum_opening_angle << '\n';
+  stream << "treepm_identical_source_tree_reuse_enabled = "
+         << (frozen.config.numerics.treepm_identical_source_tree_reuse_enabled ? "true" : "false") << '\n';
+  stream << "treepm_topology_refit_enabled = "
+         << (frozen.config.numerics.treepm_topology_refit_enabled ? "true" : "false") << '\n';
   stream << "treepm_assignment_scheme = "
          << (frozen.config.numerics.treepm_assignment_scheme == TreePmAssignmentScheme::kCic ? "cic" : "tsc")
          << '\n';
@@ -2478,6 +2505,8 @@ class NormalizedConfigStream {
          << frozen.config.parallel.decomposition_generic_work_weight << '\n';
   stream << "decomposition_runtime_rebalance_enabled = "
          << (frozen.config.parallel.decomposition_runtime_rebalance_enabled ? "true" : "false") << '\n';
+  stream << "decomposition_spatial_work_enabled = "
+         << (frozen.config.parallel.decomposition_spatial_work_enabled ? "true" : "false") << '\n';
   stream << "decomposition_debug_exact_ownership_audit = "
          << (frozen.config.parallel.decomposition_debug_exact_ownership_audit ? "true" : "false") << '\n';
   stream << "decomposition_rebalance_imbalance_trigger = "
@@ -2976,6 +3005,22 @@ class NormalizedConfigStream {
           "numerics.treepm_tree_relative_force_acceleration_floor",
           defaultFor("numerics.treepm_tree_relative_force_acceleration_floor")),
       "numerics.treepm_tree_relative_force_acceleration_floor");
+  frozen.config.numerics.treepm_adaptive_acceptance_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_adaptive_acceptance_enabled",
+                    defaultFor("numerics.treepm_adaptive_acceptance_enabled")),
+      "numerics.treepm_adaptive_acceptance_enabled");
+  frozen.config.numerics.treepm_adaptive_maximum_opening_angle = parseFloating(
+      requireString(entries, consumed, "numerics.treepm_adaptive_maximum_opening_angle",
+                    defaultFor("numerics.treepm_adaptive_maximum_opening_angle")),
+      "numerics.treepm_adaptive_maximum_opening_angle");
+  frozen.config.numerics.treepm_identical_source_tree_reuse_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_identical_source_tree_reuse_enabled",
+                    defaultFor("numerics.treepm_identical_source_tree_reuse_enabled")),
+      "numerics.treepm_identical_source_tree_reuse_enabled");
+  frozen.config.numerics.treepm_topology_refit_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_topology_refit_enabled",
+                    defaultFor("numerics.treepm_topology_refit_enabled")),
+      "numerics.treepm_topology_refit_enabled");
   frozen.config.numerics.treepm_assignment_scheme = parseTreePmAssignmentScheme(requireString(
       entries,
       consumed,
@@ -3360,6 +3405,10 @@ class NormalizedConfigStream {
       requireString(entries, consumed, "parallel.decomposition_runtime_rebalance_enabled",
                     defaultFor("parallel.decomposition_runtime_rebalance_enabled")),
       "parallel.decomposition_runtime_rebalance_enabled");
+  frozen.config.parallel.decomposition_spatial_work_enabled = parseBool(
+      requireString(entries, consumed, "parallel.decomposition_spatial_work_enabled",
+                    defaultFor("parallel.decomposition_spatial_work_enabled")),
+      "parallel.decomposition_spatial_work_enabled");
   frozen.config.parallel.decomposition_debug_exact_ownership_audit = parseBool(
       requireString(entries, consumed, "parallel.decomposition_debug_exact_ownership_audit",
                     defaultFor("parallel.decomposition_debug_exact_ownership_audit")),

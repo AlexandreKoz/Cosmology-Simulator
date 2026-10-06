@@ -188,3 +188,15 @@ Schema/provenance implications:
    per-field contiguous arrays and explicit logical sizes.
 4. `ParticleSoaStorage` is utility/test substrate only; it is not authoritative runtime
    particle truth and must not replace `SimulationState::particles` + sidecars.
+
+## P6 optional DMO bin mirror
+
+Source implementation only; qualification pending. Homogeneous DMO may retain
+one byte per particle for scheduler bin mirrors when hierarchical integration
+is selected. Species, flags, owner and common drift epoch stay scalar; they
+do not become dense merely because bins differ. `particleTimeBin()` reads the
+optional mirror and returns implicit zero only when it is absent. Materializing
+other metadata preserves a present mirror; compaction releases an all-zero bin
+lane. Scheduler remains authoritative. Restart v23 writes the existing logical
+time_bin dataset from the mirror or streamed implicit zero. Rung-zero compact
+state and migration retain their existing zero-cold-owner path.

@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/openmp_runtime.hpp"
 #include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
@@ -466,8 +467,11 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     traceRuntimePhase("initial_conditions_complete");
     report.ic_manifest_path = startup.manifest_path;
     core::SimulationState state = std::move(startup.state);
+    const std::array initial_memory_reports{
+        core::collectSimulationMemoryReport(state),
+        profiler.retainedEventMemoryReport()};
     core::MemoryReport startup_memory_report_value =
-        core::collectSimulationMemoryReport(state);
+        core::mergeMemoryReports(initial_memory_reports);
     memory_governor.setBaselineOwnedBytes(
         core::memoryReportBaselineOwnedBytes(startup_memory_report_value));
     core::attachMemoryGovernorSnapshot(
@@ -609,13 +613,51 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         config.units.length_unit,
         config.units.mass_unit,
         config.units.velocity_unit);
-    RungZeroTimeState time_state = initializeRungZeroTimeState(
-        config,
-        options,
-        state,
-        runtime_units,
-        background.has_value() ? &background.value() : nullptr,
-        restoring_from_restart ? options.restart_state_override : nullptr);
+    // Hierarchical scheduler lanes are optional population-scale owners. Admit
+    // their first materialization before reset/import, then reconcile actual
+    // capacities. Later bin moves use RetainedCapacityTransaction.
+    core::MemoryReservation scheduler_initialization_reservation;
+    const std::uint64_t state_bytes_before_scheduler = core::memoryReportBaselineOwnedBytes(
+        core::collectSimulationMemoryReport(state));
+    std::exception_ptr scheduler_initialization_failure;
+    if (config.numerics.hierarchical_max_rung > 0) {
+      try {
+        const std::uint64_t per_particle = sizeof(std::uint64_t) + sizeof(std::size_t) +
+            5U * sizeof(std::uint8_t) + sizeof(core::TimeStepCandidateSource) + 3U * sizeof(std::uint32_t);
+        const auto population_bytes = static_cast<std::uint64_t>(core::checkedSizeMultiply(
+            state.particles.size(), static_cast<std::size_t>(per_particle), "hierarchical scheduler initial bytes"));
+        const std::uint64_t fixed_bytes = static_cast<std::uint64_t>(core::checkedSizeMultiply(
+            2U * (static_cast<std::size_t>(config.numerics.hierarchical_max_rung) + 1U),
+            sizeof(std::vector<std::uint32_t>) + 2U * sizeof(std::uint32_t), "hierarchical bin table bytes"));
+        scheduler_initialization_reservation = memory_governor.reserve(core::MemoryClass::kPhaseResident,
+            core::checkedMemoryBytesAdd(population_bytes, fixed_bytes, "hierarchical scheduler initial peak"),
+            "time.hierarchical_scheduler_initialization");
+        scheduler_initialization_reservation.commit();
+      } catch (...) { scheduler_initialization_failure = std::current_exception(); }
+    }
+    failure_coordinator.rethrowCollectiveFailure(scheduler_initialization_failure, "scheduler initial memory admission");
+    std::optional<RungZeroTimeState> time_state_owner;
+    scheduler_initialization_failure = {};
+    try {
+      time_state_owner.emplace(initializeRungZeroTimeState(
+          config,
+          options,
+          state,
+          runtime_units,
+          background.has_value() ? &background.value() : nullptr,
+          restoring_from_restart ? options.restart_state_override : nullptr));
+      if (scheduler_initialization_reservation.valid()) {
+        const auto baseline = memory_governor.snapshot().baseline_owned_bytes;
+        if (baseline < state_bytes_before_scheduler) throw std::logic_error("scheduler initialization baseline is stale");
+        const auto reports = std::array{core::collectSimulationMemoryReport(state),
+            core::collectSchedulerMemoryReport(time_state_owner->particleScheduler(), time_state_owner->gasCellScheduler())};
+        scheduler_initialization_reservation.reconcileBaselineOwnedAndRelease(core::checkedMemoryBytesAdd(
+            baseline - state_bytes_before_scheduler, core::memoryReportBaselineOwnedBytes(core::mergeMemoryReports(reports)),
+            "hierarchical scheduler initial baseline"));
+      }
+    } catch (...) { scheduler_initialization_failure = std::current_exception(); }
+    failure_coordinator.rethrowCollectiveFailure(scheduler_initialization_failure, "scheduler initialization");
+    RungZeroTimeState& time_state = time_state_owner.value();
     core::IntegratorState& integrator_state = time_state.integratorState();
 
     const std::filesystem::path zoom_region_path =
@@ -752,7 +794,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
               time_state.particleScheduler(), time_state.gasCellScheduler()),
           gravity_callback.memoryReport(),
           runtime_composition.hydro_amr->memoryReport(),
-          runtime_composition.source->memoryReport()};
+          runtime_composition.source->memoryReport(),
+          profiler.retainedEventMemoryReport()};
       core::MemoryReport merged_startup_memory_report = core::mergeMemoryReports(startup_reports);
       const std::uint64_t governor_baseline_bytes =
           core::memoryReportBaselineOwnedBytes(merged_startup_memory_report);

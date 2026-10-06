@@ -1,6 +1,7 @@
 #pragma once
 
 #include <complex>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -257,6 +258,13 @@ struct PmProfileEvent {
   // is the single non-overlapping value for that purpose.
   double total_ms = 0.0;
   double routed_mpi_wait_ms = 0.0;
+  // Nested inside assign_ms (deposition + routing + normalization inclusive).
+  double density_routing_wait_ms = 0.0;
+  // Disjoint per-axis stages within gradient_ms; inverse excludes real copy.
+  std::array<double, 3U> gradient_factor_ms{};
+  std::array<double, 3U> inverse_axis_ms{};
+  std::array<double, 3U> normalization_axis_ms{};
+  double halo_exchange_ms = 0.0;  // inclusive exchange + cache preparation/commit
   double transfer_h2d_ms = 0.0;
   double transfer_d2h_ms = 0.0;
   double device_kernel_ms = 0.0;

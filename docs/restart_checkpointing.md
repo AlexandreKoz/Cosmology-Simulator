@@ -422,3 +422,31 @@ restart-equivalence test requires either lane to make exact comparison fail.
 Checkpoint publication no longer performs a complete restore merely to verify a file that was just written. The production write path uses `verifyRestartCheckpointHdf5()` to compare the current-schema HDF5 checkpoint against live restart truth with bounded hyperslab reads and a fixed 16 MiB/rank CHUÍ-owned workspace. Compact DMO metadata and uniform rung-zero scheduler values are obtained through logical accessors; the gravity force cache is serialized and verified through non-owning spans. `/distributed_gravity/state` is compared through streaming serialization rather than a complete readback string.
 
 This does **not** change actual resume semantics: `readRestartCheckpointHdf5()` remains the complete owning restoration path, including legacy-schema compatibility and restore-candidate MemoryGovernor admission. The restart file schema and integrity algorithms are unchanged.
+
+## P6 optional hierarchical boundary contract
+
+SOURCE-IMPLEMENTED / VALIDATION PENDING. Restart schema remains v23: no new
+HDF5 fields or redundant reconstructible fine state are added. Existing scheduler
+bins, next activation, integer tick, integrator/common drift epoch, source
+identity, PM cadence and synchronized total-force history suffice **only at a
+closed coarse block boundary**. Hierarchy validates aligned ticks, inactive
+flags, no pending transitions, next activation equal to current tick, matching
+particle/gas scheduler authority, DMO species, and common particle drift epoch.
+Fine/in-flight checkpoints are rejected. Existing checksums, streaming verifier,
+transactional publication, topology/config hash and collective checks remain.
+
+The existing `/state/particles/time_bin` dataset now writes an optional compact
+DMO mirror when present; implicit uniform zero is written only when the lane is
+absent. Dataset shape/type are unchanged. Migration carries existing scheduler
+and drift fields through its bounded generic transaction, then recompacts
+uniform species/owner/drift metadata. Rung-zero compact migration is preserved.
+
+PM/Tree split caches and per-row Tree-generation tags are transient. Every
+coarse block starts with an all-target synchronized solve in both uninterrupted
+and restarted execution, so continuation does not depend on uncheckpointed
+component caches. PM opportunities/versions remain persisted authority. Exact
+restart equivalence still needs qualification. Optional refit retains different
+transient topology across an uninterrupted run, and spatial EMA starts cold on
+restart; compare these modes separately without an unsupported bitwise claim.
+New normalized config fields change hashes; readers remain compatible, while
+strict workflow hash matching is not relaxed.

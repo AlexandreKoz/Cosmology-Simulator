@@ -1852,7 +1852,7 @@ void writeStateGroup(hid_t root, const core::SimulationState& state) {
   writeDataset1d(particles_group.get(), "velocity_y_peculiar", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particles.velocity_y_peculiar);
   writeDataset1d(particles_group.get(), "velocity_z_peculiar", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particles.velocity_z_peculiar);
   writeDataset1d(particles_group.get(), "mass_code", H5T_IEEE_F64LE, H5T_NATIVE_DOUBLE, state.particles.mass_code);
-  if (state.hasHomogeneousDmoMetadata()) {
+  if (state.hasHomogeneousDmoMetadata() && state.particles.time_bin.empty()) {
     writeUniformDataset1d(particles_group.get(), "time_bin", H5T_STD_U8LE, H5T_NATIVE_UINT8, state.particles.size(), static_cast<std::uint8_t>(0U));
   } else {
     writeDataset1d(particles_group.get(), "time_bin", H5T_STD_U8LE, H5T_NATIVE_UINT8, state.particles.time_bin);

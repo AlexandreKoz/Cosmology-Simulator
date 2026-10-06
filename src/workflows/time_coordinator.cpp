@@ -20,6 +20,7 @@
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/constants.hpp"
 #include "cosmosim/core/memory_governor.hpp"
+#include "cosmosim/core/retained_capacity_transaction.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/units.hpp"
@@ -100,7 +101,7 @@ void initializeSchedulerBins(
   const std::uint32_t cell_count =
       static_cast<std::uint32_t>(state.cells.size());
   const std::uint8_t particle_default_bin =
-      particle_scheduler.maxBin() > 0 ? 1U : 0U;
+      0U;
   const std::uint8_t gas_default_bin =
       gas_cell_scheduler.maxBin() > 0 ? 1U : 0U;
   particle_scheduler.reset(particle_count, particle_default_bin, 0U);
@@ -855,9 +856,9 @@ RungZeroTimeState initializeRungZeroTimeState(
     const core::UnitSystem& units,
     const core::LambdaCdmBackground* cosmology_background,
     const io::RestartReadResult* restart_state) {
-  if (config.numerics.hierarchical_max_rung != 0) {
-    throw std::logic_error(
-        "ReferenceWorkflow production KDK requires hierarchical_max_rung=0");
+  if (config.numerics.hierarchical_max_rung > 0 &&
+      (state.cells.size() != 0U || state.star_particles.size() != 0U || state.black_holes.size() != 0U || state.tracers.size() != 0U)) {
+    throw std::logic_error("hierarchical KDK currently requires a zero-gas DMO population");
   }
   const std::uint8_t max_bin = static_cast<std::uint8_t>(
       std::max(0, std::min(config.numerics.hierarchical_max_rung, 12)));
@@ -918,13 +919,8 @@ RungZeroTimeState initializeRungZeroTimeState(
     integrator_state.pm_refresh_enabled = true;
     integrator_state.pm_sync_state.reset(static_cast<std::uint64_t>(
         std::max(config.numerics.treepm_update_cadence_steps, 1)));
-    for (std::size_t particle_index = 0;
-         particle_index < state.particles.size(); ++particle_index) {
-      state.particle_sidecar.last_drift_time_code[particle_index] =
-          integrator_state.current_time_code;
-      state.particle_sidecar.last_drift_scale_factor[particle_index] =
-          integrator_state.current_scale_factor;
-    }
+    state.updateAllParticleDriftEpoch(integrator_state.current_time_code,
+        integrator_state.current_scale_factor);
   }
   syncTimeBinsFromSchedulers(
       time_state.m_particle_scheduler,
@@ -968,6 +964,11 @@ void TimeCoordinator::runRungZeroSegment(
     core::ProfilerSession& profiler,
     const core::ModePolicy& mode_policy,
     bool restoring_from_restart) {
+  if (config.numerics.hierarchical_max_rung > 0) {
+    runHierarchicalSegment(config, options, state, cosmology_background,
+        expected_global_particle_ids, report, profiler, mode_policy);
+    return;
+  }
   core::HierarchicalTimeBinScheduler& particle_scheduler =
       m_time_state.m_particle_scheduler;
   core::HierarchicalTimeBinScheduler& gas_cell_scheduler =
@@ -1010,7 +1011,8 @@ void TimeCoordinator::runRungZeroSegment(
                 particle_scheduler, gas_cell_scheduler),
             m_gravity.memoryReport(),
             m_hydro_amr.memoryReport(),
-            m_source.memoryReport()};
+            m_source.memoryReport(),
+            m_services.profiler.retainedEventMemoryReport()};
         geometry_reservation.reconcileBaselineOwnedAndRelease(
             core::memoryReportBaselineOwnedBytes(
                 core::mergeMemoryReports(geometry_reports)));
@@ -1220,7 +1222,8 @@ void TimeCoordinator::runRungZeroSegment(
             particle_scheduler, gas_cell_scheduler),
         m_gravity.memoryReport(),
         m_hydro_amr.memoryReport(),
-        m_source.memoryReport()};
+        m_source.memoryReport(),
+        profiler.retainedEventMemoryReport()};
     core::MemoryReport merged_runtime_memory_report =
         core::mergeMemoryReports(runtime_reports);
     if (m_services.memory_governor != nullptr) {
@@ -1364,6 +1367,279 @@ void TimeCoordinator::runRungZeroSegment(
       static_cast<std::uint64_t>(m_hydro_amr.remoteStaleInvalidPayloadCount());
 }
 
+void TimeCoordinator::runHierarchicalSegment(
+    const core::SimulationConfig& config, const ReferenceWorkflowOptions& options,
+    core::SimulationState& state, const core::LambdaCdmBackground* background,
+    std::vector<std::uint64_t>& expected_ids, ReferenceWorkflowReport& report,
+    core::ProfilerSession& profiler, const core::ModePolicy& mode_policy) {
+  auto& particles = m_time_state.m_particle_scheduler;
+  auto& cells = m_time_state.m_gas_cell_scheduler;
+  auto& integrator = m_time_state.m_integrator_state;
+  auto& pending = m_time_state.m_pending_output;
+  const auto& mpi = m_services.mpi_context;
+  std::exception_ptr eligibility_failure;
+  try {
+    if (state.cells.size() != 0U || state.star_particles.size() != 0U ||
+        state.black_holes.size() != 0U || state.tracers.size() != 0U ||
+        !state.hasHomogeneousDmoMetadata() || particles.maxBin() == 0U ||
+        particles.maxBin() != cells.maxBin()) {
+      throw std::logic_error("hierarchical workflow requires compact collisionless DMO on one scheduler hierarchy");
+    }
+  } catch (...) { eligibility_failure = std::current_exception(); }
+  FailureCoordinator(m_services).rethrowCollectiveFailure(eligibility_failure, "hierarchical DMO eligibility");
+  core::TransientStepWorkspace workspace(m_services.memory_governor);
+  const auto owned_runtime_bytes = [&]() {
+    const std::array reports{core::collectSimulationMemoryReport(state, &workspace),
+        core::collectSchedulerMemoryReport(particles, cells), m_gravity.memoryReport(),
+        m_hydro_amr.memoryReport(), m_source.memoryReport(), profiler.retainedEventMemoryReport()};
+    return core::memoryReportBaselineOwnedBytes(core::mergeMemoryReports(reports));
+  };
+  const auto reconcile_runtime = [&]() {
+    core::MemoryReport memory;
+    std::exception_ptr memory_failure;
+    try {
+      const std::array reports{core::collectSimulationMemoryReport(state, &workspace),
+          core::collectSchedulerMemoryReport(particles, cells), m_gravity.memoryReport(),
+          m_hydro_amr.memoryReport(), m_source.memoryReport(), profiler.retainedEventMemoryReport()};
+      memory = core::mergeMemoryReports(reports);
+      if (m_services.memory_governor != nullptr) {
+        m_services.memory_governor->setBaselineOwnedBytes(core::memoryReportBaselineOwnedBytes(memory));
+        core::attachMemoryGovernorSnapshot(memory, *m_services.memory_governor);
+      }
+      core::attachProcessMemoryObservation(memory, core::observeProcessMemory());
+    } catch (...) { memory_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(memory_failure, "hierarchical local memory report preparation");
+    attachDistributedMemoryTelemetry(memory, m_services);
+    profiler.setMemoryReport(std::move(memory));
+  };
+  const auto install_geometry = [&]() {
+    std::exception_ptr failure;
+    try {
+      core::MemoryReservation reservation;
+      {
+        const auto leaves = m_migration_balance.authoritativeTopDomainLeaves(state, m_gravity.decompositionEpoch(), &reservation);
+        m_gravity.installAuthoritativeTopDomainLeaves(leaves, state.gravitySourceGeneration());
+      }
+      if (reservation.valid()) reservation.reconcileBaselineOwnedAndRelease(owned_runtime_bytes());
+    } catch (...) { failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(failure, "hierarchical domain geometry installation");
+  };
+  install_geometry();
+  const std::uint64_t requested_steps = options.max_steps_override > 0U
+      ? options.max_steps_override : static_cast<std::uint64_t>(config.numerics.max_global_steps);
+  if (integrator.step_index > std::numeric_limits<std::uint64_t>::max() - requested_steps) {
+    throw std::overflow_error("hierarchical coarse segment step count overflow");
+  }
+  const std::uint64_t run_start_step = integrator.step_index;
+  const std::uint64_t final_step = integrator.step_index + requested_steps;
+  while (integrator.step_index < final_step && integrator.current_time_code < config.numerics.t_code_end) {
+    const auto console_begin = RuntimeConsoleReporter::Clock::now();
+    const double block_a_begin = integrator.current_scale_factor;
+    std::exception_ptr preparation_failure;
+    try {
+      workspace.prepareGravityParticleIndexScratch(state.particles.size());
+      for (std::size_t row = 0U; row < state.particles.size(); ++row) {
+        workspace.gravity_particle_index_scratch[row] = core::checkedIntegralNarrow<std::uint32_t>(row, "hierarchical identity row");
+      }
+      core::RetainedCapacityTransaction mirror_plan(owned_runtime_bytes);
+      mirror_plan.add(state.particles.time_bin, state.particles.size());
+      mirror_plan.execute(m_services.memory_governor, core::MemoryClass::kPhaseResident, "time.hierarchical_bin_mirror");
+      state.particles.time_bin.resize(state.particles.size(), 0U);
+    } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical workspace admission");
+    const auto all_rows = std::span<const std::uint32_t>(workspace.gravity_particle_index_scratch);
+    // Mandatory fresh synchronized endpoint bootstrap in BOTH uninterrupted
+    // and restarted runs. Existing total force history remains the MAC scale;
+    // derived split caches/PM meshes need no new restart payload.
+    core::StepContext sync{.state = state, .integrator_state = integrator,
+        .active_set = {.particle_indices = all_rows, .cell_indices = {}},
+        .active_gravity_particles = {}, .has_active_gravity_particles = false,
+        .workspace = &workspace, .cosmology_background = background,
+        .mode_policy = &mode_policy, .profiler_session = &profiler,
+        .timeline_step = {.time_begin_code = integrator.current_time_code,
+            .time_end_code = integrator.current_time_code,
+            .scale_factor_begin = integrator.current_scale_factor,
+            .scale_factor_end = integrator.current_scale_factor},
+        .boundary = {.kind = core::StepBoundaryKind::kGlobalSynchronizationPoint},
+        .pm_refresh_directive = {.force_refresh_surface = true, .cadence_opportunity_allowed = true,
+            .sync_event_requested = true, .force_evaluation_scale_factor = integrator.current_scale_factor,
+            .reason = core::PmRefreshDirective::Reason::kScheduledForceRefreshStage},
+        .stage = core::IntegrationStage::kForceRefresh};
+    sync.hierarchical_kdk = {.enabled = true, .include_long_range_force = true,
+        .force_only_synchronization = true, .coarse_source_generation = state.gravitySourceGeneration(),
+        .evaluation_tick = particles.currentTick()};
+    dispatchStage(sync, false);
+    const auto& d = sync.pm_refresh_directive;
+    if (!d.has_sync_event || !d.solver_executed || !d.refresh_long_range_field) {
+      throw std::logic_error("hierarchical synchronized bootstrap did not commit a fresh split force");
+    }
+    const core::PmSyncEvent event{d.gravity_kick_opportunity, d.refresh_long_range_field,
+        d.field_version, d.last_refresh_opportunity, d.field_built_step_index, d.field_built_scale_factor};
+    integrator.pm_sync_state.commitKickOpportunity(event);
+    integrator.pm_sync_state.commitRefresh(event);
+    integrator.pm_long_range_field_valid = true;
+    integrator.pm_source_generation = state.gravitySourceGeneration();
+    const auto ax = m_gravity.particleAccelX();
+    const auto ay = m_gravity.particleAccelY();
+    const auto az = m_gravity.particleAccelZ();
+    const auto softening = speciesSofteningByTag(config);
+    const double eps = softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)];
+    const auto criterion = [&](std::uint32_t row) {
+      return core::computeComovingGravityTimeStep({.softening_length_comoving_code = std::max(eps, 1.0e-12),
+          .scale_free_acceleration_magnitude_code = std::sqrt(ax[row] * ax[row] + ay[row] * ay[row] + az[row] * az[row]),
+          .scale_factor = integrator.current_scale_factor}, 0.2);
+    };
+    double local_min = std::numeric_limits<double>::infinity();
+    preparation_failure = {};
+    try {
+      if (ax.size() != state.particles.size() || ay.size() != ax.size() || az.size() != ax.size()) {
+        throw std::logic_error("hierarchical timestep criteria lack synchronized total force rows");
+      }
+      for (const auto row : all_rows) local_min = std::min(local_min, criterion(row));
+    } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical timestep criteria");
+    const auto periods = particles.binPeriodTicks(particles.maxBin());
+    double coarse_dt = mpi.allreduceMinDouble(local_min) * static_cast<double>(periods);
+    if (background != nullptr) coarse_dt = std::min(coarse_dt, core::computeCosmologyExpansionTimeStep(
+        *background, integrator.current_scale_factor, config.numerics.cosmology_max_delta_ln_a,
+        config.numerics.cosmology_max_hubble_time_fraction, integrator.time_si_per_code));
+    if (options.dt_time_code > 0.0) coarse_dt = std::min(coarse_dt, options.dt_time_code);
+    double boundary_time = config.numerics.t_code_end;
+    if (pending.snapshot_interval_time_code > 0.0 && pending.next_snapshot_time_code > integrator.current_time_code) {
+      boundary_time = std::min(boundary_time, pending.next_snapshot_time_code);
+    }
+    coarse_dt = std::min(coarse_dt, boundary_time - integrator.current_time_code);
+    const double quantum = coarse_dt / static_cast<double>(periods);
+    if (!std::isfinite(quantum) || quantum <= 0.0 || integrator.current_time_code + quantum <= integrator.current_time_code) {
+      throw std::runtime_error("hierarchical quantum is not finite positive representable");
+    }
+    integrator.dt_time_code = quantum;
+    const core::TimeStepLimits limits{.min_dt_time_code = quantum,
+        .max_dt_time_code = coarse_dt, .max_bin = particles.maxBin()};
+    preparation_failure = {};
+    try {
+      for (const auto row : all_rows) particles.submitCandidateTimeStep(row, criterion(row), limits,
+          core::TimeStepCandidateSource::kGravityAcceleration, "hierarchical_synchronized_gravity");
+      core::RetainedCapacityTransaction bins_plan(owned_runtime_bytes);
+      particles.planSynchronizedCandidateCapacity(bins_plan);
+      bins_plan.execute(m_services.memory_governor, core::MemoryClass::kPhaseResident, "time.hierarchical_bin_membership");
+      particles.commitSynchronizedCandidates();
+      syncTimeBinsFromSchedulers(particles, cells, state);
+    } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical synchronized rung assignment");
+    preparation_failure = {};
+    try {
+      internal::latchOutputRequestForCompletedStep(config, options, integrator.step_index + 1U,
+        integrator.current_time_code + coarse_dt, pending);
+      profiler.recordEvent(core::RuntimeEvent{.event_kind = "time.hierarchical_block", .severity = core::RuntimeEventSeverity::kInfo,
+        .subsystem = "core.time", .step_index = integrator.step_index,
+        .simulation_time_code = integrator.current_time_code, .scale_factor = integrator.current_scale_factor,
+        .message = "source-implemented synchronized power-of-two DMO KDK block; qualification pending",
+        .payload = {{"quantum_time_code", formatRuntimeDouble(quantum)},
+            {"coarse_interval_time_code", formatRuntimeDouble(coarse_dt)}, {"fine_ticks", std::to_string(periods)},
+            {"pm_policy", "coarse_endpoint_half_kicks"}, {"rung_assignment", "fixed_within_block"}}});
+    } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical output and event preparation");
+    core::MemoryReservation timeline_reservation;
+    preparation_failure = {};
+    try {
+      if (m_services.memory_governor != nullptr) {
+        timeline_reservation = m_services.memory_governor->reserve(core::MemoryClass::kPhaseResident,
+            core::checkedSizeMultiply(core::k_hierarchical_timeline_capacity, sizeof(double), "hierarchical timeline bytes"),
+            "time.hierarchical_timeline");
+        timeline_reservation.commit();
+      }
+    } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical timeline admission");
+    parallel::DecompositionRuntimeMeasurements block_work{};
+    m_lifecycle.executeHierarchicalBlockWithDispatcher(state, integrator, particles, cells,
+        [&](core::StepContext& context, bool safe_output) {
+          if (context.stage == core::IntegrationStage::kAnalysisHooks && context.hierarchical_kdk.synchronization_end) {
+            preparation_failure = {};
+            try {
+              if (background != nullptr &&
+                  (std::log(integrator.current_scale_factor / block_a_begin) >
+                      config.numerics.cosmology_max_delta_ln_a * (1.0 + 1.0e-10) ||
+                   ((config.numerics.integrator_time_variable == core::IntegratorTimeVariable::kScaleFactor ||
+                     config.numerics.integrator_time_variable == core::IntegratorTimeVariable::kLogScaleFactor) &&
+                    integrator.current_scale_factor > config.numerics.a_end + 1.0e-12 * std::max(1.0, config.numerics.a_end)))) {
+                throw std::runtime_error("hierarchical block crossed the configured cosmological interval or endpoint");
+              }
+            } catch (...) { preparation_failure = std::current_exception(); }
+            FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical cosmological endpoint");
+            std::exception_ptr boundary_failure;
+            try { reconcile_runtime(); } catch (...) { boundary_failure = std::current_exception(); }
+            FailureCoordinator(m_services).rethrowCollectiveFailure(boundary_failure, "hierarchical pre-migration memory reconciliation");
+            const bool migrated = m_migration_balance.rebalance(state, particles, cells,
+                block_work, context.active_set.particle_indices,
+                expected_ids, integrator.step_index);
+            if (migrated) {
+              m_gravity.commitParticleDecompositionChange();
+              install_geometry();
+              // Ownership commit invalidates the former target-row span. Analysis
+              // and output consume coherent state, never the departed active view.
+              context.active_set = {};
+            }
+            boundary_failure = {};
+            try {
+              syncTimeBinsFromSchedulers(particles, cells, state);
+              reconcile_runtime();
+            } catch (...) { boundary_failure = std::current_exception(); }
+            FailureCoordinator(m_services).rethrowCollectiveFailure(boundary_failure, "hierarchical post-migration mirrors");
+          }
+          dispatchStage(context, safe_output);
+          if (context.stage == core::IntegrationStage::kForceRefresh) {
+            std::exception_ptr work_failure;
+            try {
+              const auto current = m_gravity.lastRuntimeDecompositionMeasurements();
+              const auto add = [](std::uint64_t a, std::uint64_t b) {
+                return core::checkedMemoryBytesAdd(a, b, "hierarchical block work counter");
+              };
+              block_work.tree_pair_evaluations_recent = add(block_work.tree_pair_evaluations_recent, current.tree_pair_evaluations_recent);
+              block_work.incoming_tree_pair_evaluations_recent = add(block_work.incoming_tree_pair_evaluations_recent, current.incoming_tree_pair_evaluations_recent);
+              block_work.tree_remote_request_bytes_recent = add(block_work.tree_remote_request_bytes_recent, current.tree_remote_request_bytes_recent);
+              block_work.pm_mesh_cells_touched_recent = add(block_work.pm_mesh_cells_touched_recent, current.pm_mesh_cells_touched_recent);
+              block_work.pm_fft_transpose_bytes_recent = add(block_work.pm_fft_transpose_bytes_recent, current.pm_fft_transpose_bytes_recent);
+              block_work.ghost_exchange_bytes_recent = add(block_work.ghost_exchange_bytes_recent, current.ghost_exchange_bytes_recent);
+              block_work.tree_wall_ms_recent += current.tree_wall_ms_recent;
+              block_work.pm_wall_ms_recent += current.pm_wall_ms_recent;
+              block_work.has_measurements = true;
+              block_work.has_spatial_tree_work = current.has_spatial_tree_work;
+              block_work.spatial_tree_work_per_target = current.spatial_tree_work_per_target;
+            } catch (...) { work_failure = std::current_exception(); }
+            FailureCoordinator(m_services).rethrowCollectiveFailure(work_failure, "hierarchical block work aggregation");
+          }
+        }, background, workspace, &mode_policy, &profiler,
+        [&](std::exception_ptr failure, std::string_view phase) {
+          FailureCoordinator(m_services).rethrowCollectiveFailure(failure, phase);
+        });
+    if (timeline_reservation.valid()) timeline_reservation.release();
+    preparation_failure = {};
+    try { reconcile_runtime(); } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical block memory report");
+    profiler.counters().addCount("time.hierarchical_coarse_blocks");
+    profiler.counters().addCount("time.hierarchical_fine_drifts", periods);
+    const auto global_particles = mpi.allreduceSumUint64(static_cast<std::uint64_t>(state.particles.size()));
+    if (m_services.console_reporter != nullptr) {
+      RuntimeConsoleStepStatus status;
+      status.step_index = integrator.step_index;
+      status.t_code = integrator.current_time_code;
+      status.dt_time_code = coarse_dt;
+      status.a_scale = integrator.current_scale_factor;
+      status.redshift = integrator.current_redshift;
+      status.active_particle_count = global_particles;
+      status.total_particle_count = global_particles;
+      status.wall_step_seconds = std::chrono::duration<double>(RuntimeConsoleReporter::Clock::now() - console_begin).count();
+      status.pm_activity = "coarse_endpoints";
+      status.output_activity = "coarse_sync";
+      m_services.console_reporter->emitStep(status);
+    }
+  }
+  report.completed_steps = integrator.step_index - run_start_step;
+  report.final_time_code = integrator.current_time_code;
+  report.final_scale_factor = integrator.current_scale_factor;
+}
+
 void TimeCoordinator::executeSingleStep(
     core::SimulationState& state,
     core::IntegratorState& integrator_state,
@@ -1452,6 +1728,34 @@ void TimeCoordinator::coordinatePmRefreshDirective(core::StepContext& context) {
   if (context.stage != core::IntegrationStage::kGravityKickPre &&
       context.stage != core::IntegrationStage::kForceRefresh &&
       context.stage != core::IntegrationStage::kGravityKickPost) {
+    return;
+  }
+
+  if (context.hierarchical_kdk.enabled) {
+    auto& d = context.pm_refresh_directive;
+    const auto& mpi = m_services.mpi_context;
+    const auto votes = mpi.allreduceSumUint64(d.sync_event_requested ? 1ULL : 0ULL);
+    if (votes != 0U && votes != static_cast<std::uint64_t>(mpi.worldSize())) {
+      throw std::logic_error("hierarchical PM synchronization directive diverged across ranks");
+    }
+    if (d.sync_event_requested) {
+      std::exception_ptr directive_failure;
+      try {
+        if (!d.cadence_opportunity_allowed || !context.boundary.pm_refresh_allowed ||
+            !context.hierarchical_kdk.include_long_range_force) {
+          throw std::logic_error("hierarchical PM refresh requested outside a synchronized split endpoint");
+        }
+      } catch (...) { directive_failure = std::current_exception(); }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(directive_failure, "hierarchical PM endpoint eligibility");
+      const bool all_valid = mpi.allreduceSumUint64(context.integrator_state.pm_long_range_field_valid ? 1ULL : 0ULL) ==
+          static_cast<std::uint64_t>(mpi.worldSize());
+      directive_failure = {};
+      try {
+        core::materializePmRefreshDirective(context, all_valid);
+        if (!d.refresh_long_range_field) throw std::logic_error("hierarchical PM endpoint cadence must refresh");
+      } catch (...) { directive_failure = std::current_exception(); }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(directive_failure, "hierarchical PM endpoint materialization");
+    }
     return;
   }
 
@@ -1636,7 +1940,14 @@ void TimeCoordinator::dispatchStage(
   internal::RuntimeStageResourceBundle stage_resources(context);
   AnalysisStageView audit_view(
       RuntimeResourceLease(epoch_source, k_state_stage_epochs), stage_resources);
-  m_execution_plan.executeAuditStage(context.stage, audit_view);
+  if (!context.hierarchical_kdk.force_only_synchronization) {
+    m_execution_plan.executeAuditStage(context.stage, audit_view);
+  }
+  if (context.hierarchical_kdk.enabled &&
+      (context.stage == core::IntegrationStage::kHydroUpdate ||
+       context.stage == core::IntegrationStage::kSourceTerms ||
+       ((context.stage == core::IntegrationStage::kAnalysisHooks || context.stage == core::IntegrationStage::kOutputCheck) &&
+        !context.hierarchical_kdk.synchronization_end))) return;
 
   switch (context.stage) {
     case core::IntegrationStage::kGravityKickPre:

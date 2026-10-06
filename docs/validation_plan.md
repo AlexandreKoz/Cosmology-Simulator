@@ -624,3 +624,11 @@ Dependency-complete MPI/Parallel-HDF5/FFTW execution is a mandatory production q
 The Q-01/Q-02/Q-03 closure adds narrow regressions rather than relying on the real 64^3 smoke as the first detector. Configure qualification poisons the cached MPIO capability result and requires a real compile/link probe to execute; serial HDF5 is rejected when the production parallel requirement is enabled where a serial wrapper is available. Distributed IC acceptance runs `zero_ids`, `shuffled_zero_ids`, and zero-based-versus-pre-normalized equivalence fixtures at 1/2/3/4/8 ranks, retains duplicate rejection, and adds the `0 + UINT64_MAX` overflow conflict. The zero-ID cases assert the typed `IcExternalIdMapping`, the exact normalized global ID ranges, nonzero IDs, distributed ownership, and physical-state equivalence.
 
 The narrow Parallel-HDF5 runtime snapshot smoke at 2 and 3 ranks begins with a nonexistent `snapshots/` directory, requires first publication to create it, reruns the committed namespace to prove overwrite refusal, and injects a regular file at the `snapshots` path to prove collective namespace preflight fails before HDF5 creation. Environment-specific unwritable-directory behavior remains suitable for dependency-host qualification because root CI cannot portably express POSIX permission denial.
+
+## P6 follow-up qualification
+
+The P6 source campaign deliberately executed no configure/build/compiler,
+tests, MPI runs, benchmarks or scientific validation. Existing build/test floors
+remain required for the second campaign. The exact staged matrix and evidence
+requirements are in [p6_validation_campaign_plan_20261006.md](repair/p6_validation_campaign_plan_20261006.md).
+Optional modes must not become defaults until those gates are accepted.

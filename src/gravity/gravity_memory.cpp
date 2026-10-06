@@ -382,7 +382,8 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       : 0U;
   const std::uint64_t persistent_force_cache_bytes = checkedMul(
       input.local_source_count,
-      3U * sizeof(double) + sizeof(std::uint8_t),
+      3U * sizeof(double) + sizeof(std::uint8_t) +
+          (input.hierarchical_kdk_enabled ? 6U * sizeof(double) + sizeof(std::uint64_t) : 0U),
       "gravity persistent force cache estimate overflow");
   const std::uint64_t runtime_particle_map_bytes = borrowed_homogeneous_dmo
       ? 0U
@@ -628,6 +629,14 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
                  "gravity.estimate.treepm_residual_block_diagnostics", treepm_block_diagnostic_bytes,
                  "deterministic block floating diagnostic storage; force accumulation order remains per target");
    }
+
+  const std::uint64_t bounded_feedback_bytes = checkedAdd(
+      checkedMul(2U, sizeof(TreePmDiagnostics), "TreePM diagnostic object bytes"),
+      checkedMul(3U, sizeof(std::array<double, parallel::k_spatial_work_bin_count>),
+          "TreePM spatial history bytes"), "TreePM fixed feedback bytes");
+  addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kPersistent,
+      "gravity.estimate.bounded_force_feedback", bounded_feedback_bytes,
+      "coordinator and workflow current-force summaries, two decayed bins and one planner view; fixed size independent of particle and solve counts");
 
   if (cuda_owned_workspace > 0U) {
     addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,

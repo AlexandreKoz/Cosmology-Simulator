@@ -1,6 +1,26 @@
 # Current repository status
 
-**Authority date:** 2026-09-26
+## P6 source architecture — campaign label 20261006
+
+**SOURCE-IMPLEMENTED / VALIDATION PENDING.** This campaign executed no build,
+compilation, tests, benchmarks, MPI runs, or scientific validation. Historical
+P1–P4/M48 evidence below does not qualify the new P6 code.
+
+Source changes add force observability, bounded operational history, trusted
+source-generation plumbing, optional adaptive residual acceptance, bounded
+64-bin spatial decomposition feedback, independent tree/PM OpenMP loops,
+optional certified tree motion refit, and optional collisionless DMO block KDK.
+The strict TreePM policy, global KDK (`hierarchical_max_rung=0`), full rebuild,
+and existing decomposition feedback remain defaults. Hierarchical mode has
+explicit Tree/PM force epochs and permits migration/snapshot/checkpoint only
+at closed coarse synchronization points; it does not support gas/source
+multirate evolution.
+
+Implementation landed; qualification pending. See
+[implementation and limitations](docs/repair/p6_preproduction_performance_architecture_implementation_20261006.md)
+and the [required second campaign](docs/repair/p6_validation_campaign_plan_20261006.md).
+
+**Authority date:** 2026-10-05 (P6 campaign label: 20261006)
 **Status scope:** this source snapshot; historical campaign reports are not current truth
 
 This file is the concise current-status entry point. Build-specific dependency

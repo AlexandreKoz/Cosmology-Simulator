@@ -1760,12 +1760,15 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
     const DecompositionWorkComponents& base,
     const DecompositionRuntimeMeasurements& measurements,
     const DecompositionFeedbackCoefficients& coefficients,
-    const RuntimeFeedbackNormalization& normalization) {
+    const RuntimeFeedbackNormalization& normalization,
+    std::size_t spatial_bin = k_spatial_work_bin_count) {
   if (!measurements.has_measurements) {
     return base;
   }
   const double tree_total = coefficients.measured_tree_pair *
-      static_cast<double>(measurements.tree_pair_evaluations_recent) +
+      static_cast<double>(measurements.has_spatial_tree_work
+          ? measurements.incoming_tree_pair_evaluations_recent
+          : measurements.tree_pair_evaluations_recent) +
       static_cast<double>(measurements.tree_remote_request_bytes_recent) / 1024.0;
   const double pm_total = coefficients.measured_pm_cell *
       static_cast<double>(measurements.pm_mesh_cells_touched_recent) +
@@ -1793,6 +1796,13 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
   DecompositionWorkComponents components = base;
   components.tree_interaction_cost += distribute(
       tree_total, base.tree_interaction_cost, normalization.tree_proxy_sum);
+  if (measurements.has_spatial_tree_work && spatial_bin < k_spatial_work_bin_count) {
+    const double spatial_work = measurements.spatial_tree_work_per_target[spatial_bin];
+    if (!std::isfinite(spatial_work) || spatial_work < 0.0) {
+      throw std::invalid_argument("spatial tree work feedback must be finite and nonnegative");
+    }
+    components.tree_interaction_cost += coefficients.measured_tree_pair * spatial_work;
+  }
   components.pm_mesh_cost += distribute(
       pm_total, base.pm_mesh_cost, normalization.pm_proxy_sum);
   components.amr_patch_cost += distribute(
@@ -1920,8 +1930,10 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
   const DecompositionWorkComponents base = particle
       ? baseComponentsForSourceParticle(source, local_index, scratch)
       : baseComponentsForSourcePatch(source, local_index);
+  const std::uint64_t sfc_key = sourceSfcKey(source, local_index, kind, config);
   const DecompositionWorkComponents components = applySourceMeasuredFeedback(
-      base, measurements, coefficients, normalization);
+      base, measurements, coefficients, normalization,
+      particle ? spatialWorkBinForSfcKey(sfc_key) : k_spatial_work_bin_count);
   const int owner = particle
       ? (static_cast<int>(source.particleOwningRank(local_index)))
       : static_cast<int>(source.patch_owning_rank[local_index]);
@@ -1936,7 +1948,7 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
   CompactRuntimeDecompositionRecord record{
       .entity_id = particle ? source.particle_ids[local_index]
                             : source.patch_ids[local_index],
-      .sfc_key = sourceSfcKey(source, local_index, kind, config),
+      .sfc_key = sfc_key,
       .memory_bytes = particle
           ? source.particle_memory_bytes_by_species[species_tag]
           : static_cast<std::uint64_t>(source.patch_cell_counts[local_index]) *
@@ -1989,7 +2001,7 @@ void validateRuntimeDecompositionSource(const RuntimeDecompositionSourceView& so
   if (record.kind == DecompositionEntityKind::kParticle) {
     return applySourceMeasuredFeedback(
         baseComponentsForSourceParticle(source, record.local_index, scratch),
-        measurements, coefficients, normalization);
+        measurements, coefficients, normalization, spatialWorkBinForSfcKey(record.sfc_key));
   }
   if (record.kind == DecompositionEntityKind::kAmrPatch) {
     return applySourceMeasuredFeedback(

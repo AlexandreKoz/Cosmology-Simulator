@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -100,6 +101,7 @@ struct RuntimeEvent {
 class ProfilerSession {
  public:
   using Clock = std::chrono::steady_clock;
+  static constexpr std::size_t k_recent_event_limit = 256U;
 
   explicit ProfilerSession(bool enabled = false);
 
@@ -122,6 +124,9 @@ class ProfilerSession {
   [[nodiscard]] std::size_t rootNodeIndex() const noexcept;
   void recordEvent(RuntimeEvent event);
   [[nodiscard]] const std::vector<RuntimeEvent>& events() const;
+  // Lifetime totals include evicted details; call at a quiescent boundary.
+  [[nodiscard]] std::array<std::uint64_t, 4U> eventSeverityTotals() const;
+  [[nodiscard]] MemoryReport retainedEventMemoryReport() const;
   void setMemoryReport(MemoryReport report);
   [[nodiscard]] const MemoryReport* memoryReport() const noexcept;
 
@@ -142,7 +147,6 @@ class ProfilerSession {
   struct ThreadShard {
     std::vector<ProfileNode> nodes;
     std::vector<ActiveScope> scope_stack;
-    std::vector<SequencedEvent> events;
 
     ThreadShard();
   };
@@ -162,6 +166,9 @@ class ProfilerSession {
   CounterRegistry m_counters;
   AllocatorStats m_allocator_stats;
   std::atomic<std::uint64_t> m_next_event_sequence{0};
+  std::vector<SequencedEvent> m_recent_events;
+  std::size_t m_recent_event_cursor = 0U;
+  std::array<std::uint64_t, 4U> m_event_severity_totals{};
   mutable std::vector<ProfileNode> m_merged_nodes;
   mutable std::vector<RuntimeEvent> m_merged_events;
   std::optional<MemoryReport> m_memory_report;

@@ -550,3 +550,36 @@ small transport ceiling and deterministic preparation rejection. They do not
 change production configuration, restart state, scientific fields, ownership
 semantics, or numerical methods.
 
+## P6 bounded spatial work feedback
+
+SOURCE-IMPLEMENTED / VALIDATION PENDING. `decomposition_spatial_work_enabled`
+is false by default and currently limited to fixed periodic `cosmo_cube`.
+The six high bits of the existing 30-bit decomposition Morton key identify
+64 deterministic 4x4x4 SFC regions. This key is distinct from tree Morton order.
+Each owned-target solve contributes integer `node visits + actual direct pairs`
+to its region, plus activation count. Joined worker counts are MPI-SUM reduced;
+two fixed arrays decay as `H_new=0.5*H_old+0.5*current`. Regional rate is decayed
+work / decayed activation count (zero without history).
+
+Compact records consume this rate through the existing measured-tree-pair
+coefficient. Local pair feedback is replaced by the regional rate; incoming
+source-service pairs, communication and rank timing remain rank-total terms,
+preventing pair double counting. This is a documented policy unit, not seconds
+or a calibrated operation-cost model. Existing weights remain reference when
+the switch is false. Key and components are streamed/recomputed with unchanged
+compact records and dense-local-index contract; no per-particle history/map or
+N-by-rank array is created.
+
+Hierarchy aggregates rank work over the completed coarse block before legal
+rebalance, using bounded counters; spatial history reflects fine target solves.
+Spatial feedback is derived and cold after restart. It may alter subsequent
+cuts and floating accumulation order; exact work-aware decomposition restart
+replay is not promised without a future versioned history contract. Migration
+remains forbidden inside open hierarchical intervals.
+
+TreePM owner discovery still queries each target twice: graph adjacency requires
+whole-active-set discovery before bounded request batches are encoded. Retaining
+all query results would require population-scale variable peer lists; changing
+the graph per batch needs a protocol/scheduling qualification. P6 preserves
+reusable QueryScratch, sparse routing and the bounded arena and leaves this
+control-path cost as explicit debt.

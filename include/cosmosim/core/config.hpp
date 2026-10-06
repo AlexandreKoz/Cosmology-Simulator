@@ -244,6 +244,10 @@ struct NumericsConfig {
   double treepm_tree_opening_theta = 0.7;
   double treepm_tree_relative_force_tolerance = 0.005;
   double treepm_tree_relative_force_acceleration_floor = 1.0e-30;
+  bool treepm_adaptive_acceptance_enabled = false;
+  double treepm_adaptive_maximum_opening_angle = 0.25;
+  bool treepm_identical_source_tree_reuse_enabled = false;
+  bool treepm_topology_refit_enabled = false;
   TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kTsc;
   bool treepm_enable_window_deconvolution = true;
   int treepm_update_cadence_steps = 1;
@@ -438,6 +442,7 @@ struct ParallelConfig {
   double decomposition_gpu_occupancy_weight = 0.0;
   double decomposition_generic_work_weight = 0.5;
   bool decomposition_runtime_rebalance_enabled = true;
+  bool decomposition_spatial_work_enabled = false;
   bool decomposition_debug_exact_ownership_audit = false;
   double decomposition_rebalance_imbalance_trigger = 1.25;
   double decomposition_rebalance_memory_trigger = 1.50;
