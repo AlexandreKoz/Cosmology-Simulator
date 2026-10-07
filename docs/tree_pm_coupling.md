@@ -510,8 +510,9 @@ Contract:
 - one immutable local tree shared by all workers; no MPI calls from workers
   (`MPI_THREAD_FUNNELED` only);
 - shared mutation is limited to unique active-slot writes and one integer
-  counter bundle per planned worker; counters merge exactly after join. The
-  deterministic floating diagnostic remains one `sum_sq` value per logical
+  counter bundle per planned worker, plus separate optional spatial scratch;
+  counters merge exactly after join. The deterministic floating diagnostic
+  remains one `sum_sq` value per logical
   64-target block and is reduced in fixed block order; no atomics appear in
   hot node/pair loops;
 - each worker owns one bounded DFS stack slot of `S = 1 + 7 * D` entries
@@ -535,6 +536,27 @@ Contract:
 - builds without OpenMP (`COSMOSIM_HAVE_OPENMP=0`) keep a serial path with the
   same kernel and the same numerical order.
 
+P6.1 times each existing logical block with two `steady_clock::now()` reads,
+outside its target loop, in all three regions (including serial execution).
+The executing worker adds block duration to `elapsed_work_ms` and keeps
+`block_work_ms_max`; join-time merges sum the former and take the maximum of
+the latter separately for local-owned and incoming targets. Timing includes
+target preparation, traversal, force-slot writes and local block diagnostics;
+it excludes scheduling waits and MPI. Worker-region time summaries retain
+their existing min/max/sum semantics over these block-duration sums. Clock
+reads are O(blocks), and the target evaluator performs no wall-clock reads.
+
+Hot `TreePmTraversalCounters` remain `alignas(64)` and contain only scalar
+work counters and timing summaries. Separate `alignas(64)` worker scratch owns
+the fixed 64-bin work/target arrays. It is allocated/grown and zeroed once at
+the outer workspace-preparation scope only when spatial feedback is enabled,
+before distributed request posting. Owned-target integer work accumulates
+across local batches; incoming evaluation receives no histogram pointer.
+After all joins, fixed worker/bin-order reduction precedes the existing MPI
+integer sums and unchanged 0.5-decayed work/target history update. With P5-W
+disabled, execution performs no histogram allocation, clearing or updates.
+Capacity retained from an earlier enabled solve remains separately reported.
+
 Diagnostics provenance: `openmp_compiled`, `openmp_configured_workers`,
 `openmp_observed_workers`, `residual_local_target_count`,
 `residual_incoming_target_count`, and
@@ -542,14 +564,17 @@ Diagnostics provenance: `openmp_compiled`, `openmp_configured_workers`,
 
 ```text
 M_worker_stack = T * (1 + 7 * kMaximumTreeDepth) * sizeof(TreeLocalIndex)
-M_worker_counters = T * 7 * sizeof(uint64_t)
+M_worker_counters = T * sizeof(TreePmTraversalCounters)
+M_optional_spatial = T * kTreePmResidualSpatialCounterBytes
 M_block_diagnostics = ceil(A / 64) * sizeof(double)
 ```
 
-The retained runtime report exposes the actual worker-stack, worker-counter,
-and block-diagnostic capacities. Distributed target metadata is bounded by the
-current communication batch; no `double[A]` target-softening allocation is
-retained or admitted.
+Preflight conservatively includes `M_optional_spatial` even when disabled,
+preserving coverage of the prior worker-scratch envelope without a new input
+policy. The retained runtime report exposes actual worker-stack, hot-counter,
+separate optional spatial-counter and block-diagnostic capacities. Distributed
+target metadata is bounded by the current communication batch; no `double[A]`
+target-softening allocation is retained or admitted.
 
 ## LET exchange memory estimate
 
@@ -619,6 +644,17 @@ See `docs/gravity_production_readiness.md` for current pass/limitation status.
 
 ## Public-interface migration notes
 
+- P6.1 removes the raw `spatial_work` / `spatial_targets` arrays from
+  `TreePmTraversalCounters`; planner consumers continue to use
+  `TreePmDiagnostics::spatial_work_per_target` and
+  `spatial_work_history_solves`. Native consumers must rebuild for the smaller
+  counter layout. `elapsed_work_ms` now sums logical-block durations and
+  `block_work_ms_max` gives the largest block duration per target family.
+  `kTreePmResidualCounterBytes` remains the actual hot `sizeof`;
+  `kTreePmResidualSpatialCounterBytes` is the separate optional scratch width.
+  No config, force, snapshot/restart or serialized event-field schema changes
+  accompany this cleanup. Existing worker timing values cover block work
+  rather than individually timed traversals; qualification remains pending.
 - `TreePmForceAccumulatorView` adds optional previous-acceleration and explicit
   target-position spans. Existing source-indexed callers retain prior behavior.
 - `TreePmOptions` adds `decomposition_epoch` and `force_epoch`; distributed

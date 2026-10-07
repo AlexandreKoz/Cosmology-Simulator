@@ -20,6 +20,13 @@ Implementation landed; qualification pending. See
 [implementation and limitations](docs/repair/p6_preproduction_performance_architecture_implementation_20261006.md)
 and the [required second campaign](docs/repair/p6_validation_campaign_plan_20261006.md).
 
+P6.1 (2026-10-07) removes per-target TreePM clock reads in favor of existing
+64-target block timing and separates optional P5-W worker histograms from
+aligned hot counters. Force mathematics, P5-W weighting and all configuration
+defaults are unchanged. **SOURCE IMPLEMENTED; BUILD NOT RUN; TESTS NOT RUN;
+BENCHMARKS NOT RUN; VALIDATION PENDING.** See the
+[cleanup note](docs/repair/p6_1_treepm_hotpath_instrumentation_cleanup_20261007.md).
+
 **Authority date:** 2026-10-05 (P6 campaign label: 20261006)
 **Status scope:** this source snapshot; historical campaign reports are not current truth
 

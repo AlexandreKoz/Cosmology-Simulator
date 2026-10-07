@@ -14,6 +14,13 @@ Every new implementation here is **SOURCE-IMPLEMENTED / VALIDATION PENDING**.
 The requested filename uses campaign label 20261006; the workspace session date
 is 2026-10-05. This report contains no new runtime/performance/science evidence.
 
+P6.1 follow-up (2026-10-07): per-target clock reads were removed; the existing
+64-target blocks now own work timing. Optional spatial-worker histograms are
+separate from aligned hot counters. No force mathematics, P5-W weighting,
+configuration or default changed. **SOURCE IMPLEMENTED; BUILD NOT RUN;
+TESTS NOT RUN; BENCHMARKS NOT RUN; VALIDATION PENDING.** Details:
+[P6.1 cleanup note](p6_1_treepm_hotpath_instrumentation_cleanup_20261007.md).
+
 ## Input and execution scope
 
 Input revision: `a88de7ec1098b89c8d8e6679431a8466067ebc62`.
@@ -60,9 +67,11 @@ aggregate counters remain. Rejection counters overlap; opens count unique
 descents. Timer parents/children are explicitly documented.
 
 Aligned worker bundles contain current-force targets, visits, pairs, multipoles,
-work time and two fixed 64-bin count arrays. Summaries expose bounded nonempty
-worker regions, extrema and sums/derivable means. There are no node/pair atomics
-or retained run-wide block tables. PM axis factor/inverse/normalization,
+summed block work time and maximum block duration. P6.1 stores the two optional
+64-bin count arrays separately, prepared only when spatial feedback is enabled.
+Summaries expose bounded nonempty worker regions, extrema and sums/derivable
+means. There are no node/pair atomics or retained run-wide block tables.
+PM axis factor/inverse/normalization,
 density-routing wait, halo and total inclusive timing augment existing fields.
 LET adds arena high-water and export multiplicity alongside existing geometry,
 candidate-peer, graph/cache and transport metrics. Fixed-name lifetime counters

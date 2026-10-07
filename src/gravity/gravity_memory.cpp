@@ -474,7 +474,8 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       "gravity residual worker stack byte overflow");
   const std::uint64_t treepm_worker_counter_bytes = checkedMul(
       residual_worker_count,
-      static_cast<std::uint64_t>(kTreePmResidualCounterBytes),
+      checkedAdd(kTreePmResidualCounterBytes, kTreePmResidualSpatialCounterBytes,
+                 "gravity residual worker counter bundle overflow"),
       "gravity residual worker counter overflow");
   const std::uint64_t residual_block_count = checkedAdd(
       input.local_target_count, kTreePmResidualBlockSize - 1U,
@@ -623,7 +624,7 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
   }
    addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
                "gravity.estimate.treepm_residual_worker_scratch", treepm_worker_scratch_bytes,
-               "OpenMP residual worker storage: stacks use the enforced kMaximumTreeDepth bound and one counter bundle per planned worker");
+               "OpenMP residual worker storage: enforced kMaximumTreeDepth stacks, aligned hot counters and a conservative bound for optional spatial scratch per planned worker");
    if (treepm_block_diagnostic_bytes > 0U) {
      addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
                  "gravity.estimate.treepm_residual_block_diagnostics", treepm_block_diagnostic_bytes,

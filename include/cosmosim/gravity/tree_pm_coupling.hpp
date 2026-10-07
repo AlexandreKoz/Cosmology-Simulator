@@ -46,11 +46,14 @@ struct alignas(64) TreePmTraversalCounters {
   std::uint64_t cutoff_containment_rejections = 0;
   std::uint64_t geometric_history_fallbacks = 0;
   std::uint64_t targets = 0;
+  // Summed logical-block work time; no per-target clock reads.
   double elapsed_work_ms = 0.0;
-  std::array<std::uint64_t, parallel::k_spatial_work_bin_count> spatial_work{};
-  std::array<std::uint64_t, parallel::k_spatial_work_bin_count> spatial_targets{};
+  double block_work_ms_max = 0.0;
 };
 inline constexpr std::size_t kTreePmResidualCounterBytes = sizeof(TreePmTraversalCounters);
+// Optional worker scratch, separate from the aligned hot counter bundle.
+inline constexpr std::size_t kTreePmResidualSpatialCounterBytes =
+    2U * sizeof(std::array<std::uint64_t, parallel::k_spatial_work_bin_count>);
 
 // Why TreePM declined the installed authoritative top-domain geometry and
 // used the conservative local-tree root packet instead.
@@ -180,7 +183,7 @@ struct TreePmDiagnostics {
   std::array<double, parallel::k_spatial_work_bin_count> spatial_work_per_target{};
   std::uint64_t spatial_work_history_solves = 0;
   // Nonempty worker-region summaries for the current force only. Work time
-  // is summed target traversal time, not an additive force-phase wall timer.
+  // is summed logical-block time, not an additive force-phase wall timer.
   std::uint64_t worker_region_count = 0;
   double worker_targets_min = 0.0;
   double worker_targets_max = 0.0;
@@ -385,6 +388,14 @@ class TreePmCoordinator {
    static_assert(sizeof(ResidualTraversalCounters) == kTreePmResidualCounterBytes,
                  "TreePM residual counter storage contract changed");
 
+  // Prepared once before traversal only when spatial feedback is enabled.
+  // Owned targets accumulate here across batches; incoming targets never do.
+  struct alignas(64) ResidualSpatialWorkCounters {
+    std::array<std::uint64_t, parallel::k_spatial_work_bin_count> spatial_work{};
+    std::array<std::uint64_t, parallel::k_spatial_work_bin_count> spatial_targets{};
+  };
+  static_assert(sizeof(ResidualSpatialWorkCounters) == kTreePmResidualSpatialCounterBytes,
+                "TreePM spatial worker scratch storage contract changed");
 
   void evaluateShortRangeResidual(
       std::span<const double> pos_x_comoving,
@@ -506,6 +517,8 @@ class TreePmCoordinator {
   std::uint64_t m_worker_stack_high_water_bytes = 0;
   std::vector<ResidualTraversalCounters> m_worker_counter_storage;
   std::uint64_t m_worker_counter_high_water_bytes = 0;
+  std::vector<ResidualSpatialWorkCounters> m_worker_spatial_counter_storage;
+  std::uint64_t m_worker_spatial_counter_high_water_bytes = 0;
   std::vector<double> m_block_sum_sq_storage;
   std::uint64_t m_block_sum_sq_high_water_bytes = 0;
   ResidualTraversalStats m_last_residual_stats;

@@ -2057,6 +2057,18 @@ core::MemoryReport TreePmCoordinator::memoryReport() const {
          .uncertainty_note = "one integer counter bundle per planned OpenMP worker"});
    }
    {
+     const std::uint64_t bytes = core::ownedCapacityBytesForContainer(m_worker_spatial_counter_storage);
+     builder.addEntry(core::MemoryEntry{
+         .subsystem = core::MemorySubsystem::kScratch,
+         .lifetime = core::MemoryLifetime::kTransient,
+         .label = "treepm.residual.worker_spatial_counter_storage",
+         .current_size_bytes = core::currentSizeBytesForContainer(m_worker_spatial_counter_storage),
+         .owned_capacity_bytes = bytes,
+         .high_water_bytes = m_worker_spatial_counter_high_water_bytes,
+         .estimated_next_step_bytes = bytes,
+         .uncertainty_note = "optional aligned 64-bin work/target scratch per worker; allocated and updated only when spatial feedback is enabled"});
+   }
+   {
      const std::uint64_t bytes = core::ownedCapacityBytesForContainer(m_block_sum_sq_storage);
      builder.addEntry(core::MemoryEntry{
          .subsystem = core::MemorySubsystem::kScratch,
@@ -3374,6 +3386,17 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     m_worker_counter_high_water_bytes = std::max<std::uint64_t>(
         m_worker_counter_high_water_bytes,
         core::ownedCapacityBytesForContainer(m_worker_counter_storage));
+    if (options.spatial_work_history_enabled) {
+      if (m_worker_spatial_counter_storage.size() < worker_count) {
+        m_worker_spatial_counter_storage.resize(worker_count);
+      }
+      std::fill(
+          m_worker_spatial_counter_storage.begin(), m_worker_spatial_counter_storage.end(),
+          ResidualSpatialWorkCounters{});
+      m_worker_spatial_counter_high_water_bytes = std::max<std::uint64_t>(
+          m_worker_spatial_counter_high_water_bytes,
+          core::ownedCapacityBytesForContainer(m_worker_spatial_counter_storage));
+    }
     if (m_block_sum_sq_storage.size() < required_block_count) {
       m_block_sum_sq_storage.resize(required_block_count, 0.0);
     }
@@ -3490,14 +3513,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   }
 
   // Worker-safe residual evaluator. Shared mutable state is limited to the
-  // immutable tree/source/softening lanes, the caller-owned counters bundle,
-  // and the caller-owned bounded stack. Opening MAC, 0.08 screened-quadrupole
-  // envelope, cutoff, softening combine rule, and per-target child order are
-  // unchanged from the serial contract.
+  // immutable tree/source/softening lanes, the caller-owned hot counters,
+  // optional spatial scratch, and the caller-owned bounded stack. Opening MAC,
+  // 0.08 screened-quadrupole envelope, cutoff, softening combine rule, and
+  // per-target child order are unchanged from the serial contract.
   std::uint64_t incoming_evaluated_target_count = 0;
   int observed_openmp_workers = 1;
   auto evaluateTargetAgainstLocalTree = [&](
                                          ResidualTraversalCounters& counters,
+                                         ResidualSpatialWorkCounters* spatial_counters,
                                          BoundedTreeStack& stack,
                                          double px,
                                          double py,
@@ -3507,10 +3531,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                                          double target_softening_comoving,
                                          bool previous_acceleration_available,
                                          double previous_acceleration_magnitude_code) {
-    const auto target_work_start = std::chrono::steady_clock::now();
     ++counters.targets;
-    const std::uint64_t visits_begin = counters.visited_nodes;
-    const std::uint64_t pairs_begin = counters.direct_pair_evaluations;
+    const std::uint64_t visits_begin = spatial_counters != nullptr ? counters.visited_nodes : 0U;
+    const std::uint64_t pairs_begin = spatial_counters != nullptr ? counters.direct_pair_evaluations : 0U;
 
     double ax = 0.0;
     if (nodes.size() == 0) {
@@ -3644,19 +3667,17 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         pushChildrenNearFirstPeriodic(nodes, node_index, px, py, pz, box_lengths, stack);
       }
     }
-    if (options.spatial_work_history_enabled && skip_self) {
+    if (spatial_counters != nullptr && skip_self) {
       parallel::DecompositionConfig domain;
       domain.domain_x_max_comov = box_lengths.lx;
       domain.domain_y_max_comov = box_lengths.ly;
       domain.domain_z_max_comov = box_lengths.lz;
       const std::size_t bin = parallel::spatialWorkBinForSfcKey(
           parallel::sfcKeyForPosition(px, py, pz, domain));
-      counters.spatial_work[bin] += (counters.visited_nodes - visits_begin) +
+      spatial_counters->spatial_work[bin] += (counters.visited_nodes - visits_begin) +
           (counters.direct_pair_evaluations - pairs_begin);
-      ++counters.spatial_targets[bin];
+      ++spatial_counters->spatial_targets[bin];
     }
-    counters.elapsed_work_ms += std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - target_work_start).count();
     return std::array<double, 3>{ax, ay, az};
   };
 
@@ -3688,10 +3709,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     dst.geometric_history_fallbacks += src.geometric_history_fallbacks;
     dst.targets += src.targets;
     dst.elapsed_work_ms += src.elapsed_work_ms;
-    for (std::size_t bin = 0; bin < parallel::k_spatial_work_bin_count; ++bin) {
-      dst.spatial_work[bin] += src.spatial_work[bin];
-      dst.spatial_targets[bin] += src.spatial_targets[bin];
-    }
+    dst.block_work_ms_max = std::max(dst.block_work_ms_max, src.block_work_ms_max);
   };
   const auto summarize_worker = [&](const ResidualTraversalCounters& worker) {
     if (worker.targets == 0U) return;
@@ -3743,7 +3761,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         BoundedTreeStack stack = worker_stack(worker_slot);
         ResidualTraversalCounters& counters =
             m_worker_counter_storage[worker_slot];
+        ResidualSpatialWorkCounters* spatial_counters = options.spatial_work_history_enabled
+            ? &m_worker_spatial_counter_storage[worker_slot] : nullptr;
         double local_sum_sq = 0.0;
+        const auto block_work_start = std::chrono::steady_clock::now();
         for (std::size_t active_i = block_begin; active_i < block_end; ++active_i) {
           const TreeLocalIndex particle_index =
               accumulator.active_particle_index[active_i];
@@ -3764,6 +3785,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               : 0.0;
           const auto local_accel = evaluateTargetAgainstLocalTree(
               counters,
+              spatial_counters,
               stack,
               px,
               py,
@@ -3778,6 +3800,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               local_accel[0] * local_accel[0] + local_accel[1] * local_accel[1] +
               local_accel[2] * local_accel[2];
         }
+        const double block_work_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - block_work_start).count();
+        counters.elapsed_work_ms += block_work_ms;
+        counters.block_work_ms_max = std::max(counters.block_work_ms_max, block_work_ms);
         m_block_sum_sq_storage[static_cast<std::size_t>(block)] = local_sum_sq;
       } catch (...) {
 #if COSMOSIM_HAVE_OPENMP
@@ -4597,7 +4623,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                BoundedTreeStack stack = worker_stack(worker_slot);
                ResidualTraversalCounters& counters =
                    m_worker_counter_storage[worker_slot];
+               ResidualSpatialWorkCounters* spatial_counters = options.spatial_work_history_enabled
+                   ? &m_worker_spatial_counter_storage[worker_slot] : nullptr;
                double local_sum_sq = 0.0;
+               const auto block_work_start = std::chrono::steady_clock::now();
                for (std::size_t batch_slot = block_begin;
                     batch_slot < block_end;
                     ++batch_slot) {
@@ -4621,6 +4650,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                          : 0.0;
                  const auto local_accel = evaluateTargetAgainstLocalTree(
                      counters,
+                     spatial_counters,
                      stack,
                      target_x(batch_begin + batch_slot),
                      target_y(batch_begin + batch_slot),
@@ -4640,6 +4670,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                      local_accel[1] * local_accel[1] +
                      local_accel[2] * local_accel[2];
                }
+               const double block_work_ms = std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - block_work_start).count();
+               counters.elapsed_work_ms += block_work_ms;
+               counters.block_work_ms_max = std::max(counters.block_work_ms_max, block_work_ms);
                m_block_sum_sq_storage[static_cast<std::size_t>(block)] =
                    local_sum_sq;
              } catch (...) {
@@ -4873,6 +4907,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               BoundedTreeStack stack = worker_stack(worker_slot);
               ResidualTraversalCounters& counters =
                   m_worker_counter_storage[worker_slot];
+              const auto block_work_start = std::chrono::steady_clock::now();
               for (std::size_t peer_slot = block_begin;
                    peer_slot < block_end;
                    ++peer_slot) {
@@ -4880,6 +4915,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                     decoded_requests[peer_slot];
                 const auto remote_accel = evaluateTargetAgainstLocalTree(
                     counters,
+                    nullptr,
                     stack,
                     request.target_x_comoving,
                     request.target_y_comoving,
@@ -4893,6 +4929,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                 peer_responses[peer_slot].accel_y_comoving = remote_accel[1];
                 peer_responses[peer_slot].accel_z_comoving = remote_accel[2];
               }
+              const double block_work_ms = std::chrono::duration<double, std::milli>(
+                  std::chrono::steady_clock::now() - block_work_start).count();
+              counters.elapsed_work_ms += block_work_ms;
+              counters.block_work_ms_max = std::max(counters.block_work_ms_max, block_work_ms);
             } catch (...) {
 #if COSMOSIM_HAVE_OPENMP
 #pragma omp critical(tree_pm_incoming_failure)
@@ -5213,8 +5253,16 @@ void TreePmCoordinator::evaluateShortRangeResidual(
 #endif
 
   if (options.spatial_work_history_enabled) {
-    auto work = local_owned_targets.spatial_work;
-    auto targets = local_owned_targets.spatial_targets;
+    std::array<std::uint64_t, parallel::k_spatial_work_bin_count> work{};
+    std::array<std::uint64_t, parallel::k_spatial_work_bin_count> targets{};
+    // Spatial scratch accumulates owned-target integer work across all local
+    // batches. Reduce once in fixed worker/bin order, after every worker joins.
+    for (const ResidualSpatialWorkCounters& counters : m_worker_spatial_counter_storage) {
+      for (std::size_t bin = 0; bin < parallel::k_spatial_work_bin_count; ++bin) {
+        work[bin] += counters.spatial_work[bin];
+        targets[bin] += counters.spatial_targets[bin];
+      }
+    }
 #if COSMOSIM_ENABLE_MPI
     if (tree_mpi_world_size > 1) {
       requireTreePmMpiSuccess(
