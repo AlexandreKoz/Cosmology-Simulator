@@ -371,9 +371,21 @@ descents. Pair identity remains `combined = local + incoming`.
 Aligned worker bundles avoid hot-path atomics and intentional false sharing.
 Current-force nonempty worker-region summaries report target min/max, visit,
 pair and multipole maxima, work-time min/max/sum and region count. Means can be
-computed from aggregate totals / region count. Work time is summed traversal
-work, not force-phase wall time. Fixed 64-bin counters are not a retained
-per-target or per-block history.
+computed from aggregate totals / region count. Work time sums logical-block
+durations, including target preparation, force-slot writes and local block
+diagnostics; scheduling waits and MPI are excluded. P6.1 uses two clock reads
+per existing 64-target block in all three traversal regions and none in the
+target evaluator. Existing `worker_work_ms_*` event fields summarize these
+block-duration sums. Native `local_traversal.block_work_ms_max` and
+`incoming_traversal.block_work_ms_max` expose the largest block duration for
+tail inspection; they add no serialized event field or block table.
+
+Optional fixed 64-bin work/target histograms live in separate aligned worker
+scratch, prepared once per enabled solve and reduced in fixed worker/bin order
+before the unchanged global spatial history update. Default-disabled P5-W
+does not allocate, clear, update or reduce histogram scratch. Hot scalar
+counters retain cache-line isolation. This reduces structural instrumentation
+overhead; no benchmark or validation evidence is claimed.
 
 PM `total_ms` is inclusive. `assign_ms` includes deposition, routing and
 normalization; `density_routing_wait_ms` is its nested MPI wait. Forward FFT and
