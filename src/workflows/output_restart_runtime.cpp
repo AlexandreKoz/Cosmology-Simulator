@@ -525,6 +525,7 @@ bool maybeWriteOutputs(
 
     core::ProvenanceRecord snapshot_provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
+    snapshot_provenance.derived_runtime_state += report.restart_config_compatibility_record;
     applyExecutionTopologyToProvenance(&snapshot_provenance, topology);
     snapshot_provenance.gravity_treepm_decomposition_epoch =
         gravity_state.decompositionEpoch();
@@ -719,6 +720,7 @@ bool maybeWriteOutputs(
     restart_payload.gravity_force_cache_view = &gravity_force_cache;
     restart_payload.provenance =
         makeGravityAwareProvenanceRecord(frozen_config, config);
+    restart_payload.provenance.derived_runtime_state += report.restart_config_compatibility_record;
     // Optional science cadence is explicitly best-effort and nonpersistent.
     // Persist the pending/missed summary as provenance, not restart truth.
     // A resumed run starts fresh; historical physical states are never
@@ -977,11 +979,7 @@ void validateRestartResumeTopologyOrThrowImpl(
       }
     }
   }
-  if (restart.normalized_config_hash_hex != frozen_config.provenance.config_hash_hex) {
-    throw std::runtime_error(
-        "ReferenceWorkflow restart topology validation failed: normalized config hash mismatch: expected=" +
-        frozen_config.provenance.config_hash_hex + ", observed=" + restart.normalized_config_hash_hex);
-  }
+  (void)io::restartConfigurationCompatibilityRecord(restart, frozen_config);
   const core::CudaRuntimeInfo cuda_runtime = core::queryCudaRuntime();
   const parallel::DistributedExecutionTopology runtime_topology =
       parallel::buildDistributedExecutionTopology(

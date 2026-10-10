@@ -74,7 +74,8 @@ inline void failRestartEquivalence(const std::string& message) {
 }
 
 inline void requireNear(double lhs, double rhs, double tolerance, const std::string& label) {
-  if (std::abs(lhs - rhs) > tolerance) {
+  if (!std::isfinite(lhs) || !std::isfinite(rhs) || !std::isfinite(tolerance) ||
+      tolerance < 0.0 || !(std::abs(lhs - rhs) <= tolerance)) {
     std::ostringstream os;
     os << label << " lhs=" << lhs << " rhs=" << rhs << " tolerance=" << tolerance;
     failRestartEquivalence(os.str());

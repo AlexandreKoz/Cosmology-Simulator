@@ -29,6 +29,7 @@
 #include "cosmosim/core/checked_arithmetic.hpp"
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/config.hpp"
 #include "cosmosim/io/io_contract.hpp"
 #include "io/internal/transactional_file.hpp"
 
@@ -3223,6 +3224,93 @@ std::string restartPayloadIntegrityHashHex(
   return hexU64(restartPayloadIntegrityHash(payload, governor));
 }
 
+std::string restartConfigurationCompatibilityRecord(
+    const RestartReadResult& restart, const core::FrozenConfig& current) {
+  const auto fail = [](std::string_view detail) -> void {
+    throw std::runtime_error("restart normalized configuration compatibility refused: " + std::string(detail));
+  };
+  validateContinuationMetadata(restart.normalized_config_text,
+      restart.normalized_config_hash_hex, restart.provenance, "restart configuration admission");
+  const std::string begin_marker = "restart_config_compatibility_begin=treepm_normalized_defaults_v1\n";
+  const std::string end_marker = "restart_config_compatibility_end=treepm_normalized_defaults_v1\n";
+  if (restart.normalized_config_hash_hex == current.provenance.config_hash_hex) {
+    if (restart.normalized_config_text != current.normalized_text) fail("hash agrees but normalized text differs");
+    // Preserve a previous migration record across subsequent exact resumes.
+    const auto begin = restart.provenance.derived_runtime_state.find(begin_marker);
+    if (begin == std::string::npos) return {};
+    const auto end = restart.provenance.derived_runtime_state.find(end_marker, begin);
+    if (end == std::string::npos) fail("unterminated historical compatibility record");
+    return restart.provenance.derived_runtime_state.substr(begin, end + end_marker.size() - begin);
+  }
+  if (!restart.payload_integrity_verified || restart.diagnostics.restart_schema_version != 23U ||
+      restart.payload_integrity_algorithm != "sha256-canonical-le-v1" || restart.payload_integrity_sha256_hex.size() != 64U) {
+    fail("migration requires a complete, integrity-verified v23 checkpoint");
+  }
+  const auto& original = restart.provenance;
+  if (original.schema_version != "provenance_v7" || original.config_schema_name != "cosmosim_config" ||
+      original.config_schema_version != "1" || original.integrity_digest_algorithm != "sha256" ||
+      original.normalized_config != restart.normalized_config_text ||
+      original.config_hash_hex != restart.normalized_config_hash_hex ||
+      original.normalized_config_hash_hex != restart.normalized_config_hash_hex ||
+      original.normalized_config_sha256_hex != core::strongConfigHashSha256Hex(restart.normalized_config_text)) {
+    fail("complete original normalized configuration and v7 provenance are required");
+  }
+  if (current.config.numerics.treepm_gaussian_pair_lookup_enabled ||
+      !current.config.numerics.treepm_full_mac_diagnostics || current.config.numerics.hierarchical_max_rung != 0 ||
+      current.config.schema_version != 1 ||
+      current.provenance.config_hash_hex != core::stableConfigHashHex(current.normalized_text)) {
+    fail("new options must retain legacy defaults and global KDK must remain selected");
+  }
+  if (restart.integrator_state.inside_kdk_step || !restart.integrator_state.last_completed_restart_safe ||
+      restart.integrator_state.last_completed_boundary_kind != core::StepBoundaryKind::kGlobalSynchronizationPoint ||
+      restart.integrator_state.time_bins.max_bin != 0U ||
+      restart.scheduler_state.max_bin != 0U || restart.gas_cell_scheduler_state.max_bin != 0U ||
+      restart.scheduler_state.current_tick != restart.gas_cell_scheduler_state.current_tick ||
+      restart.state.metadata.normalized_config_hash != core::stableConfigHash(restart.normalized_config_text) ||
+      restart.state.metadata.normalized_config_hash_hex != restart.normalized_config_hash_hex) {
+    fail("closed global KDK state and original state configuration identity required");
+  }
+  // This is a versioned literal projection, not permissive re-normalization:
+  // it cannot accept another missing key, a changed scientific value, or an
+  // unsupported historical default. Roundtrip also verifies today's defaults.
+  if (current.normalized_text.size() > 1024U*1024U || restart.normalized_config_text.size() > 1024U*1024U) {
+    fail("normalized configuration exceeds migration metadata budget");
+  }
+  std::string projected = current.normalized_text;
+  for (const std::string_view line : {"treepm_gaussian_pair_lookup_enabled = false\n",
+                                     "treepm_full_mac_diagnostics = true\n"}) {
+    const auto position = projected.find(line);
+    if (position == std::string::npos || projected.find(line, position + line.size()) != std::string::npos) {
+      fail("current normalized default representation is not the supported revision");
+    }
+    projected.erase(position, line.size());
+  }
+  if (projected != restart.normalized_config_text) fail("scientific/settings equivalence not established by exact legacy projection");
+  if (core::loadFrozenConfigFromString(projected, "restart_treepm_normalized_defaults_v1").normalized_text != current.normalized_text) {
+    fail("legacy default normalization does not reproduce current configuration");
+  }
+  const auto hex = [](std::string_view text) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(text.size()*2U);
+    for (const char value : text) {
+      const auto byte = static_cast<unsigned char>(value);
+      result.push_back(digits[byte >> 4U]); result.push_back(digits[byte & 15U]);
+    }
+    return result;
+  };
+  const auto original_provenance = core::serializeProvenanceRecord(original);
+  if (original_provenance.size() > 4U*1024U*1024U) fail("original provenance exceeds migration metadata budget");
+  return begin_marker +
+      "original_normalized_hash_hex=" + restart.normalized_config_hash_hex + "\n" +
+      "original_normalized_sha256_hex=" + original.normalized_config_sha256_hex + "\n" +
+      "original_payload_sha256_hex=" + restart.payload_integrity_sha256_hex + "\n" +
+      "derived_normalized_hash_hex=" + current.provenance.config_hash_hex + "\n" +
+      "derived_normalized_sha256_hex=" + core::strongConfigHashSha256Hex(current.normalized_text) + "\n" +
+      "original_normalized_text_utf8_hex=" + hex(restart.normalized_config_text) + "\n" +
+      "original_provenance_utf8_hex=" + hex(original_provenance) + "\n" + end_marker;
+}
+
 void writeRestartCheckpointHdf5(
     const std::filesystem::path& output_path,
     const RestartWritePayload& payload,
@@ -4482,6 +4570,8 @@ RestartReadResult readRestartCheckpointHdf5(
       computed_integrity.sha256_hex != result.payload_integrity_sha256_hex) {
     throw std::runtime_error("restart canonical SHA-256 payload integrity mismatch");
   }
+
+  result.payload_integrity_verified = true;
 
   // The on-disk schema remains fully explicit. Only after complete logical
   // validation and integrity verification do we release redundant homogeneous

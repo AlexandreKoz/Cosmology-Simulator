@@ -240,3 +240,16 @@ a single-owner diagnostic, including in that build; run distributed scientific
 checks through the registered MPI tests. Exact frozen-snapshot, Ewald, sweep,
 perf and hierarchical diagnostic commands are in the
 [campaign handoff](repair/treepm_unified_performance_recovery_20261010.md).
+
+## Offline TreePM qualification tools
+
+`treepm_sweep.py`, `hierarchical_dmo_qualification.py` and their shared snapshot
+reader support Python 3.8 with compatible NumPy/h5py installations. The CMake
+Python interpreter discovery previously declared no repository-wide numeric
+minimum; this scoped workflow requirement does not change binding requirements.
+`python_treepm_snapshot_tools` is registered when Python >=3.8 is found,
+independently of `COSMOSIM_ENABLE_PYTHON`. Its missing-package exit 77 is an
+explicit dependency skip, never a scientific pass. The MPI/HDF5/FFTW presets
+require Parallel HDF5; CI installs `libhdf5-openmpi-dev` accordingly. Recovery
+Ewald qualification requires FFTW and is not registered as a CPU-only success.
+See the [source-only repair commands](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md).

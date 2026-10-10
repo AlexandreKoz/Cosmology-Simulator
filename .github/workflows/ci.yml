@@ -107,14 +107,14 @@ jobs:
           - configure_preset: pm-hdf5-fftw-debug
             build_preset: build-pm-hdf5-fftw-debug
             test_preset: test-pm-hdf5-fftw-debug
-            test_regex: "unit_pm_solver|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|validation_unit|validation_integration|validation_convergence|validation_regression|integration_reference_workflow"
-            apt_packages: "g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev"
+            test_regex: "unit_tree_pm_split_kernel|validation_tree_pm_ewald_accuracy|validation_tree_pm_recovery_ewald_accuracy|validation_tree_pm_ewald_accuracy_first_light_softening|integration_hierarchical_treepm_workflow|integration_restart_equivalence_treepm|python_treepm_snapshot_tools|unit_pm_solver|integration_pm_periodic_mode|integration_tree_pm_coupling_periodic|validation_unit|validation_integration|validation_convergence|validation_regression|integration_reference_workflow"
+            apt_packages: "g++ cmake ninja-build pkg-config libhdf5-dev libfftw3-dev python3-numpy python3-h5py"
             run_bench: "1"
           - configure_preset: mpi-hdf5-fftw-debug
             build_preset: build-mpi-hdf5-fftw-debug
             test_preset: test-mpi-hdf5-fftw-debug
-            test_regex: "unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|integration_pm_periodic_mode_mpi_two_rank|integration_pm_slab_halo_exchange_mpi_two_rank|integration_tree_pm_coupling_periodic_mpi_two_rank|integration_tree_pseudo_hierarchy_exchange_mpi_two_rank|integration_reference_workflow_distributed_treepm_mpi_two_rank|integration_runtime_app_mpi_treepm_smoke_two_rank|integration_snapshot_set_mpi_2_rank|integration_snapshot_set_mpi_4_rank|integration_distributed_sfc_rebalance_mpi_two_rank|integration_distributed_sfc_rebalance_mpi_three_rank|integration_distributed_gas_cell_migration_mpi_two_rank|integration_reference_workflow_distributed_hydro_mpi_two_rank|integration_reference_workflow_distributed_amr_mpi_two_rank|integration_reference_workflow_distributed_isolated_pm_mpi_two_rank|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank|validation_phase2_mpi_gravity_four_rank"
-            apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev libfftw3-mpi-dev"
+            test_regex: "integration_hierarchical_treepm_workflow_np2|integration_hierarchical_treepm_workflow_np4|unit_config_parser|integration_provenance_roundtrip|integration_docs_scaffold|unit_parallel_distributed_memory|integration_pm_periodic_mode_mpi_two_rank|integration_pm_slab_halo_exchange_mpi_two_rank|integration_tree_pm_coupling_periodic_mpi_two_rank|integration_tree_pseudo_hierarchy_exchange_mpi_two_rank|integration_reference_workflow_distributed_treepm_mpi_two_rank|integration_runtime_app_mpi_treepm_smoke_two_rank|integration_snapshot_set_mpi_2_rank|integration_snapshot_set_mpi_4_rank|integration_distributed_sfc_rebalance_mpi_two_rank|integration_distributed_sfc_rebalance_mpi_three_rank|integration_distributed_gas_cell_migration_mpi_two_rank|integration_reference_workflow_distributed_hydro_mpi_two_rank|integration_reference_workflow_distributed_amr_mpi_two_rank|integration_reference_workflow_distributed_isolated_pm_mpi_two_rank|validation_phase2_mpi_gravity_two_rank|validation_phase2_mpi_gravity_three_rank|validation_phase2_mpi_gravity_four_rank"
+            apt_packages: "g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libhdf5-openmpi-dev libfftw3-dev libfftw3-mpi-dev"
             run_bench: "0"
     steps:
       - uses: actions/checkout@v4
@@ -137,6 +137,9 @@ jobs:
             "ci_artifacts/${{ matrix.configure_preset }}/cosmosim_build_metadata-${{ matrix.configure_preset }}.json" \
             "validation/reference/ci_build_metadata_expectations_v1.json" \
             "${{ matrix.configure_preset }}"
+      - name: Run offline snapshot contracts with the packaged Python dependencies
+        if: matrix.configure_preset == 'pm-hdf5-fftw-debug'
+        run: /usr/bin/python3 tests/python/test_treepm_snapshot_tools.py
       - name: Generate TreePM force-error map artifact
         if: matrix.configure_preset == 'pm-hdf5-fftw-debug'
         run: |
@@ -167,7 +170,7 @@ jobs:
       - name: Install dependencies for explicit feature-path gates
         run: |
           sudo apt-get update
-          sudo apt-get install -y g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libfftw3-dev libfftw3-mpi-dev
+          sudo apt-get install -y g++ cmake ninja-build pkg-config libopenmpi-dev openmpi-bin libhdf5-dev libhdf5-openmpi-dev libfftw3-dev libfftw3-mpi-dev
       - name: Run infrastructure gate bundle
         run: bash ./scripts/ci/enforce_infra_gates.sh ci_artifacts/infrastructure_gates
       - name: Upload infrastructure gate report

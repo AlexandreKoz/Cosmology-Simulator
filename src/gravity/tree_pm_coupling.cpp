@@ -3598,6 +3598,13 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               ++counters.cutoff_skipped_pairs;
               continue;
             }
+            // The exact coincident-pair vector is zero, including when its
+            // finite-softening radial coefficient overflows double. Never form
+            // 0*infinity. Still count the physical direct interaction.
+            if (sx == 0.0 && sy == 0.0 && sz == 0.0) {
+              ++counters.direct_pair_evaluations;
+              continue;
+            }
             const double source_softening =
                 source_softening_base[
                     static_cast<std::size_t>(source_index) *

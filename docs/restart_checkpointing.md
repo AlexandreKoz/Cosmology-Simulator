@@ -72,14 +72,15 @@ the deterministic COM-distance fallback. A restart therefore does not invent a
 force scale, and a migration/compaction generation change cannot silently feed
 stale row-indexed history to the MAC.
 
-Production config currently requires
-`numerics.treepm_update_cadence_steps = 1` and
-`numerics.hierarchical_max_rung = 0`. Every integrator-issued,
-rank-coordinated production force-refresh surface rebuilds PM. The rung-zero
-restriction is fail-closed until per-element kick/drift epochs exist for a
-correct mixed-rung KDK update. On resume, both particle and gas-cell scheduler
-payloads must have `max_bin=0`, all committed bins zero, and every pending bin
-zero or unset. Ranks validate this policy before production stepping. The
+The safe production default remains `numerics.hierarchical_max_rung = 0`,
+with `numerics.treepm_update_cadence_steps = 1`. The provisional collisionless
+hierarchical path is explicitly opt-in and is not scientifically certified.
+Rung-zero resumes require both schedulers to have `max_bin=0`, all committed bins
+zero, and pending bins zero or unset. Opt-in hierarchical resumes require the
+configured rung, a closed synchronization boundary, matching source drift epochs,
+and no open active interval. Rank-coordinated coarse endpoints must report an
+actually refreshed PM field at the exact endpoint scale factor and step index.
+Ranks validate these contracts before production stepping. The
 integrator/distributed restart state remains authoritative for:
 
 - gravity-kick opportunity and refresh decision;
@@ -469,3 +470,37 @@ the campaign does not authorize bypassing it for old checkpoints. The immutable
 coefficient table is derived runtime cache data and is rebuilt on demand after
 restart. Fixed octant traversal changes accumulation order, so old force-vector
 checksums are numerical baselines rather than new bitwise replay expectations.
+
+## Constrained normalized-configuration migration (20261010)
+
+`io::restartConfigurationCompatibilityRecord` is an additive admission helper.
+Exact admission now checks normalized text as well as its hash. A mismatched
+configuration can use **treepm_normalized_defaults_v1** only when:
+
+- The checkpoint was completely read and its v23 canonical SHA-256 verified by
+  `readRestartCheckpointHdf5`; its transient `payload_integrity_verified` receipt
+  is not an on-disk field or a substitute for checkpoint validation.
+- Original `provenance_v7`, config schema 1, full normalized text, stable hash,
+  strong hash, and original state configuration identity all agree.
+- It is a closed, restart-safe global KDK checkpoint with rung-zero schedulers.
+- Current lookup is false and full MAC diagnostics true. Removing exactly the
+  canonical lines for those two default keys from the current normalized text
+  produces the original text byte for byte; authoritative parsing restores the
+  exact current normalized text. All other settings, including output, topology,
+  source and scientific settings, must remain unchanged.
+
+Older versions, opaque hashes, partial/changed historical configurations,
+nondefault new options, hierarchical migration and insufficient provenance fail
+closed. Ordinary science snapshots remain ineligible for continuation. Existing
+ownership, epoch, topology, force-cache and collective admission checks still run.
+
+Raw checkpoint config/provenance remain unchanged. A separately marked record in
+new `derived_runtime_state` contains original stable/strong/payload digests,
+hex-encoded original normalized text and serialized provenance, and distinct
+derived config fingerprints. The workflow report retains the record and later
+exact resumes carry it forward. This uses existing provenance serialization and
+changes no persistent schema. Migration metadata is bounded to 1 MiB per
+normalized representation and 4 MiB original serialized provenance; it allocates
+no per-particle state. See the [repair handoff](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md) for positive
+production resume tests and refusal fixtures. Qualification is NOT RUN — deferred
+by user.

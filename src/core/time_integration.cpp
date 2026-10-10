@@ -1502,9 +1502,17 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
       });
       dispatcher(context, false);
       prepare("hierarchical PM endpoint commit", [&] {
+        if (context.hierarchical_kdk.synchronization_end && integrator.pm_refresh_enabled &&
+            !context.pm_refresh_directive.has_sync_event) {
+          throw std::logic_error("coarse PM endpoint omitted synchronized refresh event");
+        }
         if (context.pm_refresh_directive.has_sync_event) {
           const auto& d = context.pm_refresh_directive;
           if (!d.solver_executed || !d.refresh_long_range_field) throw std::logic_error("coarse PM endpoint did not refresh");
+          if (d.field_built_step_index != integrator.step_index ||
+              d.field_built_scale_factor != context.timeline_step.scale_factor_end) {
+            throw std::logic_error("coarse PM endpoint carries a stale field epoch");
+          }
           const PmSyncEvent event{d.gravity_kick_opportunity, d.refresh_long_range_field,
               d.field_version, d.last_refresh_opportunity, d.field_built_step_index, d.field_built_scale_factor};
           integrator.pm_sync_state.commitKickOpportunity(event);

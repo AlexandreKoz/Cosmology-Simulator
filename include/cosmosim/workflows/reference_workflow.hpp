@@ -84,6 +84,8 @@ struct ReferenceWorkflowReport {
     std::uint64_t active_force_targets = 0U;
   };
 
+  // Derived, versioned migration provenance; original checkpoint remains immutable.
+  std::string restart_config_compatibility_record;
   bool config_compatible = false;
   bool schema_compatible = false;
   bool canonical_stage_order = false;

@@ -13,7 +13,7 @@
 #include "cosmosim/core/time_integration.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
-namespace cosmosim::core { class MemoryGovernor; }
+namespace cosmosim::core { class MemoryGovernor; struct FrozenConfig; }
 
 namespace cosmosim::io {
 
@@ -209,7 +209,18 @@ struct RestartReadResult {
   // v23+: canonical, endian-independent integrity digest.
   std::string payload_integrity_algorithm;
   std::string payload_integrity_sha256_hex;
+  // Transient read receipt, set only after completeness and payload verification.
+  // Not an on-disk schema field; synthetic embedding payloads default to false.
+  bool payload_integrity_verified = false;
 };
+
+// Exact admission or constrained treepm_normalized_defaults_v1 migration.
+// Returns a separately identified provenance record without mutating raw input.
+// Migration requires a verified v23/provenance_v7 checkpoint, a closed global
+// KDK boundary and the exact current normalized text minus the two new default
+// TreePM lines. Insufficient/opaque historical provenance fails closed.
+[[nodiscard]] std::string restartConfigurationCompatibilityRecord(
+    const RestartReadResult& restart, const core::FrozenConfig& current);
 
 [[nodiscard]] std::uint64_t restartPayloadIntegrityHash(
     const RestartWritePayload& payload, core::MemoryGovernor* governor = nullptr);

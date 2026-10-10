@@ -664,3 +664,40 @@ particle IDs, masses, cosmological state and units. Timing alone never qualifies
 mesh/leaf choices. No speedup, force budget, or hierarchical scale range is newly
 certified by writing these tests. Exact commands and remaining gates are in
 [the campaign report](repair/treepm_unified_performance_recovery_20261010.md).
+
+## P1–P5 follow-up reliability gates — 20261010
+
+`unit_tree_pm_split_kernel` now asserts the exact finite-softening coincident
+residual limit, approach to zero, immutable lookup consistency and invalid-input
+contracts. Periodic coupling checks reject NaN/Inf comparisons and explicitly
+verify zero coincident force even when the radial coefficient overflows. Existing
+seam, rectangular, half-box, cutoff, mixed-softening and distributed fixtures keep
+their accuracy bounds.
+
+`validation_tree_pm_recovery_ewald_accuracy` passes the mandatory executable flag
+`--recovery-qualification`; clearing an environment variable cannot reduce it to
+a baseline-only run. Strict/adaptive x analytic/lookup profiles must satisfy the
+existing independent Ewald accuracy targets, exercise direct pairs and separately
+accept internal multipoles. Its printed experimental qualification gates do not
+certify adaptive momentum conservation or promote opt-in runtime capabilities.
+The certified baseline conservation gate and finite-softening cases remain.
+
+Production hierarchical workflow tests add verified default-key restart migration
+and incompatible/insufficient/open-state refusals. Core hierarchical dispatcher
+fault injection checks missing/stale endpoint PM events before cadence commit.
+Source generation, all-source drift, active sets, endpoint kicks, replay and
+restart/refinement assertions remain active. Full nonlinear convergence and
+large-snapshot performance remain manual gates.
+
+Official `test_` CMake targets already compile with `-UNDEBUG` or `/UNDEBUG`,
+guarded by `unit_assertions_enabled`. Selected gravity/config/hierarchical/HDF5/
+restart sources additionally use `tests/support/test_require.hpp`, independent
+of build flags. No production NDEBUG policy or scientific tolerance was weakened.
+Explicit CTest timeout/working-directory properties are preserved; numeric and
+`_npN` MPI cases now receive rank-count processor accounting.
+
+The Python reader matrix uses production-shaped v2/v3 closure fixtures and named
+negative categories (completion, member identity/counts, units, masses, lanes,
+IDs and checkpoint refusal). Missing Python packages are an explicit skip.
+All new/changed gates are **NOT RUN — deferred by user**. See the
+[repair report and manual matrix](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md).

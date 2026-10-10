@@ -1,5 +1,6 @@
 #include <array>
-#include <cassert>
+#include "../support/test_require.hpp"
+#include <iostream>
 #include <cstdint>
 #include <filesystem>
 #include <stdexcept>
@@ -50,6 +51,7 @@ cosmosim::core::SimulationState makeLocalState(int rank, int size) {
 
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
+  try {
   int rank = 0;
   int size = 1;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -125,19 +127,20 @@ int main(int argc, char** argv) {
           cosmosim::io::SnapshotCompletionIntegrityMode::kDistributedScienceReadback);
       const std::filesystem::path completion = directory / "snap_007.complete";
       const auto inspection = cosmosim::io::inspectSnapshotSet(completion);
-      assert(inspection.complete);
-      assert(inspection.num_files_per_snapshot == 1U);
-      assert(inspection.global_part_count == global_counts);
-      assert(inspection.member_paths.size() == 1U);
+      CHUI_REQUIRE(inspection.complete);
+      CHUI_REQUIRE(inspection.num_files_per_snapshot == 1U);
+      CHUI_REQUIRE(inspection.global_part_count == global_counts);
+      CHUI_REQUIRE(inspection.member_paths.size() == 1U);
       cosmosim::io::validateSnapshotSetHdf5(completion).requireValid();
 
       const auto direct = cosmosim::io::readGadgetArepoSnapshotHdf5(
           final_path, config, cosmosim::io::SnapshotReadOptions{
               .require_complete_chui_set = false});
-      assert(direct.state.particles.size() ==
+      CHUI_REQUIRE(direct.state.particles.size() ==
              static_cast<std::size_t>(global_particle_count));
-      assert(direct.state.validatePersistentParticleIds());
-    } catch (...) {
+      CHUI_REQUIRE(direct.state.validatePersistentParticleIds());
+    } catch (const std::exception& error) {
+      std::cerr << "snapshot-set root validation failed: " << error.what() << '\n';
       root_ok = 0;
     }
   }
@@ -158,26 +161,29 @@ int main(int argc, char** argv) {
           member, generation, static_cast<std::uint32_t>(size), global_counts, false);
       const std::filesystem::path completion = directory / "snap_007.complete";
       const auto inspection = cosmosim::io::inspectSnapshotSet(completion);
-      assert(inspection.complete);
-      assert(inspection.num_files_per_snapshot == static_cast<std::uint32_t>(size));
-      assert(inspection.global_part_count == global_counts);
-      assert(inspection.member_paths.size() == static_cast<std::size_t>(size));
+      CHUI_REQUIRE(inspection.complete);
+      CHUI_REQUIRE(inspection.num_files_per_snapshot == static_cast<std::uint32_t>(size));
+      CHUI_REQUIRE(inspection.global_part_count == global_counts);
+      CHUI_REQUIRE(inspection.member_paths.size() == static_cast<std::size_t>(size));
       cosmosim::io::validateSnapshotSetHdf5(completion).requireValid();
 
       const auto merged = cosmosim::io::readCosmoSimScienceSnapshotHdf5(completion, config);
-      assert(merged.state.particles.size() ==
+      CHUI_REQUIRE(merged.state.particles.size() ==
              static_cast<std::size_t>(global_particle_count));
-      assert(merged.state.validatePersistentParticleIds());
+      CHUI_REQUIRE(merged.state.validatePersistentParticleIds());
 
       std::filesystem::remove(directory / "snap_007.1.hdf5");
       bool rejected = false;
       try {
         static_cast<void>(cosmosim::io::inspectSnapshotSet(completion));
-      } catch (const std::exception&) {
-        rejected = true;
+      } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        rejected = message.find("snapshot inspection: cannot open") != std::string::npos &&
+                   message.find("snap_007.1.hdf5") != std::string::npos;
       }
-      assert(rejected);
-    } catch (...) {
+      CHUI_REQUIRE(rejected);
+    } catch (const std::exception& error) {
+      std::cerr << "snapshot-set root validation failed: " << error.what() << '\n';
       root_ok = 0;
     }
   }
@@ -186,4 +192,9 @@ int main(int argc, char** argv) {
   MPI_Barrier(MPI_COMM_WORLD);
   MPI_Finalize();
   return root_ok == 1 ? 0 : 1;
+  } catch (const std::exception& error) {
+    std::cerr << "snapshot-set MPI fixture failed: " << error.what() << '\n';
+    MPI_Abort(MPI_COMM_WORLD, 1);
+    return 1;
+  }
 }

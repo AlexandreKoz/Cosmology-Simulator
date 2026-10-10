@@ -1,5 +1,5 @@
+#include "../support/test_require.hpp"
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <filesystem>
 #include <optional>
@@ -176,13 +176,13 @@ void populateState(cosmosim::core::SimulationState& state) {
 
   state.rebuildSpeciesIndex();
   state.refreshGasCellIdentityFromParticleOrder();
-  assert(state.validateOwnershipInvariants());
+  CHUI_REQUIRE(state.validateOwnershipInvariants());
 }
 
 std::unordered_map<std::uint64_t, double> gasDensityByParticleId(const cosmosim::core::SimulationState& state) {
   std::unordered_map<std::uint64_t, double> by_id;
   const auto gas_globals = state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kGas);
-  assert(gas_globals.size() == state.cells.size());
+  CHUI_REQUIRE(gas_globals.size() == state.cells.size());
   for (std::size_t cell = 0; cell < state.cells.size(); ++cell) {
     by_id.emplace(state.particle_sidecar.particle_id[gas_globals[cell]], state.gas_cells.density_code[cell]);
   }
@@ -204,18 +204,18 @@ std::vector<std::uint64_t> particleIdsForIndices(
 void assertParticleTimeBinsMatchScheduler(
     const cosmosim::core::SimulationState& state,
     const cosmosim::core::TimeBinPersistentState& scheduler_state) {
-  assert(state.particles.time_bin.size() == scheduler_state.bin_index.size());
+  CHUI_REQUIRE(state.particles.time_bin.size() == scheduler_state.bin_index.size());
   for (std::size_t i = 0; i < state.particles.time_bin.size(); ++i) {
-    assert(state.particles.time_bin[i] == scheduler_state.bin_index[i]);
+    CHUI_REQUIRE(state.particles.time_bin[i] == scheduler_state.bin_index[i]);
   }
 }
 
 void assertGasCellTimeBinsMatchScheduler(
     const cosmosim::core::SimulationState& state,
     const cosmosim::core::TimeBinPersistentState& scheduler_state) {
-  assert(state.cells.time_bin.size() == scheduler_state.bin_index.size());
+  CHUI_REQUIRE(state.cells.time_bin.size() == scheduler_state.bin_index.size());
   for (std::size_t row = 0; row < state.cells.time_bin.size(); ++row) {
-    assert(state.cells.time_bin[row] == scheduler_state.bin_index[row]);
+    CHUI_REQUIRE(state.cells.time_bin[row] == scheduler_state.bin_index[row]);
   }
 }
 
@@ -225,7 +225,7 @@ std::vector<std::uint64_t> gasCellIdsByDenseRow(const cosmosim::core::Simulation
   ids.reserve(state.cells.size());
   for (std::uint32_t row = 0; row < state.cells.size(); ++row) {
     const auto gas_cell_id = state.gas_cell_identity.gasCellIdForLocalRow(row);
-    assert(gas_cell_id.has_value());
+    CHUI_REQUIRE(gas_cell_id.has_value());
     ids.push_back(*gas_cell_id);
   }
   return ids;
@@ -296,8 +296,8 @@ void assertSofteningPriorityResolution(const cosmosim::core::SimulationState& st
       .species_policy = species_softening,
   };
 
-  assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(0, global_softening, softening_view) - 0.001) < 1.0e-15);
-  assert(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_softening, softening_view) - 0.003) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(0, global_softening, softening_view) - 0.001) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(cosmosim::gravity::resolveSourceSofteningEpsilon(2, global_softening, softening_view) - 0.003) < 1.0e-15);
 }
 
 void testRestartRoundtrip() {
@@ -347,7 +347,7 @@ void testRestartRoundtrip() {
   gas_cell_scheduler.submitCandidateBin(2, 2, cosmosim::core::TimeStepCandidateSource::kUserClamp);
   gas_cell_scheduler.beginSubstep();
   gas_cell_scheduler.endSubstep();
-  assert(gas_cell_scheduler.currentTick() == scheduler.currentTick());
+  CHUI_REQUIRE(gas_cell_scheduler.currentTick() == scheduler.currentTick());
   cosmosim::core::syncGasCellTimeBinMirrorsFromGasCellScheduler(gas_cell_scheduler, state);
   const auto original_gas_cell_scheduler_state = gas_cell_scheduler.exportPersistentState();
   const auto original_gas_cell_scheduler_ids = gasCellIdsByDenseRow(state);
@@ -461,7 +461,7 @@ void testRestartRoundtrip() {
   const std::filesystem::path bare_checkpoint_path = "cosmosim_restart_bare_path.hdf5";
   std::filesystem::remove(bare_checkpoint_path);
   cosmosim::io::writeRestartCheckpointHdf5(bare_checkpoint_path, payload);
-  assert(cosmosim::io::readRestartCheckpointHdf5(bare_checkpoint_path).diagnostics.restart_schema_version ==
+  CHUI_REQUIRE(cosmosim::io::readRestartCheckpointHdf5(bare_checkpoint_path).diagnostics.restart_schema_version ==
          cosmosim::io::restartSchema().version);
   cosmosim::io::RestartWritePolicy invalid_temp_policy;
   invalid_temp_policy.temporary_suffix.clear();
@@ -471,311 +471,311 @@ void testRestartRoundtrip() {
   } catch (const std::invalid_argument&) {
     invalid_temp_rejected = true;
   }
-  assert(invalid_temp_rejected);
-  assert(cosmosim::io::readRestartCheckpointHdf5(bare_checkpoint_path).diagnostics.restart_schema_version ==
+  CHUI_REQUIRE(invalid_temp_rejected);
+  CHUI_REQUIRE(cosmosim::io::readRestartCheckpointHdf5(bare_checkpoint_path).diagnostics.restart_schema_version ==
          cosmosim::io::restartSchema().version);
   std::filesystem::remove(bare_checkpoint_path);
 
   cosmosim::io::writeRestartCheckpointHdf5(checkpoint_path, payload);
   const cosmosim::io::RestartReadResult restored = cosmosim::io::readRestartCheckpointHdf5(checkpoint_path);
-  assert(restored.payload_integrity_algorithm == "sha256-canonical-le-v1");
-  assert(restored.payload_integrity_sha256_hex.size() == 64U);
-  assert(restored.gravity_force_cache.valid);
-  assert(restored.gravity_force_cache.particle_id == force_cache.particle_id);
-  assert(restored.gravity_force_cache.gas_cell_id == force_cache.gas_cell_id);
-  assert(restored.gravity_force_cache.particle_accel_x_comoving ==
+  CHUI_REQUIRE(restored.payload_integrity_algorithm == "sha256-canonical-le-v1");
+  CHUI_REQUIRE(restored.payload_integrity_sha256_hex.size() == 64U);
+  CHUI_REQUIRE(restored.gravity_force_cache.valid);
+  CHUI_REQUIRE(restored.gravity_force_cache.particle_id == force_cache.particle_id);
+  CHUI_REQUIRE(restored.gravity_force_cache.gas_cell_id == force_cache.gas_cell_id);
+  CHUI_REQUIRE(restored.gravity_force_cache.particle_accel_x_comoving ==
          force_cache.particle_accel_x_comoving);
-  assert(restored.gravity_force_cache.particle_accel_y_comoving ==
+  CHUI_REQUIRE(restored.gravity_force_cache.particle_accel_y_comoving ==
          force_cache.particle_accel_y_comoving);
-  assert(restored.gravity_force_cache.particle_accel_z_comoving ==
+  CHUI_REQUIRE(restored.gravity_force_cache.particle_accel_z_comoving ==
          force_cache.particle_accel_z_comoving);
-  assert(restored.gravity_force_cache.cell_accel_x_comoving ==
+  CHUI_REQUIRE(restored.gravity_force_cache.cell_accel_x_comoving ==
          force_cache.cell_accel_x_comoving);
-  assert(restored.gravity_force_cache.cell_accel_y_comoving ==
+  CHUI_REQUIRE(restored.gravity_force_cache.cell_accel_y_comoving ==
          force_cache.cell_accel_y_comoving);
-  assert(restored.gravity_force_cache.cell_accel_z_comoving ==
+  CHUI_REQUIRE(restored.gravity_force_cache.cell_accel_z_comoving ==
          force_cache.cell_accel_z_comoving);
 
-  assert(restored.state.validateOwnershipInvariants());
+  CHUI_REQUIRE(restored.state.validateOwnershipInvariants());
   cosmosim::core::debugAssertGasCellIdentityContract(restored.state);
-  assert(restored.state.metadata.run_name == state.metadata.run_name);
-  assert(restored.state.metadata.schema_version == state.metadata.schema_version);
-  assert(restored.state.metadata.step_index == state.metadata.step_index);
-  assert(std::abs(restored.state.metadata.scale_factor - state.metadata.scale_factor) < 1.0e-15);
-  assert(restored.state.metadata.normalized_config_hash_hex == state.metadata.normalized_config_hash_hex);
-  assert(restored.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
-  assert(restored.state.particle_sidecar.sfc_key == state.particle_sidecar.sfc_key);
-  assert(restored.state.particle_sidecar.species_tag == state.particle_sidecar.species_tag);
-  assert(restored.state.particle_sidecar.particle_flags == state.particle_sidecar.particle_flags);
-  assert(restored.state.particle_sidecar.owning_rank == state.particle_sidecar.owning_rank);
-  assert(restored.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
-  assert(restored.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
-  assert(restored.state.star_particles.particle_index == state.star_particles.particle_index);
-  assert(restored.state.star_particles.formation_scale_factor == state.star_particles.formation_scale_factor);
-  assert(restored.state.star_particles.birth_mass_code == state.star_particles.birth_mass_code);
-  assert(restored.state.star_particles.metallicity_mass_fraction == state.star_particles.metallicity_mass_fraction);
-  assert(restored.state.star_particles.stellar_age_years_last == state.star_particles.stellar_age_years_last);
-  assert(
+  CHUI_REQUIRE(restored.state.metadata.run_name == state.metadata.run_name);
+  CHUI_REQUIRE(restored.state.metadata.schema_version == state.metadata.schema_version);
+  CHUI_REQUIRE(restored.state.metadata.step_index == state.metadata.step_index);
+  CHUI_REQUIRE(std::abs(restored.state.metadata.scale_factor - state.metadata.scale_factor) < 1.0e-15);
+  CHUI_REQUIRE(restored.state.metadata.normalized_config_hash_hex == state.metadata.normalized_config_hash_hex);
+  CHUI_REQUIRE(restored.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
+  CHUI_REQUIRE(restored.state.particle_sidecar.sfc_key == state.particle_sidecar.sfc_key);
+  CHUI_REQUIRE(restored.state.particle_sidecar.species_tag == state.particle_sidecar.species_tag);
+  CHUI_REQUIRE(restored.state.particle_sidecar.particle_flags == state.particle_sidecar.particle_flags);
+  CHUI_REQUIRE(restored.state.particle_sidecar.owning_rank == state.particle_sidecar.owning_rank);
+  CHUI_REQUIRE(restored.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
+  CHUI_REQUIRE(restored.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
+  CHUI_REQUIRE(restored.state.star_particles.particle_index == state.star_particles.particle_index);
+  CHUI_REQUIRE(restored.state.star_particles.formation_scale_factor == state.star_particles.formation_scale_factor);
+  CHUI_REQUIRE(restored.state.star_particles.birth_mass_code == state.star_particles.birth_mass_code);
+  CHUI_REQUIRE(restored.state.star_particles.metallicity_mass_fraction == state.star_particles.metallicity_mass_fraction);
+  CHUI_REQUIRE(restored.state.star_particles.stellar_age_years_last == state.star_particles.stellar_age_years_last);
+  CHUI_REQUIRE(
       restored.state.star_particles.stellar_returned_mass_cumulative_code ==
       state.star_particles.stellar_returned_mass_cumulative_code);
-  assert(
+  CHUI_REQUIRE(
       restored.state.star_particles.stellar_returned_metals_cumulative_code ==
       state.star_particles.stellar_returned_metals_cumulative_code);
-  assert(
+  CHUI_REQUIRE(
       restored.state.star_particles.stellar_newly_synthesized_metals_cumulative_code ==
       state.star_particles.stellar_newly_synthesized_metals_cumulative_code);
-  assert(
+  CHUI_REQUIRE(
       restored.state.star_particles.stellar_feedback_energy_cumulative_erg ==
       state.star_particles.stellar_feedback_energy_cumulative_erg);
-  assert(restored.state.star_particles.enrichment_carry_mass_code ==
+  CHUI_REQUIRE(restored.state.star_particles.enrichment_carry_mass_code ==
          state.star_particles.enrichment_carry_mass_code);
-  assert(restored.state.star_particles.enrichment_carry_metals_code ==
+  CHUI_REQUIRE(restored.state.star_particles.enrichment_carry_metals_code ==
          state.star_particles.enrichment_carry_metals_code);
-  assert(restored.state.star_particles.enrichment_carry_feedback_energy_erg ==
+  CHUI_REQUIRE(restored.state.star_particles.enrichment_carry_feedback_energy_erg ==
          state.star_particles.enrichment_carry_feedback_energy_erg);
-  assert(restored.state.star_particles.enrichment_carry_momentum_code ==
+  CHUI_REQUIRE(restored.state.star_particles.enrichment_carry_momentum_code ==
          state.star_particles.enrichment_carry_momentum_code);
-  assert(restored.state.star_particles.stellar_deposited_mass_cumulative_code ==
+  CHUI_REQUIRE(restored.state.star_particles.stellar_deposited_mass_cumulative_code ==
          state.star_particles.stellar_deposited_mass_cumulative_code);
-  assert(restored.state.star_particles.stellar_deposited_metals_cumulative_code ==
+  CHUI_REQUIRE(restored.state.star_particles.stellar_deposited_metals_cumulative_code ==
          state.star_particles.stellar_deposited_metals_cumulative_code);
-  assert(restored.state.star_particles.stellar_deposited_feedback_energy_cumulative_erg ==
+  CHUI_REQUIRE(restored.state.star_particles.stellar_deposited_feedback_energy_cumulative_erg ==
          state.star_particles.stellar_deposited_feedback_energy_cumulative_erg);
   for (std::size_t channel = 0; channel < state.star_particles.stellar_returned_mass_channel_cumulative_code.size(); ++channel) {
-    assert(
+    CHUI_REQUIRE(
         restored.state.star_particles.stellar_returned_mass_channel_cumulative_code[channel] ==
         state.star_particles.stellar_returned_mass_channel_cumulative_code[channel]);
-    assert(
+    CHUI_REQUIRE(
         restored.state.star_particles.stellar_returned_metals_channel_cumulative_code[channel] ==
         state.star_particles.stellar_returned_metals_channel_cumulative_code[channel]);
-    assert(
+    CHUI_REQUIRE(
         restored.state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel] ==
         state.star_particles.stellar_feedback_energy_channel_cumulative_erg[channel]);
   }
-  assert(restored.state.black_holes.particle_index == state.black_holes.particle_index);
-  assert(restored.state.black_holes.host_cell_index == state.black_holes.host_cell_index);
-  assert(restored.state.black_holes.subgrid_mass_code == state.black_holes.subgrid_mass_code);
-  assert(restored.state.black_holes.accretion_rate_code == state.black_holes.accretion_rate_code);
-  assert(restored.state.black_holes.feedback_energy_code == state.black_holes.feedback_energy_code);
-  assert(restored.state.black_holes.eddington_ratio == state.black_holes.eddington_ratio);
-  assert(
+  CHUI_REQUIRE(restored.state.black_holes.particle_index == state.black_holes.particle_index);
+  CHUI_REQUIRE(restored.state.black_holes.host_cell_index == state.black_holes.host_cell_index);
+  CHUI_REQUIRE(restored.state.black_holes.subgrid_mass_code == state.black_holes.subgrid_mass_code);
+  CHUI_REQUIRE(restored.state.black_holes.accretion_rate_code == state.black_holes.accretion_rate_code);
+  CHUI_REQUIRE(restored.state.black_holes.feedback_energy_code == state.black_holes.feedback_energy_code);
+  CHUI_REQUIRE(restored.state.black_holes.eddington_ratio == state.black_holes.eddington_ratio);
+  CHUI_REQUIRE(
       restored.state.black_holes.cumulative_accreted_mass_code ==
       state.black_holes.cumulative_accreted_mass_code);
-  assert(
+  CHUI_REQUIRE(
       restored.state.black_holes.cumulative_feedback_energy_code ==
       state.black_holes.cumulative_feedback_energy_code);
-  assert(
+  CHUI_REQUIRE(
       restored.state.black_holes.duty_cycle_active_time_code ==
       state.black_holes.duty_cycle_active_time_code);
-  assert(
+  CHUI_REQUIRE(
       restored.state.black_holes.duty_cycle_total_time_code ==
       state.black_holes.duty_cycle_total_time_code);
-  assert(restored.state.tracers.particle_index == state.tracers.particle_index);
-  assert(restored.state.tracers.parent_particle_id == state.tracers.parent_particle_id);
-  assert(restored.state.tracers.injection_step == state.tracers.injection_step);
-  assert(restored.state.tracers.host_cell_index == state.tracers.host_cell_index);
-  assert(restored.state.tracers.mass_fraction_of_host == state.tracers.mass_fraction_of_host);
-  assert(restored.state.tracers.last_host_mass_code == state.tracers.last_host_mass_code);
-  assert(restored.state.tracers.cumulative_exchanged_mass_code == state.tracers.cumulative_exchanged_mass_code);
-  assert(restored.state.species.count_by_species == state.species.count_by_species);
-  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kDarkMatter).size() == 1);
-  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kGas).size() == 3);
-  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kStar).size() == 1);
-  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kBlackHole).size() == 1);
-  assert(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kTracer).size() == 1);
-  assert(gasDensityByParticleId(restored.state) == gas_density_before);
-  assert(restored.state.gasCellIdentityMatchesParticleOrder());
-  assert(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
-  assert(restored.state.gas_cells.parent_particle_id == state.gas_cells.parent_particle_id);
-  assert(restored.state.gas_cell_identity.size() == state.gas_cell_identity.size());
-  assert(restored.state.gasCellIdentityMapMatchesSidecarLanes());
+  CHUI_REQUIRE(restored.state.tracers.particle_index == state.tracers.particle_index);
+  CHUI_REQUIRE(restored.state.tracers.parent_particle_id == state.tracers.parent_particle_id);
+  CHUI_REQUIRE(restored.state.tracers.injection_step == state.tracers.injection_step);
+  CHUI_REQUIRE(restored.state.tracers.host_cell_index == state.tracers.host_cell_index);
+  CHUI_REQUIRE(restored.state.tracers.mass_fraction_of_host == state.tracers.mass_fraction_of_host);
+  CHUI_REQUIRE(restored.state.tracers.last_host_mass_code == state.tracers.last_host_mass_code);
+  CHUI_REQUIRE(restored.state.tracers.cumulative_exchanged_mass_code == state.tracers.cumulative_exchanged_mass_code);
+  CHUI_REQUIRE(restored.state.species.count_by_species == state.species.count_by_species);
+  CHUI_REQUIRE(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kDarkMatter).size() == 1);
+  CHUI_REQUIRE(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kGas).size() == 3);
+  CHUI_REQUIRE(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kStar).size() == 1);
+  CHUI_REQUIRE(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kBlackHole).size() == 1);
+  CHUI_REQUIRE(restored.state.particle_species_index.globalIndices(cosmosim::core::ParticleSpecies::kTracer).size() == 1);
+  CHUI_REQUIRE(gasDensityByParticleId(restored.state) == gas_density_before);
+  CHUI_REQUIRE(restored.state.gasCellIdentityMatchesParticleOrder());
+  CHUI_REQUIRE(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
+  CHUI_REQUIRE(restored.state.gas_cells.parent_particle_id == state.gas_cells.parent_particle_id);
+  CHUI_REQUIRE(restored.state.gas_cell_identity.size() == state.gas_cell_identity.size());
+  CHUI_REQUIRE(restored.state.gasCellIdentityMapMatchesSidecarLanes());
   for (std::uint32_t row = 0; row < restored.state.cells.size(); ++row) {
     const auto* restored_record = restored.state.gas_cell_identity.findByLocalRow(row);
     const auto* original_record = state.gas_cell_identity.findByLocalRow(row);
-    assert(restored_record != nullptr);
-    assert(original_record != nullptr);
-    assert(restored_record->gas_cell_id == original_record->gas_cell_id);
-    assert(restored_record->parent_particle_id == original_record->parent_particle_id);
-    assert(restored_record->owning_patch_id == original_record->owning_patch_id);
-    assert(restored_record->local_cell_row == original_record->local_cell_row);
+    CHUI_REQUIRE(restored_record != nullptr);
+    CHUI_REQUIRE(original_record != nullptr);
+    CHUI_REQUIRE(restored_record->gas_cell_id == original_record->gas_cell_id);
+    CHUI_REQUIRE(restored_record->parent_particle_id == original_record->parent_particle_id);
+    CHUI_REQUIRE(restored_record->owning_patch_id == original_record->owning_patch_id);
+    CHUI_REQUIRE(restored_record->local_cell_row == original_record->local_cell_row);
   }
-  assert(restored.state.gas_cells.velocity_x_peculiar == state.gas_cells.velocity_x_peculiar);
-  assert(restored.state.gas_cells.velocity_y_peculiar == state.gas_cells.velocity_y_peculiar);
-  assert(restored.state.gas_cells.velocity_z_peculiar == state.gas_cells.velocity_z_peculiar);
+  CHUI_REQUIRE(restored.state.gas_cells.velocity_x_peculiar == state.gas_cells.velocity_x_peculiar);
+  CHUI_REQUIRE(restored.state.gas_cells.velocity_y_peculiar == state.gas_cells.velocity_y_peculiar);
+  CHUI_REQUIRE(restored.state.gas_cells.velocity_z_peculiar == state.gas_cells.velocity_z_peculiar);
   assertSofteningPriorityResolution(restored.state);
-  assert(restored.integrator_state.step_index == integrator_state.step_index);
-  assert(std::abs(restored.integrator_state.current_time_code - integrator_state.current_time_code) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.current_scale_factor - integrator_state.current_scale_factor) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.current_redshift - integrator_state.current_redshift) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.current_hubble_rate_code - integrator_state.current_hubble_rate_code) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.time_si_per_code - integrator_state.time_si_per_code) < 1.0e-15 * integrator_state.time_si_per_code);
-  assert(std::abs(restored.integrator_state.last_drift_factor_code - integrator_state.last_drift_factor_code) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.last_first_kick_factor_code - integrator_state.last_first_kick_factor_code) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.last_second_kick_factor_code - integrator_state.last_second_kick_factor_code) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.last_first_hubble_drag_factor - integrator_state.last_first_hubble_drag_factor) < 1.0e-15);
-  assert(std::abs(restored.integrator_state.last_second_hubble_drag_factor - integrator_state.last_second_hubble_drag_factor) < 1.0e-15);
-  assert(restored.integrator_state.last_completed_boundary_kind == integrator_state.last_completed_boundary_kind);
-  assert(restored.integrator_state.last_completed_restart_safe == integrator_state.last_completed_restart_safe);
-  assert(restored.integrator_state.scheme == integrator_state.scheme);
-  assert(restored.integrator_state.time_bins.hierarchical_enabled == integrator_state.time_bins.hierarchical_enabled);
-  assert(restored.integrator_state.time_bins.active_bin == integrator_state.time_bins.active_bin);
-  assert(restored.integrator_state.time_bins.max_bin == integrator_state.time_bins.max_bin);
-  assert(restored.scheduler_state.max_bin == scheduler.maxBin());
-  assert(restored.scheduler_state.current_tick == scheduler.currentTick());
-  assert(restored.scheduler_state.bin_index.size() == scheduler.elementCount());
+  CHUI_REQUIRE(restored.integrator_state.step_index == integrator_state.step_index);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.current_time_code - integrator_state.current_time_code) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.current_scale_factor - integrator_state.current_scale_factor) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.current_redshift - integrator_state.current_redshift) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.current_hubble_rate_code - integrator_state.current_hubble_rate_code) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.time_si_per_code - integrator_state.time_si_per_code) < 1.0e-15 * integrator_state.time_si_per_code);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.last_drift_factor_code - integrator_state.last_drift_factor_code) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.last_first_kick_factor_code - integrator_state.last_first_kick_factor_code) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.last_second_kick_factor_code - integrator_state.last_second_kick_factor_code) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.last_first_hubble_drag_factor - integrator_state.last_first_hubble_drag_factor) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(restored.integrator_state.last_second_hubble_drag_factor - integrator_state.last_second_hubble_drag_factor) < 1.0e-15);
+  CHUI_REQUIRE(restored.integrator_state.last_completed_boundary_kind == integrator_state.last_completed_boundary_kind);
+  CHUI_REQUIRE(restored.integrator_state.last_completed_restart_safe == integrator_state.last_completed_restart_safe);
+  CHUI_REQUIRE(restored.integrator_state.scheme == integrator_state.scheme);
+  CHUI_REQUIRE(restored.integrator_state.time_bins.hierarchical_enabled == integrator_state.time_bins.hierarchical_enabled);
+  CHUI_REQUIRE(restored.integrator_state.time_bins.active_bin == integrator_state.time_bins.active_bin);
+  CHUI_REQUIRE(restored.integrator_state.time_bins.max_bin == integrator_state.time_bins.max_bin);
+  CHUI_REQUIRE(restored.scheduler_state.max_bin == scheduler.maxBin());
+  CHUI_REQUIRE(restored.scheduler_state.current_tick == scheduler.currentTick());
+  CHUI_REQUIRE(restored.scheduler_state.bin_index.size() == scheduler.elementCount());
   const auto original_scheduler_state = scheduler.exportPersistentState();
-  assert(restored.scheduler_state.bin_index == original_scheduler_state.bin_index);
-  assert(restored.scheduler_state.next_activation_tick == original_scheduler_state.next_activation_tick);
-  assert(restored.scheduler_state.active_flag == original_scheduler_state.active_flag);
-  assert(restored.scheduler_state.pending_bin_index == original_scheduler_state.pending_bin_index);
+  CHUI_REQUIRE(restored.scheduler_state.bin_index == original_scheduler_state.bin_index);
+  CHUI_REQUIRE(restored.scheduler_state.next_activation_tick == original_scheduler_state.next_activation_tick);
+  CHUI_REQUIRE(restored.scheduler_state.active_flag == original_scheduler_state.active_flag);
+  CHUI_REQUIRE(restored.scheduler_state.pending_bin_index == original_scheduler_state.pending_bin_index);
   assertParticleTimeBinsMatchScheduler(restored.state, restored.scheduler_state);
-  assert(restored.gas_cell_scheduler_state.max_bin == gas_cell_scheduler.maxBin());
-  assert(restored.gas_cell_scheduler_state.current_tick == gas_cell_scheduler.currentTick());
-  assert(restored.gas_cell_scheduler_ids == original_gas_cell_scheduler_ids);
-  assert(restored.gas_cell_scheduler_state.bin_index == original_gas_cell_scheduler_state.bin_index);
-  assert(
+  CHUI_REQUIRE(restored.gas_cell_scheduler_state.max_bin == gas_cell_scheduler.maxBin());
+  CHUI_REQUIRE(restored.gas_cell_scheduler_state.current_tick == gas_cell_scheduler.currentTick());
+  CHUI_REQUIRE(restored.gas_cell_scheduler_ids == original_gas_cell_scheduler_ids);
+  CHUI_REQUIRE(restored.gas_cell_scheduler_state.bin_index == original_gas_cell_scheduler_state.bin_index);
+  CHUI_REQUIRE(
       restored.gas_cell_scheduler_state.next_activation_tick ==
       original_gas_cell_scheduler_state.next_activation_tick);
-  assert(restored.gas_cell_scheduler_state.active_flag == original_gas_cell_scheduler_state.active_flag);
-  assert(
+  CHUI_REQUIRE(restored.gas_cell_scheduler_state.active_flag == original_gas_cell_scheduler_state.active_flag);
+  CHUI_REQUIRE(
       restored.gas_cell_scheduler_state.pending_bin_index ==
       original_gas_cell_scheduler_state.pending_bin_index);
   assertGasCellTimeBinsMatchScheduler(restored.state, restored.gas_cell_scheduler_state);
-  assert(restored.normalized_config_hash_hex == payload.normalized_config_hash_hex);
-  assert(restored.normalized_config_text == payload.normalized_config_text);
-  assert(restored.provenance.config_hash_hex == payload.provenance.config_hash_hex);
-  assert(restored.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
-  assert(
+  CHUI_REQUIRE(restored.normalized_config_hash_hex == payload.normalized_config_hash_hex);
+  CHUI_REQUIRE(restored.normalized_config_text == payload.normalized_config_text);
+  CHUI_REQUIRE(restored.provenance.config_hash_hex == payload.provenance.config_hash_hex);
+  CHUI_REQUIRE(restored.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_assignment_scheme ==
       payload.provenance.gravity_treepm_assignment_scheme);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_window_deconvolution ==
       payload.provenance.gravity_treepm_window_deconvolution);
-  assert(restored.provenance.gravity_treepm_asmth_cells == payload.provenance.gravity_treepm_asmth_cells);
-  assert(restored.provenance.gravity_treepm_rcut_cells == payload.provenance.gravity_treepm_rcut_cells);
-  assert(
+  CHUI_REQUIRE(restored.provenance.gravity_treepm_asmth_cells == payload.provenance.gravity_treepm_asmth_cells);
+  CHUI_REQUIRE(restored.provenance.gravity_treepm_rcut_cells == payload.provenance.gravity_treepm_rcut_cells);
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_mesh_spacing_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_split_scale_mpc_comoving ==
       payload.provenance.gravity_treepm_split_scale_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_cutoff_radius_mpc_comoving ==
       payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_update_cadence_steps ==
       payload.provenance.gravity_treepm_update_cadence_steps);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_tree_opening_criterion ==
       payload.provenance.gravity_treepm_tree_opening_criterion);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_tree_opening_theta ==
       payload.provenance.gravity_treepm_tree_opening_theta);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_tree_relative_force_tolerance ==
       payload.provenance.gravity_treepm_tree_relative_force_tolerance);
-  assert(
+  CHUI_REQUIRE(
       restored.provenance.gravity_treepm_tree_relative_force_acceleration_floor ==
       payload.provenance.gravity_treepm_tree_relative_force_acceleration_floor);
-  assert(restored.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
-  assert(restored.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
-  assert(
+  CHUI_REQUIRE(restored.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
+  CHUI_REQUIRE(restored.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
+  CHUI_REQUIRE(
       restored.provenance.gravity_softening_epsilon_kpc_comoving ==
       payload.provenance.gravity_softening_epsilon_kpc_comoving);
-  assert(restored.provenance.gravity_pm_fft_backend == payload.provenance.gravity_pm_fft_backend);
-  assert(restored.distributed_gravity_state.schema_version == payload.distributed_gravity_state.schema_version);
-  assert(restored.distributed_gravity_state.decomposition_epoch == payload.distributed_gravity_state.decomposition_epoch);
-  assert(restored.distributed_gravity_state.world_size == payload.distributed_gravity_state.world_size);
-  assert(restored.distributed_gravity_state.pm_grid_nx == payload.distributed_gravity_state.pm_grid_nx);
-  assert(restored.distributed_gravity_state.pm_grid_ny == payload.distributed_gravity_state.pm_grid_ny);
-  assert(restored.distributed_gravity_state.pm_grid_nz == payload.distributed_gravity_state.pm_grid_nz);
-  assert(restored.distributed_gravity_state.owning_rank_by_item == payload.distributed_gravity_state.owning_rank_by_item);
-  assert(restored.distributed_gravity_state.pm_slab_begin_x_by_rank == payload.distributed_gravity_state.pm_slab_begin_x_by_rank);
-  assert(restored.distributed_gravity_state.pm_slab_end_x_by_rank == payload.distributed_gravity_state.pm_slab_end_x_by_rank);
-  assert(restored.output_cadence_state.output_enabled == payload.output_cadence_state.output_enabled);
-  assert(restored.output_cadence_state.write_restarts == payload.output_cadence_state.write_restarts);
-  assert(restored.output_cadence_state.snapshot_due == payload.output_cadence_state.snapshot_due);
-  assert(restored.output_cadence_state.checkpoint_due == payload.output_cadence_state.checkpoint_due);
-  assert(restored.output_cadence_state.last_completed_step_index == payload.output_cadence_state.last_completed_step_index);
-  assert(restored.output_cadence_state.snapshot_interval_steps == payload.output_cadence_state.snapshot_interval_steps);
-  assert(restored.output_cadence_state.next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
-  assert(restored.output_cadence_state.snapshot_interval_time_code ==
+  CHUI_REQUIRE(restored.provenance.gravity_pm_fft_backend == payload.provenance.gravity_pm_fft_backend);
+  CHUI_REQUIRE(restored.distributed_gravity_state.schema_version == payload.distributed_gravity_state.schema_version);
+  CHUI_REQUIRE(restored.distributed_gravity_state.decomposition_epoch == payload.distributed_gravity_state.decomposition_epoch);
+  CHUI_REQUIRE(restored.distributed_gravity_state.world_size == payload.distributed_gravity_state.world_size);
+  CHUI_REQUIRE(restored.distributed_gravity_state.pm_grid_nx == payload.distributed_gravity_state.pm_grid_nx);
+  CHUI_REQUIRE(restored.distributed_gravity_state.pm_grid_ny == payload.distributed_gravity_state.pm_grid_ny);
+  CHUI_REQUIRE(restored.distributed_gravity_state.pm_grid_nz == payload.distributed_gravity_state.pm_grid_nz);
+  CHUI_REQUIRE(restored.distributed_gravity_state.owning_rank_by_item == payload.distributed_gravity_state.owning_rank_by_item);
+  CHUI_REQUIRE(restored.distributed_gravity_state.pm_slab_begin_x_by_rank == payload.distributed_gravity_state.pm_slab_begin_x_by_rank);
+  CHUI_REQUIRE(restored.distributed_gravity_state.pm_slab_end_x_by_rank == payload.distributed_gravity_state.pm_slab_end_x_by_rank);
+  CHUI_REQUIRE(restored.output_cadence_state.output_enabled == payload.output_cadence_state.output_enabled);
+  CHUI_REQUIRE(restored.output_cadence_state.write_restarts == payload.output_cadence_state.write_restarts);
+  CHUI_REQUIRE(restored.output_cadence_state.snapshot_due == payload.output_cadence_state.snapshot_due);
+  CHUI_REQUIRE(restored.output_cadence_state.checkpoint_due == payload.output_cadence_state.checkpoint_due);
+  CHUI_REQUIRE(restored.output_cadence_state.last_completed_step_index == payload.output_cadence_state.last_completed_step_index);
+  CHUI_REQUIRE(restored.output_cadence_state.snapshot_interval_steps == payload.output_cadence_state.snapshot_interval_steps);
+  CHUI_REQUIRE(restored.output_cadence_state.next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
+  CHUI_REQUIRE(restored.output_cadence_state.snapshot_interval_time_code ==
       payload.output_cadence_state.snapshot_interval_time_code);
-  assert(restored.output_cadence_state.next_snapshot_time_code ==
+  CHUI_REQUIRE(restored.output_cadence_state.next_snapshot_time_code ==
       payload.output_cadence_state.next_snapshot_time_code);
-  assert(restored.output_cadence_state.snapshot_stem == payload.output_cadence_state.snapshot_stem);
-  assert(restored.output_cadence_state.restart_stem == payload.output_cadence_state.restart_stem);
-  assert(restored.diagnostics.restart_schema_name == cosmosim::io::restartSchema().name);
-  assert(restored.diagnostics.restart_schema_version == cosmosim::io::restartSchema().version);
-  assert(restored.diagnostics.current_boundary_kind ==
+  CHUI_REQUIRE(restored.output_cadence_state.snapshot_stem == payload.output_cadence_state.snapshot_stem);
+  CHUI_REQUIRE(restored.output_cadence_state.restart_stem == payload.output_cadence_state.restart_stem);
+  CHUI_REQUIRE(restored.diagnostics.restart_schema_name == cosmosim::io::restartSchema().name);
+  CHUI_REQUIRE(restored.diagnostics.restart_schema_version == cosmosim::io::restartSchema().version);
+  CHUI_REQUIRE(restored.diagnostics.current_boundary_kind ==
          std::string(cosmosim::core::stepBoundaryKindName(integrator_state.current_boundary_kind)));
-  assert(restored.diagnostics.last_completed_boundary_kind ==
+  CHUI_REQUIRE(restored.diagnostics.last_completed_boundary_kind ==
          std::string(cosmosim::core::stepBoundaryKindName(integrator_state.last_completed_boundary_kind)));
-  assert(restored.diagnostics.restart_safe);
-  assert(restored.diagnostics.step_index == integrator_state.step_index);
-  assert(restored.diagnostics.scheduler_current_tick == scheduler.currentTick());
-  assert(restored.diagnostics.scheduler_max_bin == scheduler.maxBin());
-  assert(restored.diagnostics.scheduler_element_count == state.particles.size());
-  assert(restored.diagnostics.gas_cell_scheduler_current_tick == gas_cell_scheduler.currentTick());
-  assert(restored.diagnostics.gas_cell_scheduler_max_bin == gas_cell_scheduler.maxBin());
-  assert(restored.diagnostics.gas_cell_scheduler_element_count == state.cells.size());
-  assert(restored.diagnostics.pm_cadence_steps == integrator_state.pm_sync_state.cadenceSteps());
-  assert(restored.diagnostics.pm_gravity_kick_opportunity == integrator_state.pm_sync_state.gravityKickOpportunity());
-  assert(restored.diagnostics.pm_field_version == integrator_state.pm_sync_state.fieldVersion());
-  assert(restored.diagnostics.pm_long_range_field_valid == integrator_state.pm_long_range_field_valid);
-  assert(restored.diagnostics.output_enabled == payload.output_cadence_state.output_enabled);
-  assert(restored.diagnostics.output_next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
-  assert(restored.diagnostics.stochastic_module_count == payload.stochastic_state.modules.size());
-  assert(restored.stochastic_state.modules.size() == payload.stochastic_state.modules.size());
-  assert(restored.stochastic_state.modules[0].module_name == "star_formation");
-  assert(restored.stochastic_state.modules[0].schema_version == 1);
-  assert(restored.stochastic_state.modules[0].rng_policy == "stateless_splitmix64(seed,step_index,cell_index,rank_local_seed_offset)");
-  assert(restored.stochastic_state.modules[0].random_seed == 123456789ull);
-  assert(restored.stochastic_state.modules[0].rank_local_seed_offset == 0);
-  assert(restored.stochastic_state.modules[0].last_committed_step_index == integrator_state.step_index);
-  assert(restored.stochastic_state.modules[0].deterministic_from_serialized_inputs);
-  assert(restored.stochastic_state.modules[1].module_name == "stellar_feedback");
-  assert(restored.stochastic_state.modules[1].schema_version == 1);
-  assert(restored.stochastic_state.modules[1].rng_policy == "stateless_splitmix64(seed,step_index,star_index)");
-  assert(restored.stochastic_state.modules[1].random_seed == 42424242ull);
-  assert(restored.stochastic_state.modules[1].rank_local_seed_offset == 0);
-  assert(restored.stochastic_state.modules[1].last_committed_step_index == integrator_state.step_index);
-  assert(restored.stochastic_state.modules[1].deterministic_from_serialized_inputs);
-  assert(restored.state.sidecars.find("hydro") != nullptr);
+  CHUI_REQUIRE(restored.diagnostics.restart_safe);
+  CHUI_REQUIRE(restored.diagnostics.step_index == integrator_state.step_index);
+  CHUI_REQUIRE(restored.diagnostics.scheduler_current_tick == scheduler.currentTick());
+  CHUI_REQUIRE(restored.diagnostics.scheduler_max_bin == scheduler.maxBin());
+  CHUI_REQUIRE(restored.diagnostics.scheduler_element_count == state.particles.size());
+  CHUI_REQUIRE(restored.diagnostics.gas_cell_scheduler_current_tick == gas_cell_scheduler.currentTick());
+  CHUI_REQUIRE(restored.diagnostics.gas_cell_scheduler_max_bin == gas_cell_scheduler.maxBin());
+  CHUI_REQUIRE(restored.diagnostics.gas_cell_scheduler_element_count == state.cells.size());
+  CHUI_REQUIRE(restored.diagnostics.pm_cadence_steps == integrator_state.pm_sync_state.cadenceSteps());
+  CHUI_REQUIRE(restored.diagnostics.pm_gravity_kick_opportunity == integrator_state.pm_sync_state.gravityKickOpportunity());
+  CHUI_REQUIRE(restored.diagnostics.pm_field_version == integrator_state.pm_sync_state.fieldVersion());
+  CHUI_REQUIRE(restored.diagnostics.pm_long_range_field_valid == integrator_state.pm_long_range_field_valid);
+  CHUI_REQUIRE(restored.diagnostics.output_enabled == payload.output_cadence_state.output_enabled);
+  CHUI_REQUIRE(restored.diagnostics.output_next_snapshot_step_index == payload.output_cadence_state.next_snapshot_step_index);
+  CHUI_REQUIRE(restored.diagnostics.stochastic_module_count == payload.stochastic_state.modules.size());
+  CHUI_REQUIRE(restored.stochastic_state.modules.size() == payload.stochastic_state.modules.size());
+  CHUI_REQUIRE(restored.stochastic_state.modules[0].module_name == "star_formation");
+  CHUI_REQUIRE(restored.stochastic_state.modules[0].schema_version == 1);
+  CHUI_REQUIRE(restored.stochastic_state.modules[0].rng_policy == "stateless_splitmix64(seed,step_index,cell_index,rank_local_seed_offset)");
+  CHUI_REQUIRE(restored.stochastic_state.modules[0].random_seed == 123456789ull);
+  CHUI_REQUIRE(restored.stochastic_state.modules[0].rank_local_seed_offset == 0);
+  CHUI_REQUIRE(restored.stochastic_state.modules[0].last_committed_step_index == integrator_state.step_index);
+  CHUI_REQUIRE(restored.stochastic_state.modules[0].deterministic_from_serialized_inputs);
+  CHUI_REQUIRE(restored.stochastic_state.modules[1].module_name == "stellar_feedback");
+  CHUI_REQUIRE(restored.stochastic_state.modules[1].schema_version == 1);
+  CHUI_REQUIRE(restored.stochastic_state.modules[1].rng_policy == "stateless_splitmix64(seed,step_index,star_index)");
+  CHUI_REQUIRE(restored.stochastic_state.modules[1].random_seed == 42424242ull);
+  CHUI_REQUIRE(restored.stochastic_state.modules[1].rank_local_seed_offset == 0);
+  CHUI_REQUIRE(restored.stochastic_state.modules[1].last_committed_step_index == integrator_state.step_index);
+  CHUI_REQUIRE(restored.stochastic_state.modules[1].deterministic_from_serialized_inputs);
+  CHUI_REQUIRE(restored.state.sidecars.find("hydro") != nullptr);
   const cosmosim::core::ModuleSidecarBlock* hydro_sidecar = restored.state.sidecars.find("hydro");
-  assert(hydro_sidecar->schema_version == 3);
-  assert(hydro_sidecar->payload.size() == 3);
-  assert(hydro_sidecar->payload[0] == std::byte{0x01});
-  assert(hydro_sidecar->payload[1] == std::byte{0x02});
-  assert(hydro_sidecar->payload[2] == std::byte{0x03});
+  CHUI_REQUIRE(hydro_sidecar->schema_version == 3);
+  CHUI_REQUIRE(hydro_sidecar->payload.size() == 3);
+  CHUI_REQUIRE(hydro_sidecar->payload[0] == std::byte{0x01});
+  CHUI_REQUIRE(hydro_sidecar->payload[1] == std::byte{0x02});
+  CHUI_REQUIRE(hydro_sidecar->payload[2] == std::byte{0x03});
   const cosmosim::core::ModuleSidecarBlock* chemistry_sidecar = restored.state.sidecars.find("chemistry");
-  assert(chemistry_sidecar != nullptr);
-  assert(chemistry_sidecar->schema_version == 7);
-  assert(chemistry_sidecar->particle_indexed);
-  assert(chemistry_sidecar->row_stride_bytes == 2);
-  assert(chemistry_sidecar->required_species_mask ==
+  CHUI_REQUIRE(chemistry_sidecar != nullptr);
+  CHUI_REQUIRE(chemistry_sidecar->schema_version == 7);
+  CHUI_REQUIRE(chemistry_sidecar->particle_indexed);
+  CHUI_REQUIRE(chemistry_sidecar->row_stride_bytes == 2);
+  CHUI_REQUIRE(chemistry_sidecar->required_species_mask ==
          (1U << static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kGas)));
-  assert((chemistry_sidecar->particle_id_by_row == std::vector<std::uint64_t>{101, 102, 103}));
-  assert(chemistry_sidecar->payload.size() == 6);
-  assert(chemistry_sidecar->payload[0] == std::byte{0x10});
-  assert(chemistry_sidecar->payload[5] == std::byte{0x15});
-  assert(restored.payload_hash == cosmosim::io::restartPayloadIntegrityHash(payload));
-  assert(restored.payload_hash_hex == cosmosim::io::restartPayloadIntegrityHashHex(payload));
+  CHUI_REQUIRE((chemistry_sidecar->particle_id_by_row == std::vector<std::uint64_t>{101, 102, 103}));
+  CHUI_REQUIRE(chemistry_sidecar->payload.size() == 6);
+  CHUI_REQUIRE(chemistry_sidecar->payload[0] == std::byte{0x10});
+  CHUI_REQUIRE(chemistry_sidecar->payload[5] == std::byte{0x15});
+  CHUI_REQUIRE(restored.payload_hash == cosmosim::io::restartPayloadIntegrityHash(payload));
+  CHUI_REQUIRE(restored.payload_hash_hex == cosmosim::io::restartPayloadIntegrityHashHex(payload));
 
   cosmosim::core::HierarchicalTimeBinScheduler resumed_scheduler(restored.scheduler_state.max_bin);
   resumed_scheduler.importPersistentState(restored.scheduler_state);
-  assert(resumed_scheduler.currentTick() == scheduler.currentTick());
+  CHUI_REQUIRE(resumed_scheduler.currentTick() == scheduler.currentTick());
   const auto resumed_active = resumed_scheduler.beginSubstep();
-  assert(particleIdsForIndices(restored.state, resumed_active) == expected_active_particle_ids);
+  CHUI_REQUIRE(particleIdsForIndices(restored.state, resumed_active) == expected_active_particle_ids);
 
   cosmosim::core::SimulationState stale_state = state;
   stale_state.particles.time_bin[0] = static_cast<std::uint8_t>(stale_state.particles.time_bin[0] ^ 1U);
@@ -787,18 +787,18 @@ void testRestartRoundtrip() {
   } catch (const std::invalid_argument&) {
     stale_writer_threw = true;
   }
-  assert(stale_writer_threw);
+  CHUI_REQUIRE(stale_writer_threw);
 
   const std::filesystem::path stale_mirror_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_stale_timebin_mirror.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(stale_mirror_path, payload);
   hid_t stale_file = H5Fopen(stale_mirror_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(stale_file >= 0);
+  CHUI_REQUIRE(stale_file >= 0);
   hid_t stale_dataset = H5Dopen2(stale_file, "/state/particles/time_bin", H5P_DEFAULT);
-  assert(stale_dataset >= 0);
+  CHUI_REQUIRE(stale_dataset >= 0);
   std::vector<std::uint8_t> stale_bins(state.particles.time_bin.begin(), state.particles.time_bin.end());
   stale_bins[0] = static_cast<std::uint8_t>(stale_bins[0] ^ 1U);
-  assert(H5Dwrite(stale_dataset, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, stale_bins.data()) >= 0);
+  CHUI_REQUIRE(H5Dwrite(stale_dataset, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, stale_bins.data()) >= 0);
   H5Dclose(stale_dataset);
   H5Fclose(stale_file);
   bool stale_reader_threw = false;
@@ -807,21 +807,21 @@ void testRestartRoundtrip() {
   } catch (const std::invalid_argument&) {
     stale_reader_threw = true;
   }
-  assert(stale_reader_threw);
+  CHUI_REQUIRE(stale_reader_threw);
   std::filesystem::remove(stale_mirror_path);
 
   const std::filesystem::path invalid_scheduler_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_invalid_scheduler_active_flag.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(invalid_scheduler_path, payload);
   hid_t invalid_scheduler_file = H5Fopen(invalid_scheduler_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(invalid_scheduler_file >= 0);
+  CHUI_REQUIRE(invalid_scheduler_file >= 0);
   hid_t invalid_active_dataset = H5Dopen2(invalid_scheduler_file, "/scheduler/active_flag", H5P_DEFAULT);
-  assert(invalid_active_dataset >= 0);
+  CHUI_REQUIRE(invalid_active_dataset >= 0);
   const auto scheduler_state_for_invalid_file = scheduler.exportPersistentState();
   std::vector<std::uint8_t> invalid_active_flags(scheduler_state_for_invalid_file.active_flag.begin(),
                                                  scheduler_state_for_invalid_file.active_flag.end());
   invalid_active_flags[0] = 2;
-  assert(H5Dwrite(
+  CHUI_REQUIRE(H5Dwrite(
              invalid_active_dataset, H5T_NATIVE_UINT8, H5S_ALL, H5S_ALL, H5P_DEFAULT, invalid_active_flags.data()) >=
          0);
   H5Dclose(invalid_active_dataset);
@@ -832,19 +832,19 @@ void testRestartRoundtrip() {
   } catch (const std::invalid_argument&) {
     invalid_scheduler_reader_threw = true;
   }
-  assert(invalid_scheduler_reader_threw);
+  CHUI_REQUIRE(invalid_scheduler_reader_threw);
   std::filesystem::remove(invalid_scheduler_path);
 
   const std::filesystem::path invalid_patch_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_invalid_hydro_patch_geometry.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(invalid_patch_path, payload);
   hid_t invalid_patch_file = H5Fopen(invalid_patch_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(invalid_patch_file >= 0);
+  CHUI_REQUIRE(invalid_patch_file >= 0);
   hid_t invalid_patch_dataset = H5Dopen2(invalid_patch_file, "/state/cells/patch_index", H5P_DEFAULT);
-  assert(invalid_patch_dataset >= 0);
+  CHUI_REQUIRE(invalid_patch_dataset >= 0);
   std::vector<std::uint32_t> invalid_patch_index(state.cells.patch_index.begin(), state.cells.patch_index.end());
   invalid_patch_index.back() = 1U;
-  assert(H5Dwrite(
+  CHUI_REQUIRE(H5Dwrite(
              invalid_patch_dataset, H5T_NATIVE_UINT32, H5S_ALL, H5S_ALL, H5P_DEFAULT,
              invalid_patch_index.data()) >= 0);
   H5Dclose(invalid_patch_dataset);
@@ -859,15 +859,15 @@ void testRestartRoundtrip() {
         message.find("/state/patches") != std::string::npos ||
         message.find("payload integrity hash mismatch") != std::string::npos;
   }
-  assert(invalid_patch_reader_threw);
+  CHUI_REQUIRE(invalid_patch_reader_threw);
   std::filesystem::remove(invalid_patch_path);
 
   const std::filesystem::path missing_parent_flag_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_missing_gas_identity_has_parent.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(missing_parent_flag_path, payload);
   hid_t missing_parent_flag_file = H5Fopen(missing_parent_flag_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(missing_parent_flag_file >= 0);
-  assert(H5Ldelete(missing_parent_flag_file, "/state/gas_cell_identity/has_parent_particle", H5P_DEFAULT) >= 0);
+  CHUI_REQUIRE(missing_parent_flag_file >= 0);
+  CHUI_REQUIRE(H5Ldelete(missing_parent_flag_file, "/state/gas_cell_identity/has_parent_particle", H5P_DEFAULT) >= 0);
   H5Fclose(missing_parent_flag_file);
   bool missing_parent_flag_threw = false;
   try {
@@ -876,20 +876,20 @@ void testRestartRoundtrip() {
     missing_parent_flag_threw =
         std::string(error.what()).find("/state/gas_cell_identity/has_parent_particle") != std::string::npos;
   }
-  assert(missing_parent_flag_threw);
+  CHUI_REQUIRE(missing_parent_flag_threw);
   std::filesystem::remove(missing_parent_flag_path);
 
   const std::filesystem::path duplicate_gas_id_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_duplicate_gas_cell_id.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(duplicate_gas_id_path, payload);
   hid_t duplicate_gas_id_file = H5Fopen(duplicate_gas_id_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(duplicate_gas_id_file >= 0);
+  CHUI_REQUIRE(duplicate_gas_id_file >= 0);
   hid_t duplicate_gas_id_dataset =
       H5Dopen2(duplicate_gas_id_file, "/state/gas_cell_identity/gas_cell_id", H5P_DEFAULT);
-  assert(duplicate_gas_id_dataset >= 0);
+  CHUI_REQUIRE(duplicate_gas_id_dataset >= 0);
   std::vector<std::uint64_t> duplicate_gas_ids(state.gas_cells.gas_cell_id.begin(), state.gas_cells.gas_cell_id.end());
   duplicate_gas_ids[1] = duplicate_gas_ids[0];
-  assert(H5Dwrite(
+  CHUI_REQUIRE(H5Dwrite(
              duplicate_gas_id_dataset, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT,
              duplicate_gas_ids.data()) >= 0);
   H5Dclose(duplicate_gas_id_dataset);
@@ -902,15 +902,15 @@ void testRestartRoundtrip() {
         std::string(error.what()).find("gas_cell_id") != std::string::npos ||
         std::string(error.what()).find("payload integrity hash mismatch") != std::string::npos;
   }
-  assert(duplicate_gas_id_threw);
+  CHUI_REQUIRE(duplicate_gas_id_threw);
   std::filesystem::remove(duplicate_gas_id_path);
 
   hid_t tamper_file = H5Fopen(checkpoint_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(tamper_file >= 0);
+  CHUI_REQUIRE(tamper_file >= 0);
   hid_t tamper_attr = H5Aopen(tamper_file, "payload_integrity_hash", H5P_DEFAULT);
-  assert(tamper_attr >= 0);
+  CHUI_REQUIRE(tamper_attr >= 0);
   std::uint64_t bad_hash = 0;
-  assert(H5Awrite(tamper_attr, H5T_NATIVE_UINT64, &bad_hash) >= 0);
+  CHUI_REQUIRE(H5Awrite(tamper_attr, H5T_NATIVE_UINT64, &bad_hash) >= 0);
   H5Aclose(tamper_attr);
   H5Fclose(tamper_file);
 
@@ -920,7 +920,7 @@ void testRestartRoundtrip() {
   } catch (const std::runtime_error&) {
     integrity_threw = true;
   }
-  assert(integrity_threw);
+  CHUI_REQUIRE(integrity_threw);
 
   std::filesystem::remove(checkpoint_path);
 
@@ -928,11 +928,11 @@ void testRestartRoundtrip() {
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_schema_mismatch.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(schema_mismatch_path, payload);
   hid_t schema_file = H5Fopen(schema_mismatch_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(schema_file >= 0);
+  CHUI_REQUIRE(schema_file >= 0);
   hid_t schema_attr = H5Aopen(schema_file, "restart_schema_version", H5P_DEFAULT);
-  assert(schema_attr >= 0);
+  CHUI_REQUIRE(schema_attr >= 0);
   std::uint32_t bad_schema = 2;
-  assert(H5Awrite(schema_attr, H5T_NATIVE_UINT32, &bad_schema) >= 0);
+  CHUI_REQUIRE(H5Awrite(schema_attr, H5T_NATIVE_UINT32, &bad_schema) >= 0);
   H5Aclose(schema_attr);
   H5Fclose(schema_file);
 
@@ -942,15 +942,15 @@ void testRestartRoundtrip() {
   } catch (const std::runtime_error&) {
     schema_threw = true;
   }
-  assert(schema_threw);
+  CHUI_REQUIRE(schema_threw);
   std::filesystem::remove(schema_mismatch_path);
 
   const std::filesystem::path missing_required_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_missing_required.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(missing_required_path, payload);
   hid_t missing_file = H5Fopen(missing_required_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(missing_file >= 0);
-  assert(H5Ldelete(missing_file, "/scheduler/pending_bin_index", H5P_DEFAULT) >= 0);
+  CHUI_REQUIRE(missing_file >= 0);
+  CHUI_REQUIRE(H5Ldelete(missing_file, "/scheduler/pending_bin_index", H5P_DEFAULT) >= 0);
   H5Fclose(missing_file);
   bool missing_required_threw = false;
   std::string missing_required_error;
@@ -960,18 +960,18 @@ void testRestartRoundtrip() {
     missing_required_threw = true;
     missing_required_error = error.what();
   }
-  assert(missing_required_threw);
+  CHUI_REQUIRE(missing_required_threw);
   const bool missing_field_named =
       missing_required_error.find("/scheduler/pending_bin_index") != std::string::npos;
-  assert(missing_field_named);
+  CHUI_REQUIRE(missing_field_named);
   std::filesystem::remove(missing_required_path);
 
   const std::filesystem::path missing_softening_mask_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_missing_softening_mask.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(missing_softening_mask_path, payload);
   hid_t missing_softening_file = H5Fopen(missing_softening_mask_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(missing_softening_file >= 0);
-  assert(H5Ldelete(missing_softening_file, "/state/particle_sidecar/has_gravity_softening_override", H5P_DEFAULT) >= 0);
+  CHUI_REQUIRE(missing_softening_file >= 0);
+  CHUI_REQUIRE(H5Ldelete(missing_softening_file, "/state/particle_sidecar/has_gravity_softening_override", H5P_DEFAULT) >= 0);
   H5Fclose(missing_softening_file);
   bool missing_softening_threw = false;
   try {
@@ -979,7 +979,7 @@ void testRestartRoundtrip() {
   } catch (const std::runtime_error& error) {
     missing_softening_threw = std::string(error.what()).find("has_gravity_softening_override") != std::string::npos;
   }
-  assert(missing_softening_threw);
+  CHUI_REQUIRE(missing_softening_threw);
   std::filesystem::remove(missing_softening_mask_path);
 
   const std::filesystem::path legacy_softening_path =
@@ -997,7 +997,7 @@ void testRestartRoundtrip() {
   cosmosim::io::writeRestartCheckpointHdf5(legacy_softening_path, legacy_softening_payload);
   const cosmosim::io::RestartReadResult legacy_softening_result =
       cosmosim::io::readRestartCheckpointHdf5(legacy_softening_path);
-  assert(legacy_softening_result.state.particle_sidecar.gravity_softening_comoving.empty());
+  CHUI_REQUIRE(legacy_softening_result.state.particle_sidecar.gravity_softening_comoving.empty());
   std::filesystem::remove(legacy_softening_path);
 
   const std::filesystem::path finalize_failure_dir =
@@ -1014,15 +1014,15 @@ void testRestartRoundtrip() {
   } catch (const std::runtime_error&) {
     finalize_threw = true;
   }
-  assert(finalize_threw);
-  assert(std::filesystem::is_directory(finalize_failure_dir));
+  CHUI_REQUIRE(finalize_threw);
+  CHUI_REQUIRE(std::filesystem::is_directory(finalize_failure_dir));
   // Transactional publication uses a unique sibling temporary and removes it
   // on failure; the destination directory remains intact and no predictable
   // stale .partial artifact is part of the contract anymore.
   const std::filesystem::path parent = finalize_failure_dir.parent_path();
   const std::string prefix = finalize_failure_dir.filename().string() + failure_policy.temporary_suffix;
   for (const auto& entry : std::filesystem::directory_iterator(parent)) {
-    assert(entry.path().filename().string().rfind(prefix, 0U) != 0U);
+    CHUI_REQUIRE(entry.path().filename().string().rfind(prefix, 0U) != 0U);
   }
   std::filesystem::remove_all(finalize_failure_dir);
 #else
@@ -1033,7 +1033,7 @@ void testRestartRoundtrip() {
   } catch (const std::runtime_error&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 #endif
 }
 
@@ -1045,7 +1045,7 @@ void testRestartAfterReorderAndMigration() {
   state.particle_sidecar.sfc_key = {10, 20, 21, 22, 1, 2, 23};
   const auto reorder = cosmosim::core::buildParticleReorderMap(state, cosmosim::core::ParticleReorderMode::kBySfcKey);
   cosmosim::core::reorderParticles(state, reorder);
-  assert(state.validateOwnershipInvariants());
+  CHUI_REQUIRE(state.validateOwnershipInvariants());
 
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.current_time_code = 0.25;
@@ -1065,23 +1065,23 @@ void testRestartAfterReorderAndMigration() {
   cosmosim::io::writeRestartCheckpointHdf5(reorder_path, reorder_payload);
   const auto reordered_restore = cosmosim::io::readRestartCheckpointHdf5(reorder_path);
   assertParticleTimeBinsMatchScheduler(reordered_restore.state, reordered_restore.scheduler_state);
-  assert(reordered_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
-  assert(reordered_restore.state.star_particles.particle_index == state.star_particles.particle_index);
-  assert(reordered_restore.state.black_holes.particle_index == state.black_holes.particle_index);
-  assert(gasDensityByParticleId(reordered_restore.state) == expected_density_by_id);
-  assert(reordered_restore.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
+  CHUI_REQUIRE(reordered_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
+  CHUI_REQUIRE(reordered_restore.state.star_particles.particle_index == state.star_particles.particle_index);
+  CHUI_REQUIRE(reordered_restore.state.black_holes.particle_index == state.black_holes.particle_index);
+  CHUI_REQUIRE(gasDensityByParticleId(reordered_restore.state) == expected_density_by_id);
+  CHUI_REQUIRE(reordered_restore.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
   std::filesystem::remove(reorder_path);
 
   const std::uint32_t black_hole_index = state.black_holes.particle_index[0];
   auto migrated_records = state.packParticleMigrationRecords(std::array<std::uint32_t, 1>{black_hole_index}, makeMigrationScheduler(state));
-  assert(migrated_records.size() == 1);
+  CHUI_REQUIRE(migrated_records.size() == 1);
   migrated_records[0].owning_rank = 0;
   cosmosim::core::ParticleMigrationCommit commit;
   commit.world_rank = 0;
   commit.outbound_local_indices = {black_hole_index};
   commit.inbound_records = migrated_records;
   state.commitParticleMigration(commit);
-  assert(state.validateOwnershipInvariants());
+  CHUI_REQUIRE(state.validateOwnershipInvariants());
   scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 2, 12);
   cosmosim::core::syncTimeBinMirrorsFromScheduler(
       scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
@@ -1092,16 +1092,16 @@ void testRestartAfterReorderAndMigration() {
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_after_migration.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(migration_path, migration_payload);
   const auto migration_restore = cosmosim::io::readRestartCheckpointHdf5(migration_path);
-  assert(migration_restore.state.validateOwnershipInvariants());
+  CHUI_REQUIRE(migration_restore.state.validateOwnershipInvariants());
   assertParticleTimeBinsMatchScheduler(migration_restore.state, migration_restore.scheduler_state);
-  assert(migration_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
-  assert(migration_restore.state.black_holes.particle_index == state.black_holes.particle_index);
-  assert(migration_restore.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
-  assert(migration_restore.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
-  assert(migration_restore.state.tracers.particle_index == state.tracers.particle_index);
-  assert(migration_restore.state.tracers.parent_particle_id == state.tracers.parent_particle_id);
-  assert(migration_restore.state.tracers.host_cell_index == state.tracers.host_cell_index);
-  assert(migration_restore.distributed_gravity_state.owning_rank_by_item == migration_payload.distributed_gravity_state.owning_rank_by_item);
+  CHUI_REQUIRE(migration_restore.state.particle_sidecar.particle_id == state.particle_sidecar.particle_id);
+  CHUI_REQUIRE(migration_restore.state.black_holes.particle_index == state.black_holes.particle_index);
+  CHUI_REQUIRE(migration_restore.state.particle_sidecar.gravity_softening_comoving == state.particle_sidecar.gravity_softening_comoving);
+  CHUI_REQUIRE(migration_restore.state.particle_sidecar.has_gravity_softening_override == state.particle_sidecar.has_gravity_softening_override);
+  CHUI_REQUIRE(migration_restore.state.tracers.particle_index == state.tracers.particle_index);
+  CHUI_REQUIRE(migration_restore.state.tracers.parent_particle_id == state.tracers.parent_particle_id);
+  CHUI_REQUIRE(migration_restore.state.tracers.host_cell_index == state.tracers.host_cell_index);
+  CHUI_REQUIRE(migration_restore.distributed_gravity_state.owning_rank_by_item == migration_payload.distributed_gravity_state.owning_rank_by_item);
   std::filesystem::remove(migration_path);
 #endif
 }
@@ -1144,7 +1144,7 @@ void testParentlessGasCellRestartRoundtrip() {
   state.gas_cells.temperature_code = {10.0, 11.0};
   state.gas_cells.sound_speed_code = {12.0, 13.0};
   state.rebuildSpeciesIndex();
-  assert(state.validateOwnershipInvariants());
+  CHUI_REQUIRE(state.validateOwnershipInvariants());
 
   cosmosim::core::IntegratorState integrator_state;
   integrator_state.current_boundary_kind = cosmosim::core::StepBoundaryKind::kCheckpointPoint;
@@ -1160,17 +1160,17 @@ void testParentlessGasCellRestartRoundtrip() {
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_parentless_gas_cells.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(checkpoint_path, payload);
   const auto restored = cosmosim::io::readRestartCheckpointHdf5(checkpoint_path);
-  assert(restored.state.validateOwnershipInvariants());
-  assert(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
-  assert(restored.state.gas_cells.parent_particle_id == state.gas_cells.parent_particle_id);
-  assert(restored.state.gas_cells.velocity_x_peculiar == state.gas_cells.velocity_x_peculiar);
-  assert(restored.state.gas_cells.velocity_y_peculiar == state.gas_cells.velocity_y_peculiar);
-  assert(restored.state.gas_cells.velocity_z_peculiar == state.gas_cells.velocity_z_peculiar);
+  CHUI_REQUIRE(restored.state.validateOwnershipInvariants());
+  CHUI_REQUIRE(restored.state.gas_cells.gas_cell_id == state.gas_cells.gas_cell_id);
+  CHUI_REQUIRE(restored.state.gas_cells.parent_particle_id == state.gas_cells.parent_particle_id);
+  CHUI_REQUIRE(restored.state.gas_cells.velocity_x_peculiar == state.gas_cells.velocity_x_peculiar);
+  CHUI_REQUIRE(restored.state.gas_cells.velocity_y_peculiar == state.gas_cells.velocity_y_peculiar);
+  CHUI_REQUIRE(restored.state.gas_cells.velocity_z_peculiar == state.gas_cells.velocity_z_peculiar);
   for (std::uint32_t row = 0; row < restored.state.cells.size(); ++row) {
     const auto* record = restored.state.gas_cell_identity.findByLocalRow(row);
-    assert(record != nullptr);
-    assert(!record->parent_particle_id.has_value());
-    assert(record->owning_patch_id == 9100);
+    CHUI_REQUIRE(record != nullptr);
+    CHUI_REQUIRE(!record->parent_particle_id.has_value());
+    CHUI_REQUIRE(record->owning_patch_id == 9100);
   }
   std::filesystem::remove(checkpoint_path);
 #endif

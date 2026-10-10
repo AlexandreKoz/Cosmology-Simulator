@@ -133,6 +133,8 @@ class TreePmGaussianCoefficientTable {
  public:
   static constexpr std::size_t k_cells = 4096U;
   static constexpr double k_step = 64.0 / static_cast<double>(k_cells);
+  // Hot-path preconditions: finite r2 >= 0, finite a > 0, validated by the
+  // coordinator. Like the Unchecked analytic helpers, this does not throw.
   [[nodiscard]] double longRangeInvR3(double r2, double a) const noexcept {
     const double t = 0.25 * (r2 / a) / a;
     if (!(t >= 0.0) || t >= 64.0) {
@@ -196,7 +198,21 @@ class TreePmGaussianCoefficientTable {
     double epsilon_comoving,
     double split_scale_comoving) noexcept {
   if (squared_distance <= 0.0) {
-    return softenedInvR3Unchecked(squared_distance, epsilon_comoving);
+    // Preserve the established zero-softening/coincident convention (zero).
+    // For finite positive Plummer softening the radial coefficient is the
+    // continuous softened-minus-Gaussian limit, even though its vector is zero.
+    if (epsilon_comoving == 0.0) return softenedInvR3Unchecked(squared_distance, epsilon_comoving);
+    // Scale before subtracting: two individually overflowing coefficients
+    // must not produce inf-inf/NaN. The dimensionless ratio is always <=1.
+    constexpr double k_inverse_six_sqrt_pi = 0.094031597257959381158013241926795431;
+    if (epsilon_comoving <= split_scale_comoving) {
+      const double ratio = epsilon_comoving / split_scale_comoving;
+      const double coefficient = 1.0 - k_inverse_six_sqrt_pi * ratio * ratio * ratio;
+      return ((coefficient / epsilon_comoving) / epsilon_comoving) / epsilon_comoving;
+    }
+    const double ratio = split_scale_comoving / epsilon_comoving;
+    const double coefficient = ratio * ratio * ratio - k_inverse_six_sqrt_pi;
+    return ((coefficient / split_scale_comoving) / split_scale_comoving) / split_scale_comoving;
   }
   const double distance = std::sqrt(squared_distance);
   return softenedInvR3Unchecked(squared_distance, epsilon_comoving) -

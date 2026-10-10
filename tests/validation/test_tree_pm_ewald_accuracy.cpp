@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -890,6 +891,7 @@ void validateFixture(const ParticleFixture& fixture) {
     return "certified";
   }
 #if COSMOSIM_ENABLE_FFTW
+  if (result.solver_profile.label.rfind("recovery_", 0) == 0) return "experimental_qualification_gate";
   return "diagnostic";
 #else
   return "fallback_diagnostic";
@@ -1050,7 +1052,7 @@ void runAndRecord(
   reportResult(results->back());
 }
 
-void testTreePmAgainstIndependentEwald() {
+void testTreePmAgainstIndependentEwald(bool recovery_qualification) {
   std::vector<ParticleFixture> fixtures;
   fixtures.push_back(makeQuasiUniformFixture());
   fixtures.push_back(makeDmoZeldovichLatticeFixture());
@@ -1069,17 +1071,17 @@ void testTreePmAgainstIndependentEwald() {
   // periodic-seam/rectangular, and Gaussian split-transition configurations.
   // The DMO mesh is 16^3 so its r_cut=6.25/16 remains strictly inside the
   // half-box minimum-image domain used by the production short-range tree.
-  // Only this exact FFTW/TSC/deconvolved/quadrupole/COM-distance profile is a
-  // release gate. All following matrix variants are deliberately diagnostic:
-  // they print the same metrics and pass/fail classification without moving
-  // the calibrated production threshold to accommodate a weaker profile.
+  // Only the established FFTW/TSC/deconvolved/quadrupole/COM-distance profile
+  // is the certified baseline. --recovery-qualification additionally gates
+  // all four experimental strict/adaptive x analytic/lookup profiles against
+  // unchanged Ewald error targets. Other matrix variants remain diagnostic.
   for (const auto& fixture : fixtures) {
     const ForceField ewald_reference = solveEwaldReference(fixture);
     const bool measure_translation =
         fixture.label == "xyz_seam_rectangular" ||
         fixture.label == "dmo_zeldovich_4cubed_initial";
     runAndRecord(fixture, ewald_reference, certified_profile, measure_translation, &results);
-    if (std::getenv("COSMOSIM_TREEPM_RECOVERY_QUALIFICATION") != nullptr) {
+    if (recovery_qualification) {
       for (const bool adaptive : {false,true}) for (const bool lookup : {false,true}) {
         auto candidate=certified_profile;
         candidate.label=std::string("recovery_")+(adaptive?"adaptive":"strict")+(lookup?"_lookup":"_analytic");
@@ -1090,7 +1092,13 @@ void testTreePmAgainstIndependentEwald() {
         candidate.supply_converged_reference_force_scale=adaptive;
         runAndRecord(fixture,ewald_reference,candidate,measure_translation,&results);
 #if COSMOSIM_ENABLE_FFTW
-        requireOrThrow(meetsAccuracyTarget(results.back()),"recovery TreePM failed unchanged Ewald accuracy target");
+        requirePhysicalInvariants(results.back());
+        if (fixture.label == "quasi_uniform_cubic") {
+          requireOrThrow(results.back().profile.tree_profile.particle_particle_interactions > 0U,
+              candidate.label + ": qualification must exercise direct pairs (including the selected lookup)");
+        }
+        requireOrThrow(meetsAccuracyTarget(results.back()), candidate.label + '/' + fixture.label +
+            ": experimental recovery qualification failed unchanged Ewald accuracy target");
 #endif
       }
     }
@@ -1210,6 +1218,30 @@ void testTreePmAgainstIndependentEwald() {
     matched_results.push_back(std::move(result));
   }
 
+  if (recovery_qualification) {
+    for (const bool adaptive : {false, true}) for (const bool lookup : {false, true}) {
+      auto candidate = certified_profile;
+      candidate.label = std::string("recovery_multipoles_") + (adaptive ? "adaptive" : "strict") +
+          (lookup ? "_lookup" : "_analytic");
+      candidate.accuracy_certified = false;
+      candidate.acceptance_policy = adaptive ? cosmosim::gravity::TreePmAcceptancePolicy::kAdaptiveRelative :
+          cosmosim::gravity::TreePmAcceptancePolicy::kStrictReference;
+      candidate.gaussian_pair_lookup_enabled = lookup;
+      candidate.supply_converged_reference_force_scale = adaptive;
+      candidate.max_leaf_size = 4;
+      cosmosim::gravity::TreePmProfileEvent profile;
+      const auto force = solveProductionAtIndependentTargets(matched_fixture, candidate, matched_reference, &profile);
+      AccuracyResult result;
+      result.error = computeErrorMetrics(force, matched_reference);
+      std::cout << "experimental_qualification=" << candidate.label
+                << " accepted_internal_nodes=" << profile.tree_profile.accepted_nodes
+                << " rel_l2=" << result.error.relative_l2 << " p99=" << result.error.p99_normalized << '\n';
+      requireOrThrow(profile.tree_profile.accepted_nodes > 0U,
+          candidate.label + ": qualification must exercise accepted multipoles");
+      requireOrThrow(meetsAccuracyTarget(result), candidate.label + ": independent-target Ewald accuracy failed");
+    }
+  }
+
   const auto error_bounds = std::minmax_element(
       matched_results.begin(), matched_results.end(),
       [](const MatchedMacResult& lhs, const MatchedMacResult& rhs) {
@@ -1259,11 +1291,34 @@ void testTreePmAgainstIndependentEwald() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
 #if COSMOSIM_ENABLE_MPI
-  MPI_Init(nullptr, nullptr);
+  MPI_Init(&argc, &argv);
 #endif
-  testTreePmAgainstIndependentEwald();
+  try {
+    bool recovery = false;
+    for (int i = 1; i < argc; ++i) {
+      requireOrThrow(std::string_view(argv[i]) == "--recovery-qualification" && !recovery,
+          "usage: test_validation_tree_pm_ewald_accuracy [--recovery-qualification]");
+      recovery = true;
+    }
+    if (const char* legacy = std::getenv("COSMOSIM_TREEPM_RECOVERY_QUALIFICATION")) {
+      requireOrThrow(std::string_view(legacy) == "1", "recovery environment switch must equal 1");
+      recovery = true;
+    }
+#if !COSMOSIM_ENABLE_FFTW
+    requireOrThrow(!recovery, "recovery Ewald qualification requires the FFTW backend");
+#endif
+    std::cout << "certified_baseline=default_tsc_deconv_quadrupole_com experimental_recovery_gate="
+              << (recovery ? "four_profiles_plus_multipoles" : "not_requested") << '\n';
+    testTreePmAgainstIndependentEwald(recovery);
+  } catch (const std::exception& error) {
+    std::cerr << "TreePM Ewald qualification failed: " << error.what() << '\n';
+#if COSMOSIM_ENABLE_MPI
+    MPI_Abort(MPI_COMM_WORLD, 1);
+#endif
+    return 1;
+  }
 #if COSMOSIM_ENABLE_MPI
   MPI_Finalize();
 #endif

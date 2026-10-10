@@ -11,6 +11,8 @@ from pathlib import Path
 import statistics
 import subprocess
 
+from chui_snapshot import add_snapshot_arguments, legacy_units, read_snapshot, species_index
+
 
 def digest(path):
     if path is None:
@@ -22,45 +24,64 @@ def digest(path):
     return h.hexdigest()
 
 
-def export_snapshot(args):
-    # Optional offline dependencies; no dependency installation is performed.
-    import h5py
+def select_target_ids(ids, count, fixed_path=None):
+    """Preserve an existing oracle's target order; reject ambiguous identities."""
     import numpy as np
-    with h5py.File(args.snapshot, 'r') as source:
-        group = source[args.group]
-        ids = np.asarray(group['ParticleIDs'], dtype=np.uint64)
-        positions = np.asarray(group['Coordinates'], dtype=np.float64) * args.position_scale
-        if 'Masses' in group:
-            mass = np.asarray(group['Masses'], dtype=np.float64) * args.mass_scale
-        else:
-            species = int(args.group.removeprefix('PartType'))
-            mass = np.full(len(ids), source['Header'].attrs['MassTable'][species] * args.mass_scale)
-        order = np.argsort(ids, kind='stable')
-        if len(ids) == 0 or len(np.unique(ids)) != len(ids):
-            raise ValueError('snapshot needs nonempty unique particle IDs')
-        if positions.shape != (len(ids), 3) or mass.shape != (len(ids),):
-            raise ValueError('snapshot source dimensions disagree')
-        if not np.isfinite(positions).all() or not np.isfinite(mass).all() or (mass <= 0).any():
-            raise ValueError('snapshot has invalid position or mass')
-        with args.output.open('w', newline='') as out:
-            writer = csv.writer(out, lineterminator='\n')
-            writer.writerow(['id', 'x', 'y', 'z', 'mass', 'epsilon'])
-            # epsilon is an explicit physical convention supplied by the user,
-            # in these comoving solver length units; it never scales with mesh.
-            for row in order:
-                writer.writerow([int(ids[row]), *[format(x, '.17g') for x in positions[row]],
-                                 format(mass[row], '.17g'), format(args.epsilon, '.17g')])
-        n_targets = min(args.targets, len(ids))
-        target_rows = (np.arange(n_targets, dtype=np.uint64) * len(ids)) // n_targets
-        target_ids = ids[order[target_rows]]
-        args.target_ids.write_text(''.join(f'{int(i)}\n' for i in target_ids))
-        # Preserve header information without inferring code units or G from it.
-        header = {k: np.asarray(v).tolist() for k, v in source['Header'].attrs.items()
-                  if k in ('Time', 'Redshift', 'BoxSize', 'Omega0', 'OmegaLambda', 'HubbleParam')}
-    metadata = dict(snapshot=str(args.snapshot), snapshot_sha256=digest(args.snapshot),
-                    particles_sha256=digest(args.output), target_ids_sha256=digest(args.target_ids),
-                    group=args.group, position_scale=args.position_scale, mass_scale=args.mass_scale,
-                    epsilon_comoving=args.epsilon, header=header)
+    if fixed_path is None:
+        n_targets = min(count, len(ids))
+        rows = (np.arange(n_targets, dtype=np.uint64)*len(ids))//n_targets
+        return [int(ids[i]) for i in rows]
+    selected = []
+    seen = set()
+    with Path(fixed_path).open() as source:
+        for line in source:
+            value = line.strip()
+            if not value.isascii() or not value.isdecimal():
+                raise ValueError('targets: each row must be a positive uint64 persistent ID')
+            particle_id = int(value)
+            if not 0 < particle_id <= 2**64-1 or particle_id in seen:
+                raise ValueError('targets: invalid or duplicate persistent ID')
+            index = int(np.searchsorted(ids, np.uint64(particle_id)))
+            if index == len(ids) or int(ids[index]) != particle_id:
+                raise ValueError('targets: persistent ID is absent from selected species')
+            selected.append(particle_id)
+            seen.add(particle_id)
+    if not selected:
+        raise ValueError('targets: fixed target file is empty')
+    return selected
+
+
+def export_snapshot(args):
+    import numpy as np
+    species_index(args.group)  # Validate even when an explicit Masses lane exists.
+    state = read_snapshot(args.snapshot, args.group, args.legacy_dialect,
+                          legacy_units(args), need_velocity=False)
+    identity = state['provenance']['identity']
+    if args.position_scale is None:
+        args.position_scale = identity['stored_to_internal_position']
+    if args.mass_scale is None:
+        args.mass_scale = identity['stored_to_internal_mass']
+    ids, positions, mass = state['ids'], state['x'], state['mass']
+    targets = select_target_ids(ids, args.targets, getattr(args, 'fixed_target_ids', None))
+    # Units remain explicit; conversion is applied in bounded row chunks.
+    with args.output.open('w', newline='') as out:
+        writer = csv.writer(out, lineterminator='\n')
+        writer.writerow(['id', 'x', 'y', 'z', 'mass', 'epsilon'])
+        for begin in range(0, len(ids), 65536):
+            end = min(begin+65536, len(ids))
+            xyz = positions[begin:end]*args.position_scale
+            masses = mass[begin:end]*args.mass_scale
+            if not np.isfinite(xyz).all() or not np.isfinite(masses).all() or (masses <= 0).any():
+                raise ValueError('conversion: nonfinite coordinates or invalid mass')
+            for row, i in enumerate(range(begin, end)):
+                writer.writerow([int(ids[i]), *[format(x, '.17g') for x in xyz[row]],
+                                 format(masses[row], '.17g'), format(args.epsilon, '.17g')])
+    args.target_ids.write_text(''.join(str(i)+'\n' for i in targets))
+    metadata = dict(logical_snapshot=state['provenance'], particles_sha256=digest(args.output),
+                    target_ids_sha256=digest(args.target_ids), group=args.group,
+                    position_scale=args.position_scale, mass_scale=args.mass_scale,
+                    epsilon_comoving=args.epsilon, scale_factor=state['a'],
+                    box_solver_units=(state['box']*args.position_scale).tolist())
     args.output.with_suffix('.metadata.json').write_text(json.dumps(metadata, indent=2, allow_nan=False)+'\n')
 
 
@@ -98,11 +119,48 @@ def force_metrics(candidate, reference):
                 p99=normalized[int(.99*(len(a)-1))], maximum=normalized[-1], normalization_floor=floor)
 
 
+def validate_total_reference(manifest, reference, particles, target_ids, epoch, box, epsilon, g_code):
+    provenance = json.loads(Path(manifest).read_text())
+    required = dict(reference_total_sha256=digest(reference), particles_sha256=digest(particles),
+                    target_ids_sha256=digest(target_ids), scale_factor=epoch,
+                    box_solver_units=box, epsilon_comoving=epsilon, g_code=g_code)
+    if not isinstance(provenance, dict) or any(provenance.get(key) != value for key, value in required.items()):
+        raise ValueError('reference: incompatible frozen source/epoch/units/softening or reference checksum')
+    if (provenance.get('reference_kind') not in ('independent_periodic_ewald', 'converged_total') or
+            not isinstance(provenance.get('qualification_evidence'), str) or
+            not provenance['qualification_evidence'].strip()):
+        raise ValueError('reference: independent/converged total qualification evidence must be declared')
+    return provenance
+
+
 def sweep(args):
     args.output.mkdir(parents=True, exist_ok=False)
     executable = args.exe.resolve()
     frozen_hash = digest(args.particles)
     targets_hash = digest(args.target_ids)
+    source_metadata = None
+    if args.particles:
+        sidecar = args.particles.with_suffix('.metadata.json')
+        if sidecar.is_file():
+            source_metadata = json.loads(sidecar.read_text())
+            if source_metadata.get('particles_sha256') != frozen_hash or source_metadata.get('target_ids_sha256') != targets_hash:
+                raise ValueError('provenance: frozen CSV/target IDs differ from snapshot export')
+            if source_metadata.get('scale_factor') != args.scale_factor:
+                raise ValueError('provenance: benchmark scale factor differs from frozen snapshot')
+            expected_box = source_metadata.get('box_solver_units')
+            if expected_box != [args.box_x, args.box_y, args.box_z]:
+                raise ValueError('provenance: benchmark box differs from frozen snapshot conversion')
+            if source_metadata.get('epsilon_comoving') != args.epsilon:
+                raise ValueError('provenance: benchmark softening differs from frozen snapshot export')
+    total_reference_provenance = None
+    if args.total_reference:
+        if not args.particles or not args.target_ids or not args.total_reference_manifest:
+            raise ValueError('reference: external total comparison requires frozen particles, target IDs and --total-reference-manifest')
+        total_reference_provenance = validate_total_reference(args.total_reference_manifest,
+            args.total_reference, args.particles, args.target_ids, args.scale_factor,
+            [args.box_x, args.box_y, args.box_z], args.epsilon, args.g)
+    elif args.total_reference_manifest:
+        raise ValueError('reference: --total-reference-manifest requires --total-reference')
     binary_hash = digest(executable)
     axes = itertools.product(comma_values(args.meshes, int), comma_values(args.leaves, int),
                              comma_values(args.blocks, int), comma_values(args.threads, int),
@@ -135,6 +193,10 @@ def sweep(args):
         manifest = dict(command=command, OMP_NUM_THREADS=threads, OMP_DYNAMIC='FALSE',
                         executable_sha256=binary_hash, particles_sha256=frozen_hash,
                         target_ids_sha256=targets_hash, reference_total_sha256=digest(args.total_reference),
+                        source_snapshot_export=source_metadata,
+                        total_reference_provenance=total_reference_provenance,
+                        total_reference_manifest_sha256=digest(args.total_reference_manifest),
+                        source_provenance_status='snapshot_export_verified' if source_metadata else 'explicit_csv_or_generated_only',
                         returncode=result.returncode)
         (args.output / f'{name}.manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
         row = dict(candidate=name, mesh=mesh, leaf=leaf, block=block, threads=threads,
@@ -192,15 +254,17 @@ def sweep(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    export = commands.add_parser('export', help='export one frozen HDF5 particle group in explicit solver units')
+    export = commands.add_parser('export', help='export a complete logical snapshot particle group in explicit solver units')
     export.add_argument('snapshot', type=Path)
     export.add_argument('--group', default='PartType1')
     export.add_argument('--output', type=Path, required=True)
     export.add_argument('--target-ids', type=Path, required=True)
+    export.add_argument('--fixed-target-ids', type=Path, help='existing persistent-ID list; preserve its order instead of selecting new targets')
     export.add_argument('--epsilon', type=float, required=True)
-    export.add_argument('--position-scale', type=float, default=1.0)
-    export.add_argument('--mass-scale', type=float, default=1.0)
+    export.add_argument('--position-scale', type=float, help='stored-to-solver length factor; default: declared dialect to internal units')
+    export.add_argument('--mass-scale', type=float, help='stored-to-solver mass factor; default: declared dialect to internal units')
     export.add_argument('--targets', type=int, default=4096)
+    add_snapshot_arguments(export)
     export.set_defaults(action=export_snapshot)
     run = commands.add_parser('run', help='run the compiled serial-owner benchmark repeatedly')
     run.add_argument('--exe', type=Path, required=True)
@@ -223,12 +287,13 @@ def main():
         run.add_argument('--'+key, type=float, default=default)
     run.add_argument('--oracle', action='store_true', help='generate a matching direct short reference for each split')
     run.add_argument('--total-reference', type=Path, help='independently qualified total CSV, id,total_x,total_y,total_z')
+    run.add_argument('--total-reference-manifest', type=Path, help='qualified total-reference identity/evidence JSON sidecar')
     run.set_defaults(action=sweep)
     args = parser.parse_args()
     if args.targets <= 0 or not math.isfinite(args.epsilon) or args.epsilon < 0:
         parser.error('positive target count and finite nonnegative softening required')
     if args.command == 'export':
-        if not all(math.isfinite(x) and x > 0 for x in (args.position_scale, args.mass_scale)):
+        if not all(x is None or (math.isfinite(x) and x > 0) for x in (args.position_scale, args.mass_scale)):
             parser.error('finite positive position/mass conversion scales required')
     elif args.count <= 0 or args.repeats <= 0 or args.warmups < 0 or not 0 <= args.ewald_level <= 32:
         parser.error('positive count/repeats, nonnegative warmups and Ewald level 0..32 required')

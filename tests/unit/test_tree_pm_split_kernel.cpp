@@ -1,8 +1,9 @@
-#include <cassert>
+#include "../support/test_require.hpp"
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
 #include "gravity/internal/tree_pm_transport_planner.hpp"
@@ -32,28 +33,59 @@ long double referenceH(long double t) {
 void testStableZeroAndTinyRadius() {
   using namespace cosmosim::gravity;
   for (const double a : {1e-90, 1e-10, 0.2, 1.0, 1e10, 1e90}) {
-    assert(treePmGaussianShortRangeForceFactor(0.0,a) == 1.0);
-    assert(treePmGaussianLongRangeForceFactor(0.0,a) == 0.0);
+    CHUI_REQUIRE(treePmGaussianShortRangeForceFactor(0.0,a) == 1.0);
+    CHUI_REQUIRE(treePmGaussianLongRangeForceFactor(0.0,a) == 0.0);
     const long double scale = static_cast<long double>(a)*a*a;
     const long double limit = 1.0L/(6.0L*std::sqrt(std::acos(-1.0L)));
-    assert(std::abs(treePmGaussianLongRangeInvR3Unchecked(0.0,a)*scale-limit) < 3e-16L);
+    CHUI_REQUIRE(std::abs(treePmGaussianLongRangeInvR3Unchecked(0.0,a)*scale-limit) < 3e-16L);
     for (const double ratio : {1e-16, 1e-10, 1e-5, 0.249999999, 0.25, 0.250000001, 1.0, 5.0, 16.0}) {
       const double r = a*ratio;
       const long double q = static_cast<long double>(r)/(2.0L*a);
       const long double expected = referenceH(q*q)/8.0L;
       const double coefficient = treePmGaussianLongRangeInvR3Unchecked(r,a);
-      assert(std::isfinite(coefficient));
-      assert(std::abs(coefficient*scale-expected) < 3e-14L*expected);
+      CHUI_REQUIRE(std::isfinite(coefficient));
+      CHUI_REQUIRE(std::abs(coefficient*scale-expected) < 3e-14L*expected);
     }
     for (const double eps_ratio : {0.001, 0.01, 0.05, 0.2}) {
       const double eps = a*eps_ratio;
-      // Preserve the established finite coincident-pair convention.
-      assert(treePmSoftenedShortRangeInvR3(0.0,eps,a) == softenedInvR3(0.0,eps));
+      const double coincident = treePmSoftenedShortRangeInvR3(0.0,eps,a);
+      const long double expected_zero = std::pow(static_cast<long double>(eps),-3.0L)-limit/scale;
+      CHUI_REQUIRE(std::abs((coincident-expected_zero)*scale) < 1e-6L);
+      CHUI_REQUIRE(treePmSoftenedShortRangeInvR3(0.0,0.0,a) == softenedInvR3(0.0,0.0));
       const double r = a*1e-12;
       const double residual = treePmSoftenedShortRangeInvR3(r*r,eps,a);
+      CHUI_REQUIRE(std::abs((residual-coincident)*scale) < 1e-6L);
       const long double softened = std::pow(static_cast<long double>(r)*r +
           static_cast<long double>(eps)*eps, -1.5L);
-      assert(std::abs((residual-softened)*scale + limit) < 1e-6L);
+      CHUI_REQUIRE(std::abs((residual-softened)*scale + limit) < 1e-6L);
+    }
+  }
+}
+
+void testCoincidentResidualLookupConsistency() {
+  using namespace cosmosim::gravity;
+  const TreePmGaussianCoefficientTable first, second;
+  for (const double a : {1e-90, 1e-5, 0.25, 1.0, 1e90}) {
+    const long double scale = static_cast<long double>(a)*a*a;
+    const long double c = 1.0L/(6.0L*std::sqrt(std::acos(-1.0L)));
+    for (const double ratio : {0.05, 0.5, 1.0, 3.0}) {
+      const double eps = a*ratio;
+      const double zero = treePmSoftenedShortRangeInvR3(0.0, eps, a);
+      const long double expected = std::pow(static_cast<long double>(eps)/a, -3.0L) - c;
+      CHUI_REQUIRE(std::abs(zero*scale-expected) < 8e-12L);
+      const double lookup = softenedInvR3(0.0, eps)-first.longRangeInvR3(0.0, a);
+      CHUI_REQUIRE(std::abs((zero-lookup)*scale) < 8e-12L);
+      for (const double r_ratio : {1e-16, 1e-12}) {
+        const double r = a*r_ratio;
+        CHUI_REQUIRE(std::abs((treePmSoftenedShortRangeInvR3(r*r, eps, a)-zero)*scale) < 8e-12L);
+      }
+    }
+    for (const double t : {0.0, 0.015625, 0.5, 63.99, 64.0, 100.0}) {
+      const double r2 = 4*a*a*t;
+      const double before = first.longRangeInvR3(r2, a);
+      CHUI_REQUIRE(before == second.longRangeInvR3(r2, a));
+      (void)first.longRangeInvR3(4*a*a, a);
+      CHUI_REQUIRE(before == first.longRangeInvR3(r2, a));
     }
   }
 }
@@ -71,20 +103,20 @@ void testGaussianLookupAcrossInterval() {
       const double lr = table.longRangeInvR3(r2,a);
       const long double actual_t = 0.25L*static_cast<long double>(r2)/a/a;
       const long double expected_h = referenceH(actual_t);
-      assert(std::abs(8.0L*lr*scale - expected_h) <= 5e-11L);
+      CHUI_REQUIRE(std::abs(8.0L*lr*scale - expected_h) <= 5e-11L);
       if (i % 127U == 0U && r2 > 0.0) {
         for (const double eps_ratio : {0.0, 0.008, 0.05, 0.2}) {
           const double eps = a*eps_ratio;
           const double lookup_residual = softenedInvR3(r2,eps)-lr;
           const double analytic = treePmSoftenedShortRangeInvR3(r2,eps,a);
-          assert(std::abs((lookup_residual-analytic)*scale) < 6.3e-12L);
+          CHUI_REQUIRE(std::abs((lookup_residual-analytic)*scale) < 6.3e-12L);
         }
       }
     }
     for (const double ratio : {std::nextafter(16.0,0.0), 16.0,
          std::nextafter(16.0,17.0), 32.0}) {
       const double r = ratio*a;
-      assert(std::abs((table.longRangeInvR3(r*r,a) -
+      CHUI_REQUIRE(std::abs((table.longRangeInvR3(r*r,a) -
           treePmGaussianLongRangeInvR3Unchecked(r,a))*scale) < 6.3e-12L);
     }
   }
@@ -94,35 +126,62 @@ void testInvalidKernelArguments() {
   using namespace cosmosim::gravity;
   const double nan = std::numeric_limits<double>::quiet_NaN();
   const double inf = std::numeric_limits<double>::infinity();
+  // The true zero-radius coefficient is outside double range here; preserve
+  // its sign rather than producing NaN through separately overflowing terms.
+  const double positive_overflow = treePmSoftenedShortRangeInvR3(0.0, 1e-110, 1e-110);
+  const double negative_overflow = treePmSoftenedShortRangeInvR3(0.0, 1e-108, 1e-110);
+  CHUI_REQUIRE(std::isinf(positive_overflow) && positive_overflow > 0.0);
+  CHUI_REQUIRE(std::isinf(negative_overflow) && negative_overflow < 0.0);
+  CHUI_REQUIRE(treePmSoftenedShortRangeInvR3(0.0, 1e110, 1e110) == 0.0);
   for (const double r : {-1.0,nan,inf}) {
     bool rejected = false;
     try { (void)treePmGaussianShortRangeForceFactor(r,1.0); }
     catch (const std::invalid_argument&) { rejected = true; }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
     rejected = false;
     try { (void)treePmGaussianLongRangeForceFactor(r,1.0); }
     catch (const std::invalid_argument&) { rejected = true; }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
   }
   for (const double a : {0.0,-1.0,nan,inf}) {
     bool rejected = false;
     try { (void)treePmSoftenedShortRangeInvR3(1.0,0.01,a); }
     catch (const std::invalid_argument&) { rejected = true; }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
   }
   for (const double invalid : {-1.0,nan,inf}) {
     bool rejected = false;
     try { (void)treePmSoftenedShortRangeInvR3(invalid,0.01,1.0); }
     catch (const std::invalid_argument&) { rejected = true; }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
     rejected = false;
     try { (void)treePmSoftenedShortRangeInvR3(1.0,invalid,1.0); }
     catch (const std::invalid_argument&) { rejected = true; }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
   }
+  for (const double a : {0.0, -1.0, nan, inf}) {
+    bool rejected = false;
+    try { (void)treePmSoftenedShortRangeInvR3(0.0, 0.1, a); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    CHUI_REQUIRE(rejected);
+  }
+  for (const double eps : {-1.0, nan, inf}) {
+    bool rejected = false;
+    try { (void)treePmSoftenedShortRangeInvR3(0.0, eps, 1.0); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    CHUI_REQUIRE(rejected);
+  }
+  auto unsupported = makeTreePmSplitPolicyFromMeshSpacing(1.25, 6.25, 0.01);
+  unsupported.kernel = static_cast<TreePmSplitKernel>(99);
+  bool rejected = false;
+  try { validateTreePmSplitPolicy(unsupported); }
+  catch (const std::invalid_argument& error) {
+    rejected = std::string(error.what()).find("Unsupported TreePM split kernel") != std::string::npos;
+  }
+  CHUI_REQUIRE(rejected);
   // Finite valid inputs with enormous dimensionless q must avoid inf*0.
-  assert(treePmGaussianShortRangeForceFactor(1e300,1e-300) == 0.0);
-  assert(treePmGaussianLongRangeForceFactor(1e300,1e-300) == 1.0);
+  CHUI_REQUIRE(treePmGaussianShortRangeForceFactor(1e300,1e-300) == 0.0);
+  CHUI_REQUIRE(treePmGaussianLongRangeForceFactor(1e300,1e-300) == 1.0);
 }
 
 void testSquaredGeometryAndStagedMac() {
@@ -132,12 +191,12 @@ void testSquaredGeometryAndStagedMac() {
     const double c2 = cutoff*cutoff;
     for (const double d2 : {std::nextafter(c2,0.0),c2,std::nextafter(c2,
          std::numeric_limits<double>::infinity()),c2*0.5,c2*2.0}) {
-      assert(treePmSquaredDistanceWithinCutoff(d2,cutoff,c2) == (std::sqrt(d2) <= cutoff));
+      CHUI_REQUIRE(treePmSquaredDistanceWithinCutoff(d2,cutoff,c2) == (std::sqrt(d2) <= cutoff));
     }
   }
   const TreePmAabbDistances box(0.3,-0.4,0.5,0.1);
-  assert(std::abs(box.minimum_squared-(0.04+0.09+0.16)) < 1e-15);
-  assert(std::abs(box.maximumSquared(0.1)-(0.16+0.25+0.36)) < 1e-15);
+  CHUI_REQUIRE(std::abs(box.minimum_squared-(0.04+0.09+0.16)) < 1e-15);
+  CHUI_REQUIRE(std::abs(box.maximumSquared(0.1)-(0.16+0.25+0.36)) < 1e-15);
   TreePmOptions full;
   full.split_policy = makeTreePmSplitPolicyFromMeshSpacing(1.25,6.25,0.01);
   full.tree_options.multipole_order = TreeMultipoleOrder::kQuadrupole;
@@ -155,13 +214,42 @@ void testSquaredGeometryAndStagedMac() {
     TreePmTraversalCounters a,b;
     const bool inside_cutoff = i%5U != 0U;
     const bool accepted = acceptTreePmNode(in,inside_cutoff,full,a);
-    assert(accepted == acceptTreePmNode(in,inside_cutoff,fast,b));
-    assert(a.skipped_mac_evaluations == 0U);
-    assert(a.maximum_angle_rejections == b.maximum_angle_rejections);
-    assert(a.softening_rejections == b.softening_rejections);
-    assert(a.near_node_rejections == b.near_node_rejections);
-    if (b.skipped_mac_evaluations) assert(!accepted);
-    else assert(a.relative_mac_rejections == b.relative_mac_rejections);
+    CHUI_REQUIRE(accepted == acceptTreePmNode(in,inside_cutoff,fast,b));
+    CHUI_REQUIRE(a.skipped_mac_evaluations == 0U);
+    CHUI_REQUIRE(a.maximum_angle_rejections == b.maximum_angle_rejections);
+    CHUI_REQUIRE(a.softening_rejections == b.softening_rejections);
+    CHUI_REQUIRE(a.near_node_rejections == b.near_node_rejections);
+    if (b.skipped_mac_evaluations) CHUI_REQUIRE(!accepted);
+    else CHUI_REQUIRE(a.relative_mac_rejections == b.relative_mac_rejections);
+  }
+}
+
+void testInvalidAdaptiveHistoryUsesGeometricFallback() {
+  using namespace cosmosim::gravity;
+  using namespace cosmosim::gravity::internal;
+  TreePmOptions options;
+  options.split_policy = makeTreePmSplitPolicyFromMeshSpacing(1.25, 6.25, 0.01);
+  options.acceptance_policy = TreePmAcceptancePolicy::kAdaptiveRelative;
+  TreeNodeAcceptanceInput input{.half_size=0.001, .com_center_offset=0.0,
+      .node_mass_code=1.0, .r2=0.01, .previous_acceleration_available=true,
+      .target_softening_comoving=0.0, .node_softening_min_comoving=0.0,
+      .node_softening_max_comoving=0.0};
+  for (const double history : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+                               std::numeric_limits<double>::infinity()}) {
+    input.previous_acceleration_magnitude_code = history;
+    for (const bool available : {false, true}) {
+      input.previous_acceleration_available = available;
+      TreePmTraversalCounters counters;
+      const bool accepted = acceptTreePmNode(input, true, options, counters);
+      CHUI_REQUIRE(accepted == acceptNodeByComDistanceMac(options.tree_options.opening_theta,
+          input.half_size, input.com_center_offset, input.r2));
+      CHUI_REQUIRE(counters.geometric_history_fallbacks == 1U);
+      CHUI_REQUIRE(counters.relative_mac_rejections == 0U);
+      input.target_inside_node = true;
+      TreePmTraversalCounters inside;
+      CHUI_REQUIRE(!acceptTreePmNode(input, true, options, inside));
+      input.target_inside_node = false;
+    }
   }
 }
 
@@ -175,11 +263,11 @@ void testSplitKernelComplementarity() {
         cosmosim::gravity::treePmGaussianShortRangeForceFactor(radius, split_policy.split_scale_comoving);
     const double long_factor =
         cosmosim::gravity::treePmGaussianLongRangeForceFactor(radius, split_policy.split_scale_comoving);
-    assert(short_factor >= 0.0);
-    assert(short_factor <= 1.0 + 1.0e-12);
-    assert(long_factor >= -1.0e-12);
-    assert(long_factor <= 1.0);
-    assert(std::abs(short_factor + long_factor - 1.0) < 1.0e-12);
+    CHUI_REQUIRE(short_factor >= 0.0);
+    CHUI_REQUIRE(short_factor <= 1.0 + 1.0e-12);
+    CHUI_REQUIRE(long_factor >= -1.0e-12);
+    CHUI_REQUIRE(long_factor <= 1.0);
+    CHUI_REQUIRE(std::abs(short_factor + long_factor - 1.0) < 1.0e-12);
   }
 }
 
@@ -201,7 +289,7 @@ void testFiniteSofteningResidualComposesWithPmLongRange() {
           cosmosim::gravity::treePmSoftenedShortRangeInvR3(r2, epsilon, split_scale);
       const double expected = cosmosim::gravity::softenedInvR3(r2, epsilon);
       const double scale = std::max(std::abs(expected), 1.0e-30);
-      assert(std::abs((tree_residual + pm_long) - expected) / scale < 5.0e-13);
+      CHUI_REQUIRE(std::abs((tree_residual + pm_long) - expected) / scale < 5.0e-13);
     }
   }
 }
@@ -213,11 +301,11 @@ void testMeshCellDerivedSplitSemantics() {
   const cosmosim::gravity::TreePmSplitPolicy split_policy =
       cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(asmth_cells, rcut_cells, mesh_spacing);
 
-  assert(std::abs(split_policy.mesh_spacing_comoving - mesh_spacing) < 1.0e-15);
-  assert(std::abs(split_policy.asmth_cells - asmth_cells) < 1.0e-15);
-  assert(std::abs(split_policy.rcut_cells - rcut_cells) < 1.0e-15);
-  assert(std::abs(split_policy.split_scale_comoving - asmth_cells * mesh_spacing) < 1.0e-15);
-  assert(std::abs(split_policy.cutoff_radius_comoving - rcut_cells * mesh_spacing) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(split_policy.mesh_spacing_comoving - mesh_spacing) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(split_policy.asmth_cells - asmth_cells) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(split_policy.rcut_cells - rcut_cells) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(split_policy.split_scale_comoving - asmth_cells * mesh_spacing) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(split_policy.cutoff_radius_comoving - rcut_cells * mesh_spacing) < 1.0e-15);
 }
 
 void testDiagnosticsContinuityAtSplitScale() {
@@ -225,18 +313,18 @@ void testDiagnosticsContinuityAtSplitScale() {
       cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(2.0, 6.0, 0.0625);
 
   const cosmosim::gravity::TreePmDiagnostics diagnostics = cosmosim::gravity::computeTreePmDiagnostics(split_policy);
-  assert(std::abs(diagnostics.mesh_spacing_comoving - split_policy.mesh_spacing_comoving) < 1.0e-15);
-  assert(std::abs(diagnostics.asmth_cells - split_policy.asmth_cells) < 1.0e-15);
-  assert(std::abs(diagnostics.rcut_cells - split_policy.rcut_cells) < 1.0e-15);
-  assert(std::abs(diagnostics.split_scale_comoving - split_policy.split_scale_comoving) < 1.0e-15);
-  assert(std::abs(diagnostics.cutoff_radius_comoving - split_policy.cutoff_radius_comoving) < 1.0e-15);
-  assert(diagnostics.short_range_factor_at_split > 0.0);
-  assert(diagnostics.long_range_factor_at_split > 0.0);
-  assert(diagnostics.short_range_factor_at_cutoff >= 0.0);
-  assert(diagnostics.short_range_factor_at_cutoff < 0.5);
-  assert(diagnostics.long_range_factor_at_cutoff > 0.5);
-  assert(diagnostics.composition_error_at_split < 1.0e-12);
-  assert(diagnostics.max_relative_composition_error < 1.0e-12);
+  CHUI_REQUIRE(std::abs(diagnostics.mesh_spacing_comoving - split_policy.mesh_spacing_comoving) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(diagnostics.asmth_cells - split_policy.asmth_cells) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(diagnostics.rcut_cells - split_policy.rcut_cells) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(diagnostics.split_scale_comoving - split_policy.split_scale_comoving) < 1.0e-15);
+  CHUI_REQUIRE(std::abs(diagnostics.cutoff_radius_comoving - split_policy.cutoff_radius_comoving) < 1.0e-15);
+  CHUI_REQUIRE(diagnostics.short_range_factor_at_split > 0.0);
+  CHUI_REQUIRE(diagnostics.long_range_factor_at_split > 0.0);
+  CHUI_REQUIRE(diagnostics.short_range_factor_at_cutoff >= 0.0);
+  CHUI_REQUIRE(diagnostics.short_range_factor_at_cutoff < 0.5);
+  CHUI_REQUIRE(diagnostics.long_range_factor_at_cutoff > 0.5);
+  CHUI_REQUIRE(diagnostics.composition_error_at_split < 1.0e-12);
+  CHUI_REQUIRE(diagnostics.max_relative_composition_error < 1.0e-12);
 }
 
 void testSparseTreePmAggregateRoundPlanner() {
@@ -244,21 +332,21 @@ void testSparseTreePmAggregateRoundPlanner() {
   using cosmosim::gravity::internal::sparseTreePmPhysicalRoundCount;
 
   const auto zero_peer_plan = planSparseTreePmRound(4096U, 0U, 96U, 80U, 1024U);
-  assert(zero_peer_plan.targets_per_peer_per_round == 4096U);
-  assert(zero_peer_plan.aggregate_bytes_per_target == 0U);
+  CHUI_REQUIRE(zero_peer_plan.targets_per_peer_per_round == 4096U);
+  CHUI_REQUIRE(zero_peer_plan.aggregate_bytes_per_target == 0U);
 
   const auto many_peer_plan = planSparseTreePmRound(4096U, 8U, 96U, 80U, 4096U);
-  assert(many_peer_plan.aggregate_bytes_per_target == 8U * 96U);
-  assert(many_peer_plan.targets_per_peer_per_round == 5U);
-  assert(many_peer_plan.targets_per_peer_per_round *
+  CHUI_REQUIRE(many_peer_plan.aggregate_bytes_per_target == 8U * 96U);
+  CHUI_REQUIRE(many_peer_plan.targets_per_peer_per_round == 5U);
+  CHUI_REQUIRE(many_peer_plan.targets_per_peer_per_round *
              many_peer_plan.aggregate_bytes_per_target <= 4096U);
 
   const std::uint64_t logical_targets =
       static_cast<std::uint64_t>(std::numeric_limits<int>::max()) + 1000000ULL;
   const std::uint64_t physical_rounds = sparseTreePmPhysicalRoundCount(
       logical_targets, many_peer_plan.targets_per_peer_per_round);
-  assert(physical_rounds > 1U);
-  assert(physical_rounds ==
+  CHUI_REQUIRE(physical_rounds > 1U);
+  CHUI_REQUIRE(physical_rounds ==
          1U + (logical_targets - 1U) /
              static_cast<std::uint64_t>(many_peer_plan.targets_per_peer_per_round));
 
@@ -268,16 +356,18 @@ void testSparseTreePmAggregateRoundPlanner() {
   } catch (const std::overflow_error&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 }  // namespace
 
 int main() {
   testStableZeroAndTinyRadius();
+  testCoincidentResidualLookupConsistency();
   testGaussianLookupAcrossInterval();
   testInvalidKernelArguments();
   testSquaredGeometryAndStagedMac();
+  testInvalidAdaptiveHistoryUsesGeometricFallback();
   testSplitKernelComplementarity();
   testFiniteSofteningResidualComposesWithPmLongRange();
   testMeshCellDerivedSplitSemantics();

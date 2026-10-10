@@ -8,6 +8,9 @@
 #include <vector>
 #include <utility>
 #include <sstream>
+#include <functional>
+#include <filesystem>
+#include <string_view>
 #include <unordered_map>
 
 #include "cosmosim/cosmosim.hpp"
@@ -98,6 +101,106 @@ void assertSynchronized(const io::RestartReadResult& checkpoint,unsigned rung) {
     require(checkpoint.scheduler_state.active_flag[i]==0U);
   }
 }
+std::string legacyTreePmDefaultsText(std::string text) {
+  for (const std::string_view line : {"treepm_gaussian_pair_lookup_enabled = false\n",
+                                     "treepm_full_mac_diagnostics = true\n"}) {
+    const auto position = text.find(line);
+    require(position != std::string::npos);
+    text.erase(position, line.size());
+  }
+  return text;
+}
+
+void testLegacyRestartConfigurationCompatibility(
+    const core::FrozenConfig& frozen, const io::RestartReadResult& source,
+    const std::filesystem::path& path, const std::function<void(const io::RestartReadResult&)>& resume) {
+  core::HierarchicalTimeBinScheduler particles(source.scheduler_state.max_bin), cells(source.gas_cell_scheduler_state.max_bin);
+  particles.importPersistentState(source.scheduler_state);
+  cells.importPersistentState(source.gas_cell_scheduler_state);
+  // Change only configuration serialization. All dynamics, IDs, scheduler,
+  // source/PM ownership, stochastic and output epochs are the real dispatcher output.
+  auto state = source.state;
+  io::RestartWritePayload payload;
+  payload.persistent_state.simulation_state = &state;
+  payload.integrator_state = &source.integrator_state;
+  payload.scheduler = &particles;
+  payload.gas_cell_scheduler = &cells;
+  payload.gravity_force_cache = &source.gravity_force_cache;
+  payload.normalized_config_text = legacyTreePmDefaultsText(frozen.normalized_text);
+  payload.normalized_config_hash_hex = core::stableConfigHashHex(payload.normalized_config_text);
+  state.metadata.normalized_config_hash_hex = payload.normalized_config_hash_hex;
+  state.metadata.normalized_config_hash = core::stableConfigHash(payload.normalized_config_text);
+  payload.provenance = source.provenance;
+  payload.provenance.config_hash_hex = payload.normalized_config_hash_hex;
+  payload.provenance.normalized_config_hash_hex = payload.normalized_config_hash_hex;
+  payload.provenance.normalized_config_sha256_hex = core::strongConfigHashSha256Hex(payload.normalized_config_text);
+  payload.provenance.normalized_config = payload.normalized_config_text;
+  payload.provenance.raw_input_config = payload.normalized_config_text;
+  payload.distributed_gravity_state = source.distributed_gravity_state;
+  payload.output_cadence_state = source.output_cadence_state;
+  payload.stochastic_state = source.stochastic_state;
+  io::writeRestartCheckpointHdf5(path, payload);
+  auto legacy = io::readRestartCheckpointHdf5(path);
+  const auto original_serialized = core::serializeProvenanceRecord(legacy.provenance);
+  const auto record = io::restartConfigurationCompatibilityRecord(legacy, frozen);
+  require(record.find("restart_config_compatibility_begin=treepm_normalized_defaults_v1") != std::string::npos);
+  require(record.find("derived_normalized_hash_hex="+frozen.provenance.config_hash_hex) != std::string::npos);
+  require(legacy.normalized_config_hash_hex == payload.normalized_config_hash_hex);
+  require(core::serializeProvenanceRecord(legacy.provenance) == original_serialized);
+  const auto refused = [&](const io::RestartReadResult& checkpoint, const core::FrozenConfig& config,
+                           const std::string& context) {
+    bool rejected = false;
+    try { (void)io::restartConfigurationCompatibilityRecord(checkpoint, config); }
+    catch (const std::exception& error) { rejected = std::string(error.what()).find(context) != std::string::npos; }
+    require(rejected);
+  };
+  auto text = frozen.normalized_text;
+  // Change all axes together: the incompatible candidate must itself satisfy
+  // the spherical split/coarsest-cell guard, rather than fail in config parsing.
+  for (const char axis : {'x', 'y', 'z'}) {
+    const std::string key = std::string("treepm_pm_grid_n") + axis;
+    const std::string mesh_line = key + " = 16\n";
+    const auto mesh_position = text.find(mesh_line);
+    require(mesh_position != std::string::npos);
+    text.replace(mesh_position, mesh_line.size(), key + " = 32\n");
+  }
+  const auto different = core::loadFrozenConfigFromString(text, "compatibility_scientific_change");
+  refused(legacy, different, "exact legacy projection");
+  for (const std::string key : {"treepm_gaussian_pair_lookup_enabled = false", "treepm_full_mac_diagnostics = true"}) {
+    text = frozen.normalized_text;
+    const auto position = text.find(key);
+    require(position != std::string::npos);
+    text.replace(position, key.size(), key.find("lookup") != std::string::npos ?
+        "treepm_gaussian_pair_lookup_enabled = true" : "treepm_full_mac_diagnostics = false");
+    refused(legacy, core::loadFrozenConfigFromString(text, "compatibility_nonlegacy_flags"), "legacy defaults");
+  }
+  auto bad = legacy;
+  bad.payload_integrity_verified = false;
+  refused(bad, frozen, "integrity-verified v23");
+  bad = legacy; bad.provenance.normalized_config.clear();
+  refused(bad, frozen, "complete original normalized");
+  bad = legacy; bad.normalized_config_text.clear();
+  refused(bad, frozen, "non-empty normalized_config_text");
+  bad = legacy; bad.integrator_state.inside_kdk_step = true;
+  refused(bad, frozen, "closed global KDK");
+  bad = legacy; bad.provenance.schema_version = "provenance_v6";
+  refused(bad, frozen, "v7 provenance");
+  bad = legacy; bad.diagnostics.restart_schema_version = 22U;
+  refused(bad, frozen, "integrity-verified v23");
+  // A partially introduced key is a different historical normalization revision.
+  bad = legacy;
+  bad.normalized_config_text += "\n[numerics]\ntreepm_full_mac_diagnostics = true\n";
+  bad.normalized_config_hash_hex = core::stableConfigHashHex(bad.normalized_config_text);
+  bad.provenance.config_hash_hex = bad.normalized_config_hash_hex;
+  bad.provenance.normalized_config_hash_hex = bad.normalized_config_hash_hex;
+  bad.provenance.normalized_config_sha256_hex = core::strongConfigHashSha256Hex(bad.normalized_config_text);
+  bad.provenance.normalized_config = bad.normalized_config_text;
+  bad.state.metadata.normalized_config_hash_hex = bad.normalized_config_hash_hex;
+  bad.state.metadata.normalized_config_hash = core::stableConfigHash(bad.normalized_config_text);
+  refused(bad, frozen, "exact legacy projection");
+  resume(legacy);
+}
+
 void run(int rank,int ranks,std::uint64_t token) {
   auto scratch=test_support::TestTempWorkspace::createMpiShared("hierarchical_treepm_workflow",token,rank==0);
   const auto initial=initialState(rank,ranks);
@@ -135,6 +238,31 @@ void run(int rank,int ranks,std::uint64_t token) {
   assertSynchronized(resumed.second,2U);
   require(mpi.allreduceSumDouble(phaseError(resumed.second.state,coarse.second.state))<1e-22);
   require(resumed.second.scheduler_state.current_tick==coarse.second.scheduler_state.current_tick);
+  // Real global KDK checkpoint migration, then real resumed dynamics.
+  auto global_first = execute(global, "global_legacy_first", 2.5e-6, nullptr, 1U);
+  testLegacyRestartConfigurationCompatibility(global_config, global_first.second,
+      scratch.root()/("legacy_rank_"+std::to_string(rank)+".hdf5"), [&](const io::RestartReadResult& legacy) {
+        auto migrated = execute(global, "global_legacy_resumed", 2.5e-6, &legacy);
+        require(!migrated.first.restart_config_compatibility_record.empty());
+        require(migrated.second.provenance.derived_runtime_state.find("treepm_normalized_defaults_v1") != std::string::npos);
+        require(migrated.second.normalized_config_hash_hex == global_config.provenance.config_hash_hex);
+        require(mpi.allreduceSumDouble(phaseError(migrated.second.state, reference.second.state)) < 1e-22);
+        require(io::restartConfigurationCompatibilityRecord(migrated.second, global_config) ==
+                migrated.first.restart_config_compatibility_record);
+      });
+  // All ranks corrupt the same admission invariant and verify collective refusal.
+  const auto refused_resume = [&](io::RestartReadResult invalid, const char* label, const char* expected) {
+    bool rejected = false;
+    try { (void)execute(hierarchical, label, 2e-5, &invalid); }
+    catch (const std::exception& error) { rejected = std::string(error.what()).find(expected) != std::string::npos; }
+    require(mpi.allreduceSumUint64(rejected ? 1U : 0U) == static_cast<std::uint64_t>(ranks));
+  };
+  auto invalid = first.second;
+  invalid.integrator_state.inside_kdk_step = true;
+  refused_resume(invalid, "reject_open_kdk", "closed collisionless synchronized KDK");
+  invalid = first.second;
+  if (!invalid.scheduler_state.active_flag.empty()) invalid.scheduler_state.active_flag.front() = 1U;
+  refused_resume(invalid, "reject_active_interval", "open particle interval");
   bool saw_fine=false,saw_pm_endpoint=false;
   for (const auto& record:coarse.first.treepm_cadence_records) {
     saw_fine=saw_fine||record.short_range_only;
