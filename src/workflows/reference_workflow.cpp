@@ -504,6 +504,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
         internal::validateRestartResumeTopologyOrThrow(
             *options.restart_state_override, config, m_frozen_config,
             mpi_context);
+        report.restart_config_compatibility_record = io::restartConfigurationCompatibilityRecord(
+            *options.restart_state_override, m_frozen_config);
       } catch (...) {
         local_restart_validation_failure = std::current_exception();
       }

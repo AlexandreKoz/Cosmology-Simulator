@@ -1,5 +1,15 @@
 # Repair open issues
 
+
+20261010 P1–P5 corrective follow-up: Python 3.8-compatible complete-snapshot
+reading, coincident residual/zero-vector repair, constrained verified-v23
+configuration migration, endpoint PM guards, mandatory Ewald recovery profiles,
+and test comparison/assertion/CTest repairs are implemented in source. All
+compilation, tests, MPI, convergence and performance remain **NOT RUN — deferred
+by user**. Legacy opaque-hash migration fails closed; historical external P0
+tools remain absent; lookup and hierarchical modes remain opt-in/provisional.
+See the [defect dispositions, exact manifest and commands](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md).
+
 ## Unified TreePM recovery qualification pending — 20261010
 
 The [source handoff](repair/treepm_unified_performance_recovery_20261010.md)

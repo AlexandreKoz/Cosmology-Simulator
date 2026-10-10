@@ -1,4 +1,5 @@
-#include <cassert>
+#include "../support/test_require.hpp"
+#include <limits>
 #include <cstdint>
 #include <filesystem>
 #include <utility>
@@ -116,15 +117,28 @@ void testRestartEquivalenceHarness() {
 
   const cosmosim::tests::RestartEquivalenceResult result =
       cosmosim::tests::runRestartEquivalenceScenario(std::move(scenario));
-  assert(result.direct_integrator_state.step_index == 10);
-  assert(result.restarted_integrator_state.step_index == 10);
-  assert(result.direct_scheduler_state.current_tick == result.restarted_scheduler_state.current_tick);
+  CHUI_REQUIRE(result.direct_integrator_state.step_index == 10);
+  CHUI_REQUIRE(result.restarted_integrator_state.step_index == 10);
+  CHUI_REQUIRE(result.direct_scheduler_state.current_tick == result.restarted_scheduler_state.current_tick);
 #endif
+}
+
+void testNumericalComparatorRejectsNonfiniteValues() {
+  for (const double value : {std::numeric_limits<double>::quiet_NaN(),
+                             std::numeric_limits<double>::infinity()}) {
+    bool rejected = false;
+    try { cosmosim::tests::requireNear(value, value, 1e-14, "nonfinite fixture"); }
+    catch (const std::runtime_error& error) {
+      rejected = std::string(error.what()).find("restart equivalence mismatch: nonfinite fixture") != std::string::npos;
+    }
+    CHUI_REQUIRE(rejected);
+  }
 }
 
 }  // namespace
 
 int main() {
+  testNumericalComparatorRejectsNonfiniteValues();
   testRestartEquivalenceHarness();
   return 0;
 }

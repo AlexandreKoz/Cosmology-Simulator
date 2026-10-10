@@ -1,4 +1,4 @@
-#include <cassert>
+#include "../support/test_require.hpp"
 #include <cmath>
 #include <string>
 #include <type_traits>
@@ -57,18 +57,18 @@ restart_stem = restart
 )";
 
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(config_text, "unit_case");
-  assert(frozen.raw_text == config_text);
-  assert(frozen.user_config.source_name == "unit_case");
-  assert(!frozen.user_config.entries.empty());
-  assert(frozen.config.cosmology.box_size_mpc_comoving == 50.0);
-  assert(frozen.config.numerics.gravity_softening_kpc_comoving == 2.5);
-  assert(frozen.config.mode.zoom_high_res_region);
-  assert(frozen.config.mode.zoom_region_file == "region_zoom.hdf5");
+  CHUI_REQUIRE(frozen.raw_text == config_text);
+  CHUI_REQUIRE(frozen.user_config.source_name == "unit_case");
+  CHUI_REQUIRE(!frozen.user_config.entries.empty());
+  CHUI_REQUIRE(frozen.config.cosmology.box_size_mpc_comoving == 50.0);
+  CHUI_REQUIRE(frozen.config.numerics.gravity_softening_kpc_comoving == 2.5);
+  CHUI_REQUIRE(frozen.config.mode.zoom_high_res_region);
+  CHUI_REQUIRE(frozen.config.mode.zoom_region_file == "region_zoom.hdf5");
 
   std::string malformed = config_text;
   const std::string valid_value = "gravity_softening = 2.5 kpc";
   const auto offset = malformed.find(valid_value);
-  assert(offset != std::string::npos);
+  CHUI_REQUIRE(offset != std::string::npos);
   malformed.replace(offset, valid_value.size(), valid_value + " trailing_garbage");
   bool trailing_threw = false;
   try {
@@ -76,7 +76,7 @@ restart_stem = restart
   } catch (const cosmosim::core::ConfigError&) {
     trailing_threw = true;
   }
-  assert(trailing_threw);
+  CHUI_REQUIRE(trailing_threw);
 }
 
 void testDuplicateKeyFails() {
@@ -87,7 +87,7 @@ void testDuplicateKeyFails() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testRequiredSectionAndFieldFailures() {
@@ -97,7 +97,7 @@ void testRequiredSectionAndFieldFailures() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   threw = false;
   try {
@@ -107,7 +107,7 @@ void testRequiredSectionAndFieldFailures() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testMissingValueFails() {
@@ -118,7 +118,7 @@ void testMissingValueFails() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testUnknownKeysFailUnlessCompatibilityEnabled() {
@@ -129,12 +129,12 @@ void testUnknownKeysFailUnlessCompatibilityEnabled() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   const std::string compat_text =
       "mode.mode = zoom_in\ncompatibility.allow_unknown_keys = true\nfoo.bar = 1\n";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(compat_text, "compat_unknown");
-  assert(frozen.config.compatibility.allow_unknown_keys);
+  CHUI_REQUIRE(frozen.config.compatibility.allow_unknown_keys);
 }
 
 void testAliasConflictFails() {
@@ -146,7 +146,7 @@ void testAliasConflictFails() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testInvalidEnumFails() {
@@ -157,7 +157,7 @@ void testInvalidEnumFails() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 
@@ -190,32 +190,32 @@ void testTypedInitialConditionConfiguration() {
       "ic_star_metallicity_policy = reject\n"
       "ic_bh_mdot_policy = dialect_defined_default\n",
       "typed_ic_bridge");
-  assert(
+  CHUI_REQUIRE(
       bridge.config.mode.ic_convention ==
       cosmosim::core::InitialConditionConvention::kGadgetArepoBridgeV1);
-  assert(bridge.config.mode.ic_chunk_particle_count == 4096U);
-  assert(bridge.config.mode.ic_staging_particle_count == 2048U);
-  assert(
+  CHUI_REQUIRE(bridge.config.mode.ic_chunk_particle_count == 4096U);
+  CHUI_REQUIRE(bridge.config.mode.ic_staging_particle_count == 2048U);
+  CHUI_REQUIRE(
       bridge.config.mode.ic_part_type2_policy ==
       cosmosim::core::InitialConditionSpeciesPolicy::kDarkMatter);
-  assert(
+  CHUI_REQUIRE(
       bridge.config.mode.ic_gas_density_policy ==
       cosmosim::core::InitialConditionMissingFieldPolicy::kUseConfigValue);
-  assert(bridge.config.mode.ic_gas_density_value_code == 3.25);
-  assert(
+  CHUI_REQUIRE(bridge.config.mode.ic_gas_density_value_code == 3.25);
+  CHUI_REQUIRE(
       bridge.config.mode.ic_bh_mdot_policy ==
       cosmosim::core::InitialConditionMissingFieldPolicy::kDialectDefinedDefault);
-  assert(
+  CHUI_REQUIRE(
       bridge.normalized_text.find(
           "ic_convention = gadget_arepo_bridge_v1") != std::string::npos);
-  assert(
+  CHUI_REQUIRE(
       bridge.normalized_text.find("ic_chunk_particle_count = 4096") !=
       std::string::npos);
-  assert(bridge.normalized_text.find(
+  CHUI_REQUIRE(bridge.normalized_text.find(
              "ic_bridge_coordinate_frame = comoving") != std::string::npos);
-  assert(bridge.config.mode.ic_bridge_velocity_convention ==
+  CHUI_REQUIRE(bridge.config.mode.ic_bridge_velocity_convention ==
          cosmosim::core::InitialConditionVelocityConvention::kGadgetArepoStoredPeculiar);
-  assert(bridge.normalized_text.find(
+  CHUI_REQUIRE(bridge.normalized_text.find(
              "ic_bridge_velocity_convention = gadget_arepo_stored_peculiar") !=
          std::string::npos);
 
@@ -228,7 +228,7 @@ void testTypedInitialConditionConfiguration() {
   } catch (const cosmosim::core::ConfigError&) {
     incomplete_bridge_rejected = true;
   }
-  assert(incomplete_bridge_rejected);
+  CHUI_REQUIRE(incomplete_bridge_rejected);
 
   bool rejected = false;
   try {
@@ -238,7 +238,7 @@ void testTypedInitialConditionConfiguration() {
   } catch (const cosmosim::core::ConfigError&) {
     rejected = true;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
 
   rejected = false;
   try {
@@ -249,7 +249,7 @@ void testTypedInitialConditionConfiguration() {
   } catch (const cosmosim::core::ConfigError&) {
     rejected = true;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
 
   rejected = false;
   try {
@@ -260,18 +260,18 @@ void testTypedInitialConditionConfiguration() {
   } catch (const cosmosim::core::ConfigError&) {
     rejected = true;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
 
   const auto manifest = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n"
       "ic_convention = manifest_v1\n"
       "ic_manifest_file = input.audit.json\n",
       "manifest_ic");
-  assert(
+  CHUI_REQUIRE(
       manifest.config.mode.ic_convention ==
       cosmosim::core::InitialConditionConvention::kManifestV1);
-  assert(manifest.config.mode.ic_manifest_file == "input.audit.json");
-  assert(
+  CHUI_REQUIRE(manifest.config.mode.ic_manifest_file == "input.audit.json");
+  CHUI_REQUIRE(
       manifest.normalized_text.find("ic_file = generated") !=
       std::string::npos);
 
@@ -296,7 +296,7 @@ void testTypedInitialConditionConfiguration() {
   } catch (const cosmosim::core::ConfigError&) {
     unsupported_reconstruct_rejected = true;
   }
-  assert(unsupported_reconstruct_rejected);
+  CHUI_REQUIRE(unsupported_reconstruct_rejected);
 }
 
 void testInvalidTypedPolicyEnumsFail() {
@@ -307,7 +307,7 @@ void testInvalidTypedPolicyEnumsFail() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   const std::string bad_frame = "[mode]\nmode = zoom_in\n[units]\ncoordinate_frame = weird\n";
   threw = false;
@@ -316,7 +316,7 @@ void testInvalidTypedPolicyEnumsFail() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testBoundaryModeValidation() {
@@ -327,16 +327,16 @@ void testBoundaryModeValidation() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   const std::string isolated_ok =
       "[mode]\nmode = isolated_cluster\nhydro_boundary = reflective\ngravity_boundary = isolated_monopole\n"
       "[numerics]\ntreepm_enable_window_deconvolution = false\n";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(isolated_ok, "isolated_ok");
-  assert(frozen.config.mode.hydro_boundary == cosmosim::core::ModeHydroBoundary::kReflective);
-  assert(frozen.config.mode.gravity_boundary == cosmosim::core::ModeGravityBoundary::kIsolatedMonopole);
-  assert(!frozen.config.numerics.treepm_enable_window_deconvolution);
-  assert(frozen.normalized_text.find("treepm_enable_window_deconvolution = false") !=
+  CHUI_REQUIRE(frozen.config.mode.hydro_boundary == cosmosim::core::ModeHydroBoundary::kReflective);
+  CHUI_REQUIRE(frozen.config.mode.gravity_boundary == cosmosim::core::ModeGravityBoundary::kIsolatedMonopole);
+  CHUI_REQUIRE(!frozen.config.numerics.treepm_enable_window_deconvolution);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_enable_window_deconvolution = false") !=
       std::string::npos);
 
   const std::string isolated_incompatible_default =
@@ -350,7 +350,7 @@ void testBoundaryModeValidation() {
                 "treepm_enable_window_deconvolution must be false") !=
         std::string::npos;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testDefaultsCanonicalizationAndDeterminism() {
@@ -364,35 +364,35 @@ void testDefaultsCanonicalizationAndDeterminism() {
   const auto frozen_first = cosmosim::core::loadFrozenConfigFromString(first, "first");
   const auto frozen_second = cosmosim::core::loadFrozenConfigFromString(second, "second");
 
-  assert(frozen_first.config.physics.enable_cooling);
-  assert(frozen_first.config.physics.fb_mode == cosmosim::core::FeedbackMode::kThermalKineticMomentum);
-  assert(frozen_first.config.parallel.deterministic_reduction);
-  assert(
+  CHUI_REQUIRE(frozen_first.config.physics.enable_cooling);
+  CHUI_REQUIRE(frozen_first.config.physics.fb_mode == cosmosim::core::FeedbackMode::kThermalKineticMomentum);
+  CHUI_REQUIRE(frozen_first.config.parallel.deterministic_reduction);
+  CHUI_REQUIRE(
       frozen_first.config.numerics.treepm_tree_opening_criterion ==
       cosmosim::core::TreePmOpeningCriterion::kComDistance);
-  assert(frozen_first.config.numerics.treepm_tree_opening_theta == 0.7);
-  assert(frozen_first.config.numerics.treepm_tree_relative_force_tolerance == 0.005);
-  assert(
+  CHUI_REQUIRE(frozen_first.config.numerics.treepm_tree_opening_theta == 0.7);
+  CHUI_REQUIRE(frozen_first.config.numerics.treepm_tree_relative_force_tolerance == 0.005);
+  CHUI_REQUIRE(
       frozen_first.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-30);
-  assert(
+  CHUI_REQUIRE(
       frozen_first.config.numerics.treepm_assignment_scheme ==
       cosmosim::core::TreePmAssignmentScheme::kTsc);
-  assert(frozen_first.config.numerics.treepm_enable_window_deconvolution);
-  assert(frozen_first.normalized_text.find("treepm_tree_opening_criterion = com_distance") !=
+  CHUI_REQUIRE(frozen_first.config.numerics.treepm_enable_window_deconvolution);
+  CHUI_REQUIRE(frozen_first.normalized_text.find("treepm_tree_opening_criterion = com_distance") !=
       std::string::npos);
-  assert(!frozen_first.config.parallel.decomposition_debug_exact_ownership_audit);
-  assert(frozen_first.normalized_text.find("decomposition_debug_exact_ownership_audit = false") != std::string::npos);
-  assert(frozen_first.config.parallel.isolated_pm_root_workspace_limit_bytes == 268435456ULL);
-  assert(frozen_first.config.parallel.zoom_high_res_allgather_limit_bytes == 268435456ULL);
-  assert(frozen_first.normalized_text.find("isolated_pm_root_workspace_limit_bytes = 268435456") != std::string::npos);
-  assert(frozen_first.normalized_text.find("zoom_high_res_allgather_limit_bytes = 268435456") != std::string::npos);
-  assert(frozen_first.normalized_text == frozen_second.normalized_text);
-  assert(frozen_first.provenance.config_hash_hex == frozen_second.provenance.config_hash_hex);
-  assert(frozen_first.provenance.config_hash_hex == cosmosim::core::stableConfigHashHex(frozen_first.normalized_text));
+  CHUI_REQUIRE(!frozen_first.config.parallel.decomposition_debug_exact_ownership_audit);
+  CHUI_REQUIRE(frozen_first.normalized_text.find("decomposition_debug_exact_ownership_audit = false") != std::string::npos);
+  CHUI_REQUIRE(frozen_first.config.parallel.isolated_pm_root_workspace_limit_bytes == 268435456ULL);
+  CHUI_REQUIRE(frozen_first.config.parallel.zoom_high_res_allgather_limit_bytes == 268435456ULL);
+  CHUI_REQUIRE(frozen_first.normalized_text.find("isolated_pm_root_workspace_limit_bytes = 268435456") != std::string::npos);
+  CHUI_REQUIRE(frozen_first.normalized_text.find("zoom_high_res_allgather_limit_bytes = 268435456") != std::string::npos);
+  CHUI_REQUIRE(frozen_first.normalized_text == frozen_second.normalized_text);
+  CHUI_REQUIRE(frozen_first.provenance.config_hash_hex == frozen_second.provenance.config_hash_hex);
+  CHUI_REQUIRE(frozen_first.provenance.config_hash_hex == cosmosim::core::stableConfigHashHex(frozen_first.normalized_text));
   const auto reparsed =
       cosmosim::core::loadFrozenConfigFromString(frozen_first.normalized_text, "normalized_roundtrip");
-  assert(reparsed.normalized_text == frozen_first.normalized_text);
-  assert(reparsed.provenance.config_hash_hex == frozen_first.provenance.config_hash_hex);
+  CHUI_REQUIRE(reparsed.normalized_text == frozen_first.normalized_text);
+  CHUI_REQUIRE(reparsed.provenance.config_hash_hex == frozen_first.provenance.config_hash_hex);
 }
 
 void testNormalizedConfigRoundTripPreservesDifficultDoubles() {
@@ -439,33 +439,33 @@ treepm_tree_relative_force_tolerance = 0.0043210987654321
   const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
       frozen.normalized_text, "normalized_difficult_doubles_roundtrip");
 
-  assert(reparsed.normalized_text == frozen.normalized_text);
-  assert(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
-  assert(reparsed.config.mode.ic_bridge_source_length_unit_to_si ==
+  CHUI_REQUIRE(reparsed.normalized_text == frozen.normalized_text);
+  CHUI_REQUIRE(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+  CHUI_REQUIRE(reparsed.config.mode.ic_bridge_source_length_unit_to_si ==
          frozen.config.mode.ic_bridge_source_length_unit_to_si);
-  assert(reparsed.config.mode.ic_bridge_source_mass_unit_to_si ==
+  CHUI_REQUIRE(reparsed.config.mode.ic_bridge_source_mass_unit_to_si ==
          frozen.config.mode.ic_bridge_source_mass_unit_to_si);
-  assert(reparsed.config.cosmology.omega_matter ==
+  CHUI_REQUIRE(reparsed.config.cosmology.omega_matter ==
          frozen.config.cosmology.omega_matter);
-  assert(reparsed.config.cosmology.omega_lambda ==
+  CHUI_REQUIRE(reparsed.config.cosmology.omega_lambda ==
          frozen.config.cosmology.omega_lambda);
-  assert(reparsed.config.cosmology.hubble_param ==
+  CHUI_REQUIRE(reparsed.config.cosmology.hubble_param ==
          frozen.config.cosmology.hubble_param);
-  assert(reparsed.config.cosmology.box_size_x_mpc_comoving ==
+  CHUI_REQUIRE(reparsed.config.cosmology.box_size_x_mpc_comoving ==
          frozen.config.cosmology.box_size_x_mpc_comoving);
-  assert(reparsed.config.cosmology.box_size_y_mpc_comoving ==
+  CHUI_REQUIRE(reparsed.config.cosmology.box_size_y_mpc_comoving ==
          frozen.config.cosmology.box_size_y_mpc_comoving);
-  assert(reparsed.config.cosmology.box_size_z_mpc_comoving ==
+  CHUI_REQUIRE(reparsed.config.cosmology.box_size_z_mpc_comoving ==
          frozen.config.cosmology.box_size_z_mpc_comoving);
-  assert(reparsed.config.numerics.a_begin == frozen.config.numerics.a_begin);
-  assert(reparsed.config.numerics.a_end == frozen.config.numerics.a_end);
-  assert(reparsed.config.numerics.cosmology_max_delta_ln_a ==
+  CHUI_REQUIRE(reparsed.config.numerics.a_begin == frozen.config.numerics.a_begin);
+  CHUI_REQUIRE(reparsed.config.numerics.a_end == frozen.config.numerics.a_end);
+  CHUI_REQUIRE(reparsed.config.numerics.cosmology_max_delta_ln_a ==
          frozen.config.numerics.cosmology_max_delta_ln_a);
-  assert(reparsed.config.numerics.gravity_softening_kpc_comoving ==
+  CHUI_REQUIRE(reparsed.config.numerics.gravity_softening_kpc_comoving ==
          frozen.config.numerics.gravity_softening_kpc_comoving);
-  assert(reparsed.config.numerics.treepm_tree_opening_theta ==
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_tree_opening_theta ==
          frozen.config.numerics.treepm_tree_opening_theta);
-  assert(reparsed.config.numerics.treepm_tree_relative_force_tolerance ==
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_tree_relative_force_tolerance ==
          frozen.config.numerics.treepm_tree_relative_force_tolerance);
 }
 
@@ -486,18 +486,18 @@ process_output_restart_overlap_bytes = 52428800
 process_memory_safety_margin_fraction = 0.25
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "debug_exact_decomposition_audit");
-  assert(frozen.config.parallel.decomposition_debug_exact_ownership_audit);
-  assert(frozen.config.parallel.isolated_pm_root_workspace_limit_bytes == 1048576ULL);
-  assert(frozen.config.parallel.zoom_high_res_allgather_limit_bytes == 2097152ULL);
-  assert(frozen.config.parallel.process_memory_budget_bytes == 34359738368ULL);
-  assert(frozen.config.parallel.process_mpi_unknown_reserve_bytes == 10485760ULL);
-  assert(frozen.config.parallel.process_fftw_unknown_reserve_bytes == 20971520ULL);
-  assert(frozen.config.parallel.process_hdf5_unknown_reserve_bytes == 31457280ULL);
-  assert(frozen.config.parallel.process_allocator_unknown_reserve_bytes == 41943040ULL);
-  assert(frozen.config.parallel.process_output_restart_overlap_bytes == 52428800ULL);
-  assert(std::abs(frozen.config.parallel.process_memory_safety_margin_fraction - 0.25) < 1.0e-15);
-  assert(frozen.normalized_text.find("process_memory_budget_bytes = 34359738368") != std::string::npos);
-  assert(frozen.normalized_text.find("decomposition_debug_exact_ownership_audit = true") != std::string::npos);
+  CHUI_REQUIRE(frozen.config.parallel.decomposition_debug_exact_ownership_audit);
+  CHUI_REQUIRE(frozen.config.parallel.isolated_pm_root_workspace_limit_bytes == 1048576ULL);
+  CHUI_REQUIRE(frozen.config.parallel.zoom_high_res_allgather_limit_bytes == 2097152ULL);
+  CHUI_REQUIRE(frozen.config.parallel.process_memory_budget_bytes == 34359738368ULL);
+  CHUI_REQUIRE(frozen.config.parallel.process_mpi_unknown_reserve_bytes == 10485760ULL);
+  CHUI_REQUIRE(frozen.config.parallel.process_fftw_unknown_reserve_bytes == 20971520ULL);
+  CHUI_REQUIRE(frozen.config.parallel.process_hdf5_unknown_reserve_bytes == 31457280ULL);
+  CHUI_REQUIRE(frozen.config.parallel.process_allocator_unknown_reserve_bytes == 41943040ULL);
+  CHUI_REQUIRE(frozen.config.parallel.process_output_restart_overlap_bytes == 52428800ULL);
+  CHUI_REQUIRE(std::abs(frozen.config.parallel.process_memory_safety_margin_fraction - 0.25) < 1.0e-15);
+  CHUI_REQUIRE(frozen.normalized_text.find("process_memory_budget_bytes = 34359738368") != std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("decomposition_debug_exact_ownership_audit = true") != std::string::npos);
 }
 
 void testConfigNormalizationHashDeterminism() {
@@ -507,9 +507,9 @@ void testConfigNormalizationHashDeterminism() {
       "[output]\nrun_name = hash_a\n[mode]\nmode = zoom_in\n";
   const auto frozen_first = cosmosim::core::loadFrozenConfigFromString(first, "hash_first");
   const auto frozen_second = cosmosim::core::loadFrozenConfigFromString(second, "hash_second");
-  assert(frozen_first.normalized_text == frozen_second.normalized_text);
-  assert(frozen_first.provenance.config_hash_hex == frozen_second.provenance.config_hash_hex);
-  assert(frozen_first.provenance.config_hash_hex == cosmosim::core::stableConfigHashHex(frozen_first.normalized_text));
+  CHUI_REQUIRE(frozen_first.normalized_text == frozen_second.normalized_text);
+  CHUI_REQUIRE(frozen_first.provenance.config_hash_hex == frozen_second.provenance.config_hash_hex);
+  CHUI_REQUIRE(frozen_first.provenance.config_hash_hex == cosmosim::core::stableConfigHashHex(frozen_first.normalized_text));
 }
 
 void testConfigRuntimeOwnership() {
@@ -526,16 +526,16 @@ treepm_rcut_cells = 4.5
 run_name = ownership
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "runtime_ownership");
-  assert(frozen.config.numerics.treepm_pm_grid_nx == 32);
-  assert(frozen.config.numerics.treepm_pm_grid_ny == 32);
-  assert(frozen.config.numerics.treepm_pm_grid_nz == 32);
-  assert(frozen.normalized_text.find("treepm_pm_grid =") == std::string::npos);
-  assert(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_pm_grid_nx == 32);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_pm_grid_ny == 32);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_pm_grid_nz == 32);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_pm_grid =") == std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
   const auto reparsed = cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "runtime_ownership_reparse");
-  assert(reparsed.config.numerics.treepm_pm_grid_nx == frozen.config.numerics.treepm_pm_grid_nx);
-  assert(reparsed.config.numerics.treepm_asmth_cells == frozen.config.numerics.treepm_asmth_cells);
-  assert(reparsed.config.numerics.treepm_rcut_cells == frozen.config.numerics.treepm_rcut_cells);
-  assert(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_pm_grid_nx == frozen.config.numerics.treepm_pm_grid_nx);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_asmth_cells == frozen.config.numerics.treepm_asmth_cells);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_rcut_cells == frozen.config.numerics.treepm_rcut_cells);
+  CHUI_REQUIRE(reparsed.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
 }
 
 void testDerivedRuntimeConfigOwnership() {
@@ -559,21 +559,21 @@ treepm_rcut_cells = 5.5
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "derived_runtime");
   const auto derived = cosmosim::core::deriveRuntimeConfig(frozen);
-  assert(derived.t_code_begin == 0.125);
-  assert(derived.t_code_end == 0.875);
-  assert(derived.box_size_mpc_comoving[0] == 70.0);
-  assert(derived.box_size_mpc_comoving[1] == 50.0);
-  assert(derived.box_size_mpc_comoving[2] == 30.0);
-  assert(derived.treepm_pm_grid_shape[0] == 28);
-  assert(derived.treepm_pm_grid_shape[1] == 20);
-  assert(derived.treepm_pm_grid_shape[2] == 12);
-  assert(derived.gravity_softening_kpc_comoving_by_species[0] == 1.0);
-  assert(derived.gravity_softening_kpc_comoving_by_species[1] == 0.5);
-  assert(derived.gravity_softening_kpc_comoving_by_species[2] == 1.0);
-  assert(derived.gravity_softening_kpc_comoving_by_species[3] == 0.05);
-  assert(derived.gravity_softening_kpc_comoving_by_species[4] == 1.0);
-  assert(derived.normalized_config_hash == frozen.provenance.config_hash);
-  assert(derived.normalized_config_hash_hex == frozen.provenance.config_hash_hex);
+  CHUI_REQUIRE(derived.t_code_begin == 0.125);
+  CHUI_REQUIRE(derived.t_code_end == 0.875);
+  CHUI_REQUIRE(derived.box_size_mpc_comoving[0] == 70.0);
+  CHUI_REQUIRE(derived.box_size_mpc_comoving[1] == 50.0);
+  CHUI_REQUIRE(derived.box_size_mpc_comoving[2] == 30.0);
+  CHUI_REQUIRE(derived.treepm_pm_grid_shape[0] == 28);
+  CHUI_REQUIRE(derived.treepm_pm_grid_shape[1] == 20);
+  CHUI_REQUIRE(derived.treepm_pm_grid_shape[2] == 12);
+  CHUI_REQUIRE(derived.gravity_softening_kpc_comoving_by_species[0] == 1.0);
+  CHUI_REQUIRE(derived.gravity_softening_kpc_comoving_by_species[1] == 0.5);
+  CHUI_REQUIRE(derived.gravity_softening_kpc_comoving_by_species[2] == 1.0);
+  CHUI_REQUIRE(derived.gravity_softening_kpc_comoving_by_species[3] == 0.05);
+  CHUI_REQUIRE(derived.gravity_softening_kpc_comoving_by_species[4] == 1.0);
+  CHUI_REQUIRE(derived.normalized_config_hash == frozen.provenance.config_hash);
+  CHUI_REQUIRE(derived.normalized_config_hash_hex == frozen.provenance.config_hash_hex);
 
   const std::string bad_time = "[mode]\nmode = zoom_in\n[numerics]\nt_code_begin = 1.0\nt_code_end = 0.5\n";
   bool threw = false;
@@ -583,7 +583,7 @@ treepm_rcut_cells = 5.5
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testUrlsWindowsPathsAndQuotedHashesAreNotTruncated() {
@@ -596,8 +596,8 @@ stellar_evolution_table_path = "C://stellar_tables//ssp#grid.h5" # local overrid
 )";
 
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(config_text, "path_preservation");
-  assert(frozen.config.physics.metal_line_table_path == "https://example.com/tables/metal_line_rates.h5");
-  assert(frozen.config.physics.stellar_evolution_table_path == "\"C://stellar_tables//ssp#grid.h5\"");
+  CHUI_REQUIRE(frozen.config.physics.metal_line_table_path == "https://example.com/tables/metal_line_rates.h5");
+  CHUI_REQUIRE(frozen.config.physics.stellar_evolution_table_path == "\"C://stellar_tables//ssp#grid.h5\"");
 }
 
 void testDeprecatedAliasesAndCanonicalCollision() {
@@ -605,9 +605,9 @@ void testDeprecatedAliasesAndCanonicalCollision() {
       "mode = isolated_galaxy\n"
       "numerics.treepm_enable_window_deconvolution = false\n";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(alias_only, "alias_only");
-  assert(frozen.config.mode.mode == cosmosim::core::SimulationMode::kIsolatedGalaxy);
-  assert(!frozen.provenance.deprecation_warnings.empty());
-  assert(!frozen.user_config.alias_resolution_notes.empty());
+  CHUI_REQUIRE(frozen.config.mode.mode == cosmosim::core::SimulationMode::kIsolatedGalaxy);
+  CHUI_REQUIRE(!frozen.provenance.deprecation_warnings.empty());
+  CHUI_REQUIRE(!frozen.user_config.alias_resolution_notes.empty());
 
   const std::string conflicting = "mode = zoom_in\nmode.mode = cosmo_cube\n";
   bool threw = false;
@@ -616,7 +616,7 @@ void testDeprecatedAliasesAndCanonicalCollision() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testFeedbackConfigKeysAndValidation() {
@@ -630,9 +630,9 @@ fb_stochastic_event_probability = 1.0
 fb_neighbor_count = 4
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "feedback_good");
-  assert(frozen.config.physics.fb_mode == cosmosim::core::FeedbackMode::kMomentum);
-  assert(frozen.config.physics.fb_variant == cosmosim::core::FeedbackVariant::kStochastic);
-  assert(frozen.config.physics.fb_neighbor_count == 4);
+  CHUI_REQUIRE(frozen.config.physics.fb_mode == cosmosim::core::FeedbackMode::kMomentum);
+  CHUI_REQUIRE(frozen.config.physics.fb_variant == cosmosim::core::FeedbackVariant::kStochastic);
+  CHUI_REQUIRE(frozen.config.physics.fb_neighbor_count == 4);
 
   const std::string bad_text = R"(
 [mode]
@@ -646,7 +646,7 @@ fb_mode = hidden_magic
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testMetalDiffusionConfigurationContract() {
@@ -669,17 +669,17 @@ metal_diffusion_coefficient_ceiling_code = 100.0
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       good_text, "metal_diffusion_good");
-  assert(frozen.config.physics.metal_species_mode ==
+  CHUI_REQUIRE(frozen.config.physics.metal_species_mode ==
          cosmosim::core::MetalSpeciesMode::kTotalOnly);
-  assert(frozen.config.physics.metal_diffusion_model ==
+  CHUI_REQUIRE(frozen.config.physics.metal_diffusion_model ==
          cosmosim::core::MetalDiffusionModel::kSmagorinsky);
-  assert(frozen.config.physics.metal_diffusion_time_integrator ==
+  CHUI_REQUIRE(frozen.config.physics.metal_diffusion_time_integrator ==
          cosmosim::core::MetalDiffusionTimeIntegrator::kRkl2);
-  assert(frozen.normalized_text.find("metal_diffusion_coefficient = 0.075") !=
+  CHUI_REQUIRE(frozen.normalized_text.find("metal_diffusion_coefficient = 0.075") !=
          std::string::npos);
   const auto roundtrip = cosmosim::core::loadFrozenConfigFromString(
       frozen.normalized_text, "metal_diffusion_roundtrip");
-  assert(roundtrip.provenance.config_hash == frozen.provenance.config_hash);
+  CHUI_REQUIRE(roundtrip.provenance.config_hash == frozen.provenance.config_hash);
 
   for (const char* invalid : {
            "[mode]\nmode = zoom_in\n[physics]\nenable_metal_diffusion = true\nmetal_diffusion_model = none\n",
@@ -691,7 +691,7 @@ metal_diffusion_coefficient_ceiling_code = 100.0
     } catch (const cosmosim::core::ConfigError&) {
       rejected = true;
     }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
   }
 }
 
@@ -706,9 +706,9 @@ cooling_model = primordial_metal_line
 metal_line_table_path = resources/cooling/metal_line.tbl
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "cooling_good");
-  assert(frozen.config.physics.uv_background_model == cosmosim::core::UvBackgroundModel::kFg20);
-  assert(frozen.config.physics.self_shielding_model == cosmosim::core::SelfShieldingModel::kRahmati13Like);
-  assert(frozen.config.physics.cooling_model == cosmosim::core::CoolingModel::kPrimordialMetalLine);
+  CHUI_REQUIRE(frozen.config.physics.uv_background_model == cosmosim::core::UvBackgroundModel::kFg20);
+  CHUI_REQUIRE(frozen.config.physics.self_shielding_model == cosmosim::core::SelfShieldingModel::kRahmati13Like);
+  CHUI_REQUIRE(frozen.config.physics.cooling_model == cosmosim::core::CoolingModel::kPrimordialMetalLine);
 
   const std::string bad_text = R"(
 [mode]
@@ -722,7 +722,7 @@ uv_background_model = cosmic_soup
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testDiagnosticsExecutionPolicyValidation() {
@@ -733,13 +733,13 @@ mode = zoom_in
 diagnostics_execution_policy = all_including_provisional
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "diag_policy_good");
-  assert(
+  CHUI_REQUIRE(
       frozen.config.analysis.diagnostics_execution_policy ==
       cosmosim::core::AnalysisConfig::DiagnosticsExecutionPolicy::kAllIncludingProvisional);
-  assert(
+  CHUI_REQUIRE(
       frozen.normalized_text.find("diagnostics_execution_policy = all_including_provisional") !=
       std::string::npos);
-  assert(frozen.normalized_text.find("diagnostics_execution_policy = unknown") == std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("diagnostics_execution_policy = unknown") == std::string::npos);
 
   const std::string bad_text = R"(
 [mode]
@@ -753,7 +753,7 @@ diagnostics_execution_policy = unsupported_policy
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testEnumSerializationIsFailFastWithoutUnknownFallback() {
@@ -763,7 +763,7 @@ void testEnumSerializationIsFailFastWithoutUnknownFallback() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testSpeciesSofteningOverridesRoundtrip() {
@@ -779,30 +779,30 @@ gravity_softening_black_hole = 0.05 kpc
 gravity_softening_tracer = 1.5 kpc
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(text, "species_softening");
-  assert(std::abs(frozen.config.numerics.gravity_softening_gas_kpc_comoving - 0.5) < 1.0e-12);
-  assert(std::abs(frozen.config.numerics.gravity_softening_dark_matter_kpc_comoving - 2.0) < 1.0e-12);
-  assert(std::abs(frozen.config.numerics.gravity_softening_star_kpc_comoving - 0.2) < 1.0e-12);
-  assert(std::abs(frozen.config.numerics.gravity_softening_black_hole_kpc_comoving - 0.05) < 1.0e-12);
-  assert(std::abs(frozen.config.numerics.gravity_softening_tracer_kpc_comoving - 1.5) < 1.0e-12);
-  assert(frozen.normalized_text.find("gravity_softening_gas = ") != std::string::npos);
+  CHUI_REQUIRE(std::abs(frozen.config.numerics.gravity_softening_gas_kpc_comoving - 0.5) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(frozen.config.numerics.gravity_softening_dark_matter_kpc_comoving - 2.0) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(frozen.config.numerics.gravity_softening_star_kpc_comoving - 0.2) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(frozen.config.numerics.gravity_softening_black_hole_kpc_comoving - 0.05) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(frozen.config.numerics.gravity_softening_tracer_kpc_comoving - 1.5) < 1.0e-12);
+  CHUI_REQUIRE(frozen.normalized_text.find("gravity_softening_gas = ") != std::string::npos);
   const auto reparsed = cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "species_softening_roundtrip");
-  assert(std::abs(reparsed.config.numerics.gravity_softening_black_hole_kpc_comoving - 0.05) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(reparsed.config.numerics.gravity_softening_black_hole_kpc_comoving - 0.05) < 1.0e-12);
 }
 
 void testHydroActiveBatchConfigurationRoundtrip() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\nhydro_active_batch_max_cells = 37\n",
       "hydro_active_batch_roundtrip");
-  assert(frozen.config.numerics.hydro_active_batch_max_cells == 37ULL);
-  assert(frozen.normalized_text.find("hydro_active_batch_max_cells = 37") !=
+  CHUI_REQUIRE(frozen.config.numerics.hydro_active_batch_max_cells == 37ULL);
+  CHUI_REQUIRE(frozen.normalized_text.find("hydro_active_batch_max_cells = 37") !=
          std::string::npos);
   const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
       frozen.normalized_text, "hydro_active_batch_roundtrip_reparse");
-  assert(reparsed.config.numerics.hydro_active_batch_max_cells == 37ULL);
+  CHUI_REQUIRE(reparsed.config.numerics.hydro_active_batch_max_cells == 37ULL);
 
   const auto automatic = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n", "hydro_active_batch_auto");
-  assert(automatic.config.numerics.hydro_active_batch_max_cells == 0ULL);
+  CHUI_REQUIRE(automatic.config.numerics.hydro_active_batch_max_cells == 0ULL);
 }
 
 void testTreePmNumericsRoundtripAndValidation() {
@@ -827,53 +827,53 @@ treepm_tree_exchange_batch_bytes = 8388608
 treepm_pm_exchange_batch_bytes = 12582912
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "treepm_good");
-  assert(frozen.config.numerics.treepm_pm_grid_nx == 32);
-  assert(frozen.config.numerics.treepm_pm_grid_ny == 32);
-  assert(frozen.config.numerics.treepm_pm_grid_nz == 32);
-  assert(frozen.config.numerics.treepm_asmth_cells == 1.5);
-  assert(frozen.config.numerics.treepm_rcut_cells == 5.0);
-  assert(
+  CHUI_REQUIRE(frozen.config.numerics.treepm_pm_grid_nx == 32);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_pm_grid_ny == 32);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_pm_grid_nz == 32);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_asmth_cells == 1.5);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_rcut_cells == 5.0);
+  CHUI_REQUIRE(
       frozen.config.numerics.treepm_tree_opening_criterion ==
       cosmosim::core::TreePmOpeningCriterion::kRelativeForceError);
-  assert(frozen.config.numerics.treepm_tree_opening_theta == 0.65);
-  assert(frozen.config.numerics.treepm_tree_relative_force_tolerance == 0.006);
-  assert(frozen.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-25);
-  assert(
+  CHUI_REQUIRE(frozen.config.numerics.treepm_tree_opening_theta == 0.65);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_tree_relative_force_tolerance == 0.006);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-25);
+  CHUI_REQUIRE(
       frozen.config.numerics.treepm_assignment_scheme ==
       cosmosim::core::TreePmAssignmentScheme::kCic);
-  assert(frozen.config.numerics.treepm_enable_window_deconvolution);
-  assert(frozen.config.numerics.treepm_update_cadence_steps == 1);
-  assert(
+  CHUI_REQUIRE(frozen.config.numerics.treepm_enable_window_deconvolution);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_update_cadence_steps == 1);
+  CHUI_REQUIRE(
       frozen.config.numerics.treepm_pm_decomposition_mode ==
       cosmosim::core::PmDecompositionMode::kSlab);
-  assert(frozen.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
-  assert(frozen.config.numerics.treepm_pm_exchange_batch_bytes == 12582912ULL);
-  assert(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
-  assert(frozen.normalized_text.find("treepm_tree_opening_criterion = relative_force_error") !=
+  CHUI_REQUIRE(frozen.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_pm_exchange_batch_bytes == 12582912ULL);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_pm_grid_nx = 32") != std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_tree_opening_criterion = relative_force_error") !=
       std::string::npos);
-  assert(frozen.normalized_text.find("treepm_tree_opening_theta = 0.65") != std::string::npos);
-  assert(frozen.normalized_text.find("treepm_assignment_scheme = cic") != std::string::npos);
-  assert(frozen.normalized_text.find("treepm_pm_decomposition_mode = slab") != std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_tree_opening_theta = 0.65") != std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_assignment_scheme = cic") != std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("treepm_pm_decomposition_mode = slab") != std::string::npos);
   const auto reparsed =
       cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text, "treepm_roundtrip");
-  assert(reparsed.config.numerics.treepm_pm_grid_nx == 32);
-  assert(
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_pm_grid_nx == 32);
+  CHUI_REQUIRE(
       reparsed.config.numerics.treepm_tree_opening_criterion ==
       cosmosim::core::TreePmOpeningCriterion::kRelativeForceError);
-  assert(reparsed.config.numerics.treepm_tree_opening_theta == 0.65);
-  assert(reparsed.config.numerics.treepm_tree_relative_force_tolerance == 0.006);
-  assert(reparsed.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-25);
-  assert(reparsed.config.numerics.treepm_update_cadence_steps == 1);
-  assert(reparsed.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
-  assert(reparsed.config.numerics.treepm_pm_exchange_batch_bytes == 12582912ULL);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_tree_opening_theta == 0.65);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_tree_relative_force_tolerance == 0.006);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_tree_relative_force_acceleration_floor == 1.0e-25);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_update_cadence_steps == 1);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_tree_exchange_batch_bytes == 8388608ULL);
+  CHUI_REQUIRE(reparsed.config.numerics.treepm_pm_exchange_batch_bytes == 12582912ULL);
 
   const auto parsed_geometric = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_opening_criterion = geometric\n",
       "treepm_geometric_opening");
-  assert(
+  CHUI_REQUIRE(
       parsed_geometric.config.numerics.treepm_tree_opening_criterion ==
       cosmosim::core::TreePmOpeningCriterion::kGeometric);
-  assert(parsed_geometric.normalized_text.find("treepm_tree_opening_criterion = geometric") !=
+  CHUI_REQUIRE(parsed_geometric.normalized_text.find("treepm_tree_opening_criterion = geometric") !=
       std::string::npos);
 
   const std::string bad_grid =
@@ -884,7 +884,7 @@ treepm_pm_exchange_batch_bytes = 12582912
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   const std::string bad_opening_criterion =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_opening_criterion = magic\n";
@@ -895,7 +895,7 @@ treepm_pm_exchange_batch_bytes = 12582912
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   for (const std::string invalid_opening_value : {
            "treepm_tree_opening_theta = 0\n",
@@ -910,7 +910,7 @@ treepm_pm_exchange_batch_bytes = 12582912
     } catch (const cosmosim::core::ConfigError&) {
       threw = true;
     }
-    assert(threw);
+    CHUI_REQUIRE(threw);
   }
 
   const std::string unsafe_pm_cadence =
@@ -924,9 +924,9 @@ treepm_pm_exchange_batch_bytes = 12582912
     threw = true;
     cadence_error = error.what();
   }
-  assert(threw);
-  assert(cadence_error.find("must be exactly 1 in production") != std::string::npos);
-  assert(cadence_error.find("source, scale-factor, or decomposition epochs") !=
+  CHUI_REQUIRE(threw);
+  CHUI_REQUIRE(cadence_error.find("must be exactly 1 in production") != std::string::npos);
+  CHUI_REQUIRE(cadence_error.find("source, scale-factor, or decomposition epochs") !=
       std::string::npos);
 
   const std::string bad_scheme =
@@ -937,13 +937,13 @@ treepm_pm_exchange_batch_bytes = 12582912
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   const std::string pencil_decomposition =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_decomposition_mode = pencil\n";
   const auto parsed_pencil = cosmosim::core::loadFrozenConfigFromString(
       pencil_decomposition, "treepm_pencil_decomp");
-  assert(parsed_pencil.config.numerics.treepm_pm_decomposition_mode ==
+  CHUI_REQUIRE(parsed_pencil.config.numerics.treepm_pm_decomposition_mode ==
       cosmosim::core::PmDecompositionMode::kPencil);
 
   const std::string bad_batch_bytes =
@@ -954,7 +954,7 @@ treepm_pm_exchange_batch_bytes = 12582912
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   const std::string bad_pm_batch_bytes =
       "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_exchange_batch_bytes = 0\n";
@@ -964,7 +964,7 @@ treepm_pm_exchange_batch_bytes = 12582912
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   const std::string ambiguous_periodic_cutoff = R"(
 [mode]
@@ -984,8 +984,8 @@ treepm_rcut_cells = 4
     threw = true;
     cutoff_error = error.what();
   }
-  assert(threw);
-  assert(cutoff_error.find("< half the shortest box axis") != std::string::npos);
+  CHUI_REQUIRE(threw);
+  CHUI_REQUIRE(cutoff_error.find("< half the shortest box axis") != std::string::npos);
 }
 
 void testAxisAwareBoxAndPmGridCanonicalizationCompatibility() {
@@ -998,15 +998,15 @@ box_size = 64 mpc
 treepm_pm_grid = 24
 )";
   const auto scalar_frozen = cosmosim::core::loadFrozenConfigFromString(scalar_text, "scalar_compat");
-  assert(scalar_frozen.config.cosmology.box_size_x_mpc_comoving == 64.0);
-  assert(scalar_frozen.config.cosmology.box_size_y_mpc_comoving == 64.0);
-  assert(scalar_frozen.config.cosmology.box_size_z_mpc_comoving == 64.0);
-  assert(scalar_frozen.config.numerics.treepm_pm_grid_nx == 24);
-  assert(scalar_frozen.config.numerics.treepm_pm_grid_ny == 24);
-  assert(scalar_frozen.config.numerics.treepm_pm_grid_nz == 24);
-  assert(scalar_frozen.normalized_text.find("box_size_x = 64 mpc") != std::string::npos);
-  assert(scalar_frozen.normalized_text.find("treepm_pm_grid_nx = 24") != std::string::npos);
-  assert(scalar_frozen.normalized_text.find("treepm_pm_grid =") == std::string::npos);
+  CHUI_REQUIRE(scalar_frozen.config.cosmology.box_size_x_mpc_comoving == 64.0);
+  CHUI_REQUIRE(scalar_frozen.config.cosmology.box_size_y_mpc_comoving == 64.0);
+  CHUI_REQUIRE(scalar_frozen.config.cosmology.box_size_z_mpc_comoving == 64.0);
+  CHUI_REQUIRE(scalar_frozen.config.numerics.treepm_pm_grid_nx == 24);
+  CHUI_REQUIRE(scalar_frozen.config.numerics.treepm_pm_grid_ny == 24);
+  CHUI_REQUIRE(scalar_frozen.config.numerics.treepm_pm_grid_nz == 24);
+  CHUI_REQUIRE(scalar_frozen.normalized_text.find("box_size_x = 64 mpc") != std::string::npos);
+  CHUI_REQUIRE(scalar_frozen.normalized_text.find("treepm_pm_grid_nx = 24") != std::string::npos);
+  CHUI_REQUIRE(scalar_frozen.normalized_text.find("treepm_pm_grid =") == std::string::npos);
 
   const std::string axis_text = R"(
 [mode]
@@ -1022,12 +1022,12 @@ treepm_pm_grid_nz = 12
 treepm_rcut_cells = 5.5
 )";
   const auto axis_frozen = cosmosim::core::loadFrozenConfigFromString(axis_text, "axis_canonical");
-  assert(axis_frozen.config.cosmology.box_size_x_mpc_comoving == 70.0);
-  assert(axis_frozen.config.cosmology.box_size_y_mpc_comoving == 50.0);
-  assert(axis_frozen.config.cosmology.box_size_z_mpc_comoving == 30.0);
-  assert(axis_frozen.config.numerics.treepm_pm_grid_nx == 28);
-  assert(axis_frozen.config.numerics.treepm_pm_grid_ny == 20);
-  assert(axis_frozen.config.numerics.treepm_pm_grid_nz == 12);
+  CHUI_REQUIRE(axis_frozen.config.cosmology.box_size_x_mpc_comoving == 70.0);
+  CHUI_REQUIRE(axis_frozen.config.cosmology.box_size_y_mpc_comoving == 50.0);
+  CHUI_REQUIRE(axis_frozen.config.cosmology.box_size_z_mpc_comoving == 30.0);
+  CHUI_REQUIRE(axis_frozen.config.numerics.treepm_pm_grid_nx == 28);
+  CHUI_REQUIRE(axis_frozen.config.numerics.treepm_pm_grid_ny == 20);
+  CHUI_REQUIRE(axis_frozen.config.numerics.treepm_pm_grid_nz == 12);
 
   bool anisotropic_rejected = false;
   try {
@@ -1050,7 +1050,7 @@ treepm_asmth_cells = 1.25
     anisotropic_rejected =
         std::string(error.what()).find("coarsest PM cell spacing") != std::string::npos;
   }
-  assert(anisotropic_rejected);
+  CHUI_REQUIRE(anisotropic_rejected);
 
   const auto certified_softening = cosmosim::core::loadFrozenConfigFromString(
       R"(
@@ -1064,7 +1064,7 @@ treepm_asmth_cells = 1.25
 gravity_softening = 400 kpc
 )",
       "treepm_certified_softening_envelope");
-  assert(certified_softening.config.numerics.gravity_softening_kpc_comoving == 400.0);
+  CHUI_REQUIRE(certified_softening.config.numerics.gravity_softening_kpc_comoving == 400.0);
 
   bool excessive_softening_rejected = false;
   try {
@@ -1084,7 +1084,7 @@ gravity_softening = 600 kpc
     excessive_softening_rejected =
         std::string(error.what()).find("epsilon/r_s <= 0.20") != std::string::npos;
   }
-  assert(excessive_softening_rejected);
+  CHUI_REQUIRE(excessive_softening_rejected);
 }
 
 void testBlackHoleAgnConfigKeysAndValidation() {
@@ -1104,10 +1104,10 @@ bh_feedback_coupling_efficiency = 0.8
 bh_duty_cycle_active_edd_ratio_threshold = 0.03
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "bh_good");
-  assert(frozen.config.physics.enable_black_hole_agn);
-  assert(frozen.config.physics.bh_seed_halo_mass_threshold_code == 500.0);
-  assert(frozen.config.physics.bh_seed_max_per_cell == 2);
-  assert(frozen.config.physics.bh_alpha_bondi == 3.0);
+  CHUI_REQUIRE(frozen.config.physics.enable_black_hole_agn);
+  CHUI_REQUIRE(frozen.config.physics.bh_seed_halo_mass_threshold_code == 500.0);
+  CHUI_REQUIRE(frozen.config.physics.bh_seed_max_per_cell == 2);
+  CHUI_REQUIRE(frozen.config.physics.bh_alpha_bondi == 3.0);
 
   const std::string bad_text =
       "[mode]\nmode = zoom_in\n[physics]\nbh_feedback_coupling_efficiency = 1.3\n";
@@ -1117,7 +1117,7 @@ bh_duty_cycle_active_edd_ratio_threshold = 0.03
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testTracerConfigKeysAndValidation() {
@@ -1130,9 +1130,9 @@ tracer_track_mass = true
 tracer_min_host_mass_code = 1.0e-6
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "tracer_good");
-  assert(frozen.config.physics.enable_tracers);
-  assert(frozen.config.physics.tracer_track_mass);
-  assert(frozen.config.physics.tracer_min_host_mass_code == 1.0e-6);
+  CHUI_REQUIRE(frozen.config.physics.enable_tracers);
+  CHUI_REQUIRE(frozen.config.physics.tracer_track_mass);
+  CHUI_REQUIRE(frozen.config.physics.tracer_min_host_mass_code == 1.0e-6);
 
   const std::string bad_text = "[mode]\nmode = zoom_in\n[physics]\ntracer_min_host_mass_code = -1.0\n";
   bool threw = false;
@@ -1141,7 +1141,7 @@ tracer_min_host_mass_code = 1.0e-6
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testZoomLongRangeStrategyValidationAndRoundtrip() {
@@ -1161,11 +1161,11 @@ zoom_focused_pm_grid_nz = 64
 zoom_contamination_radius = 3.0
 )";
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(good_text, "zoom_long_range_good");
-  assert(frozen.config.mode.zoom_long_range_strategy ==
+  CHUI_REQUIRE(frozen.config.mode.zoom_long_range_strategy ==
       cosmosim::core::ZoomLongRangeStrategy::kGlobalCoarsePlusFocusedHighResCorrection);
-  assert(frozen.config.mode.zoom_region_center_x_mpc_comoving == 12.5);
-  assert(frozen.config.mode.zoom_focused_pm_grid_nz == 64);
-  assert(frozen.normalized_text.find("zoom_long_range_strategy = global_coarse_plus_focused_highres_correction") !=
+  CHUI_REQUIRE(frozen.config.mode.zoom_region_center_x_mpc_comoving == 12.5);
+  CHUI_REQUIRE(frozen.config.mode.zoom_focused_pm_grid_nz == 64);
+  CHUI_REQUIRE(frozen.normalized_text.find("zoom_long_range_strategy = global_coarse_plus_focused_highres_correction") !=
       std::string::npos);
 
   const std::string bad_text = R"(
@@ -1185,7 +1185,7 @@ zoom_focused_pm_grid_nz = 16
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 
@@ -1193,15 +1193,15 @@ void testCosmologyScaleFactorRedshiftCanonicalizationAndValidation() {
   const auto z_only = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\nz_begin = 2.0\nz_end = 1.0\n",
       "z_only");
-  assert(std::abs(z_only.config.numerics.a_begin - (1.0 / 3.0)) < 1.0e-12);
-  assert(std::abs(z_only.config.numerics.a_end - 0.5) < 1.0e-12);
-  assert(z_only.normalized_text.find("a_begin = 0.333333") != std::string::npos);
+  CHUI_REQUIRE(std::abs(z_only.config.numerics.a_begin - (1.0 / 3.0)) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(z_only.config.numerics.a_end - 0.5) < 1.0e-12);
+  CHUI_REQUIRE(z_only.normalized_text.find("a_begin = 0.333333") != std::string::npos);
 
   const auto a_only = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.25\na_end = 0.5\n",
       "a_only");
-  assert(std::abs(a_only.config.numerics.z_begin - 3.0) < 1.0e-12);
-  assert(std::abs(a_only.config.numerics.z_end - 1.0) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(a_only.config.numerics.z_begin - 3.0) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(a_only.config.numerics.z_end - 1.0) < 1.0e-12);
 
   bool threw = false;
   try {
@@ -1211,7 +1211,7 @@ void testCosmologyScaleFactorRedshiftCanonicalizationAndValidation() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 
   threw = false;
   try {
@@ -1221,23 +1221,23 @@ void testCosmologyScaleFactorRedshiftCanonicalizationAndValidation() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testIntegratorTimeVariableIsTypedAndCanonical() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.5\na_end = 0.51\nintegrator_time_variable = ln_a\n",
       "typed_integrator");
-  assert(frozen.config.numerics.integrator_time_variable ==
+  CHUI_REQUIRE(frozen.config.numerics.integrator_time_variable ==
       cosmosim::core::IntegratorTimeVariable::kLogScaleFactor);
-  assert(frozen.normalized_text.find("integrator_time_variable = ln_a") != std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("integrator_time_variable = ln_a") != std::string::npos);
 
   const auto alias = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.5\na_end = 0.51\nintegrator_time_variable = a\n",
       "typed_integrator_alias");
-  assert(alias.config.numerics.integrator_time_variable ==
+  CHUI_REQUIRE(alias.config.numerics.integrator_time_variable ==
       cosmosim::core::IntegratorTimeVariable::kScaleFactor);
-  assert(alias.normalized_text.find("integrator_time_variable = scale_factor") != std::string::npos);
+  CHUI_REQUIRE(alias.normalized_text.find("integrator_time_variable = scale_factor") != std::string::npos);
 
   bool threw = false;
   try {
@@ -1247,7 +1247,7 @@ void testIntegratorTimeVariableIsTypedAndCanonical() {
   } catch (const cosmosim::core::ConfigError&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testIntegratorEndpointAuthorityResolution() {
@@ -1265,9 +1265,9 @@ void testIntegratorEndpointAuthorityResolution() {
       scale_factor.config.units.velocity_unit);
   const double expected_t_end = scale_factor.config.numerics.t_code_begin +
       background.cosmicTimeIntervalSi(0.04, 0.041) / units.timeSiPerCode();
-  assert(std::abs(scale_factor.config.numerics.t_code_end - expected_t_end) <=
+  CHUI_REQUIRE(std::abs(scale_factor.config.numerics.t_code_end - expected_t_end) <=
          1.0e-12 * std::max(1.0, std::abs(expected_t_end)));
-  assert(scale_factor.normalized_text.find("integrator_time_variable = scale_factor") !=
+  CHUI_REQUIRE(scale_factor.normalized_text.find("integrator_time_variable = scale_factor") !=
          std::string::npos);
 
   bool contradiction_rejected = false;
@@ -1279,14 +1279,14 @@ void testIntegratorEndpointAuthorityResolution() {
   } catch (const cosmosim::core::ConfigError&) {
     contradiction_rejected = true;
   }
-  assert(contradiction_rejected);
+  CHUI_REQUIRE(contradiction_rejected);
 
   const auto code_time = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.04\n"
       "t_code_begin = 0\nt_code_end = 0.001\nintegrator_time_variable = code_time\n",
       "code_time_authority");
-  assert(code_time.config.numerics.a_end > code_time.config.numerics.a_begin);
-  assert(std::abs(
+  CHUI_REQUIRE(code_time.config.numerics.a_end > code_time.config.numerics.a_begin);
+  CHUI_REQUIRE(std::abs(
       code_time.config.numerics.z_end -
       (1.0 / code_time.config.numerics.a_end - 1.0)) < 1.0e-12);
 
@@ -1298,7 +1298,7 @@ void testIntegratorEndpointAuthorityResolution() {
   } catch (const cosmosim::core::ConfigError&) {
     physical_time_rejected = true;
   }
-  assert(physical_time_rejected);
+  CHUI_REQUIRE(physical_time_rejected);
 }
 
 void testAdversarialPhysicsAndCosmologyDependenciesFail() {
@@ -1316,7 +1316,7 @@ void testAdversarialPhysicsAndCosmologyDependenciesFail() {
     } catch (const cosmosim::core::ConfigError&) {
       threw = true;
     }
-    assert(threw);
+    CHUI_REQUIRE(threw);
   }
 }
 
@@ -1338,13 +1338,13 @@ void testFiniteNumericAndForwardCosmologyContract() {
     } catch (const cosmosim::core::ConfigError&) {
       threw = true;
     }
-    assert(threw);
+    CHUI_REQUIRE(threw);
   }
 
   const auto forward = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[numerics]\na_begin = 0.25\na_end = 1.0\n",
       "forward_cosmology_ok");
-  assert(forward.config.numerics.a_end >= forward.config.numerics.a_begin);
+  CHUI_REQUIRE(forward.config.numerics.a_end >= forward.config.numerics.a_begin);
 }
 
 void testDerivedRuntimeSerializationUsesCanonicalNames() {
@@ -1353,10 +1353,10 @@ void testDerivedRuntimeSerializationUsesCanonicalNames() {
       "derived_canonical_names");
   const std::string serialized =
       cosmosim::core::serializeDerivedRuntimeConfig(cosmosim::core::deriveRuntimeConfig(frozen));
-  assert(serialized.find("t_code_begin=0.25") != std::string::npos);
-  assert(serialized.find("t_code_end=0.75") != std::string::npos);
-  assert(serialized.find("time_begin_code") == std::string::npos);
-  assert(serialized.find("time_end_code") == std::string::npos);
+  CHUI_REQUIRE(serialized.find("t_code_begin=0.25") != std::string::npos);
+  CHUI_REQUIRE(serialized.find("t_code_end=0.75") != std::string::npos);
+  CHUI_REQUIRE(serialized.find("time_begin_code") == std::string::npos);
+  CHUI_REQUIRE(serialized.find("time_end_code") == std::string::npos);
 }
 
 
@@ -1375,11 +1375,11 @@ void testStarFormationMassParametersAcceptUnits() {
       "sf_min_remaining_gas_mass_code = 0.5 msun\n",
       "sf_mass_units");
   const double solar_mass_kg = 1.98847e30;
-  assert(std::abs(frozen.config.physics.sf_jeans_mass_floor_code - 2.0 * solar_mass_kg) /
+  CHUI_REQUIRE(std::abs(frozen.config.physics.sf_jeans_mass_floor_code - 2.0 * solar_mass_kg) /
              solar_mass_kg < 1.0e-12);
-  assert(std::abs(frozen.config.physics.sf_target_star_particle_mass_code - 3.0 * solar_mass_kg) /
+  CHUI_REQUIRE(std::abs(frozen.config.physics.sf_target_star_particle_mass_code - 3.0 * solar_mass_kg) /
              solar_mass_kg < 1.0e-12);
-  assert(frozen.normalized_text.find("sf_jeans_mass_floor_code = ") != std::string::npos);
+  CHUI_REQUIRE(frozen.normalized_text.find("sf_jeans_mass_floor_code = ") != std::string::npos);
 
   bool rejected = false;
   try {
@@ -1390,7 +1390,7 @@ void testStarFormationMassParametersAcceptUnits() {
   } catch (const cosmosim::core::ConfigError&) {
     rejected = true;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
 }
 
 
@@ -1405,18 +1405,18 @@ void testEffectiveMultiphaseConfigurationContract() {
       "sf_effective_q_eos = 0.3\n"
       "sf_effective_feedback_coupling = external_feedback_calibrated\n",
       "effective_multiphase_config");
-  assert(frozen.config.physics.star_formation_model ==
+  CHUI_REQUIRE(frozen.config.physics.star_formation_model ==
          cosmosim::core::StarFormationModelKind::kEffectiveMultiphaseTngLike);
-  assert(std::abs(frozen.config.physics.sf_effective_n_h_threshold_cgs - 0.13) < 1.0e-14);
-  assert(frozen.config.physics.sf_effective_t_star_at_threshold_code > 0.0);
-  assert(std::abs(frozen.config.physics.sf_effective_q_eos - 0.3) < 1.0e-14);
-  assert(frozen.normalized_text.find(
+  CHUI_REQUIRE(std::abs(frozen.config.physics.sf_effective_n_h_threshold_cgs - 0.13) < 1.0e-14);
+  CHUI_REQUIRE(frozen.config.physics.sf_effective_t_star_at_threshold_code > 0.0);
+  CHUI_REQUIRE(std::abs(frozen.config.physics.sf_effective_q_eos - 0.3) < 1.0e-14);
+  CHUI_REQUIRE(frozen.normalized_text.find(
              "star_formation_model = effective_multiphase_tng_like") != std::string::npos);
-  assert(frozen.normalized_text.find("sf_effective_parameter_set = chui_sh03_tng_like_v1") !=
+  CHUI_REQUIRE(frozen.normalized_text.find("sf_effective_parameter_set = chui_sh03_tng_like_v1") !=
          std::string::npos);
   const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
       frozen.normalized_text, "effective_multiphase_config_roundtrip");
-  assert(reparsed.provenance.config_hash == frozen.provenance.config_hash);
+  CHUI_REQUIRE(reparsed.provenance.config_hash == frozen.provenance.config_hash);
 
   for (const char* invalid : {
            "[mode]\nmode = cosmo_cube\n[physics]\nstar_formation_model = unknown_model\n",
@@ -1429,15 +1429,15 @@ void testEffectiveMultiphaseConfigurationContract() {
     } catch (const cosmosim::core::ConfigError&) {
       rejected = true;
     }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
   }
 }
 
 void testProductionHierarchicalRungsFailClosed() {
   const auto production = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n", "production_single_rung_default");
-  assert(production.config.numerics.hierarchical_max_rung == 0);
-  assert(production.normalized_text.find("hierarchical_max_rung = 0") !=
+  CHUI_REQUIRE(production.config.numerics.hierarchical_max_rung == 0);
+  CHUI_REQUIRE(production.normalized_text.find("hierarchical_max_rung = 0") !=
          std::string::npos);
 
   bool rejected = false;
@@ -1450,7 +1450,7 @@ void testProductionHierarchicalRungsFailClosed() {
         "does not yet carry per-element kick/drift epochs") !=
         std::string::npos;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
 }
 
 void testPowerSpectrumMeshMatchesCompiledFftBackend() {
@@ -1459,7 +1459,7 @@ void testPowerSpectrumMeshMatchesCompiledFftBackend() {
 #if COSMOSIM_ENABLE_FFTW
   const auto accepted = cosmosim::core::loadFrozenConfigFromString(
       non_power_of_two, "fftw_non_power_of_two_mesh");
-  assert(accepted.config.analysis.power_spectrum_mesh_n == 6);
+  CHUI_REQUIRE(accepted.config.analysis.power_spectrum_mesh_n == 6);
 #else
   bool rejected = false;
   try {
@@ -1470,13 +1470,13 @@ void testPowerSpectrumMeshMatchesCompiledFftBackend() {
     rejected = message.find("analysis.power_spectrum_mesh_n") != std::string::npos &&
         message.find("power of two") != std::string::npos;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
 #endif
 
   const auto valid = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[analysis]\npower_spectrum_mesh_n = 8\n",
       "fft_power_of_two_mesh");
-  assert(valid.config.analysis.power_spectrum_mesh_n == 8);
+  CHUI_REQUIRE(valid.config.analysis.power_spectrum_mesh_n == 8);
 }
 
 void testFlatCosmologyClosureContract() {
@@ -1485,18 +1485,18 @@ void testFlatCosmologyClosureContract() {
       "omega_matter = 0.3\n"
       "omega_lambda = 0.7\n",
       "flat_lcdm_closure");
-  assert(fiducial.config.cosmology.omega_matter == 0.3);
-  assert(fiducial.config.cosmology.omega_lambda == 0.7);
-  assert(fiducial.normalized_text.find("omega_matter = 0.3") != std::string::npos);
-  assert(fiducial.normalized_text.find("omega_lambda = 0.7") != std::string::npos);
+  CHUI_REQUIRE(fiducial.config.cosmology.omega_matter == 0.3);
+  CHUI_REQUIRE(fiducial.config.cosmology.omega_lambda == 0.7);
+  CHUI_REQUIRE(fiducial.normalized_text.find("omega_matter = 0.3") != std::string::npos);
+  CHUI_REQUIRE(fiducial.normalized_text.find("omega_lambda = 0.7") != std::string::npos);
 
   const auto eds = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[cosmology]\n"
       "omega_matter = 1\n"
       "omega_lambda = 0\n",
       "eds_closure");
-  assert(eds.config.cosmology.omega_matter == 1.0);
-  assert(eds.config.cosmology.omega_lambda == 0.0);
+  CHUI_REQUIRE(eds.config.cosmology.omega_matter == 1.0);
+  CHUI_REQUIRE(eds.config.cosmology.omega_lambda == 0.0);
 
   bool rejected = false;
   try {
@@ -1508,7 +1508,7 @@ void testFlatCosmologyClosureContract() {
   } catch (const cosmosim::core::ConfigError&) {
     rejected = true;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
 }
 
 void testOutputCodeTimeCadenceValidationAndRoundtrip() {
@@ -1519,18 +1519,18 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
       "snapshot_layout = single\n"
       "snapshot_num_files = 0\n",
       "output_code_time_cadence");
-  assert(frozen.config.output.snapshot_interval_steps == 0);
-  assert(frozen.config.output.snapshot_interval_time_code == 0.125);
-  assert(frozen.config.output.snapshot_layout ==
+  CHUI_REQUIRE(frozen.config.output.snapshot_interval_steps == 0);
+  CHUI_REQUIRE(frozen.config.output.snapshot_interval_time_code == 0.125);
+  CHUI_REQUIRE(frozen.config.output.snapshot_layout ==
          cosmosim::core::ScienceSnapshotLayout::kSingle);
-  assert(frozen.config.output.snapshot_num_files == 0U);
-  assert(frozen.normalized_text.find("snapshot_interval_time_code = 0.125") !=
+  CHUI_REQUIRE(frozen.config.output.snapshot_num_files == 0U);
+  CHUI_REQUIRE(frozen.normalized_text.find("snapshot_interval_time_code = 0.125") !=
          std::string::npos);
-  assert(frozen.normalized_text.find("snapshot_layout = single") !=
+  CHUI_REQUIRE(frozen.normalized_text.find("snapshot_layout = single") !=
          std::string::npos);
   const auto reparsed = cosmosim::core::loadFrozenConfigFromString(
       frozen.normalized_text, "output_code_time_cadence_roundtrip");
-  assert(reparsed.normalized_text == frozen.normalized_text);
+  CHUI_REQUIRE(reparsed.normalized_text == frozen.normalized_text);
 
   for (const char* invalid_value : {"0.0", "-0.125", "nan"}) {
     bool rejected = false;
@@ -1543,7 +1543,7 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
     } catch (const cosmosim::core::ConfigError&) {
       rejected = true;
     }
-    assert(rejected);
+    CHUI_REQUIRE(rejected);
   }
 
   bool invalid_single_count_rejected = false;
@@ -1556,16 +1556,16 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
   } catch (const cosmosim::core::ConfigError&) {
     invalid_single_count_rejected = true;
   }
-  assert(invalid_single_count_rejected);
+  CHUI_REQUIRE(invalid_single_count_rejected);
 
   const auto aggregated = cosmosim::core::loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n[output]\n"
       "snapshot_layout = aggregated\n"
       "snapshot_num_files = 8\n",
       "aggregated_snapshot_contract");
-  assert(aggregated.config.output.snapshot_layout ==
+  CHUI_REQUIRE(aggregated.config.output.snapshot_layout ==
          cosmosim::core::ScienceSnapshotLayout::kAggregated);
-  assert(aggregated.config.output.snapshot_num_files == 8U);
+  CHUI_REQUIRE(aggregated.config.output.snapshot_num_files == 8U);
 }
 
 }  // namespace
@@ -1574,20 +1574,31 @@ void testTreePmPerformanceFlagsRoundTrip() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[numerics]\ntreepm_gaussian_pair_lookup_enabled = true\ntreepm_full_mac_diagnostics = false\n",
       "treepm_performance_flags");
-  assert(frozen.config.numerics.treepm_gaussian_pair_lookup_enabled);
-  assert(!frozen.config.numerics.treepm_full_mac_diagnostics);
+  CHUI_REQUIRE(frozen.config.numerics.treepm_gaussian_pair_lookup_enabled);
+  CHUI_REQUIRE(!frozen.config.numerics.treepm_full_mac_diagnostics);
   const auto replay = cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text,"flags_replay");
-  assert(replay.config.numerics.treepm_gaussian_pair_lookup_enabled);
-  assert(!replay.config.numerics.treepm_full_mac_diagnostics);
+  CHUI_REQUIRE(replay.config.numerics.treepm_gaussian_pair_lookup_enabled);
+  CHUI_REQUIRE(!replay.config.numerics.treepm_full_mac_diagnostics);
   const auto defaults = cosmosim::core::loadFrozenConfigFromString("","flags_defaults");
-  assert(!defaults.config.numerics.treepm_gaussian_pair_lookup_enabled);
-  assert(defaults.config.numerics.treepm_full_mac_diagnostics);
+  CHUI_REQUIRE(!defaults.config.numerics.treepm_gaussian_pair_lookup_enabled);
+  CHUI_REQUIRE(defaults.config.numerics.treepm_full_mac_diagnostics);
   bool rejected = false;
   try {
     (void)cosmosim::core::loadFrozenConfigFromString(
         "[numerics]\ntreepm_gaussian_pair_lookup_enabled = maybe\n", "flags_invalid");
   } catch (const cosmosim::core::ConfigError&) { rejected = true; }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
+  for (const std::string key : {"treepm_gaussian_pair_lookup_enabled", "treepm_full_mac_diagnostics"}) {
+    for (const std::string value : {"maybe", "2", "nan"}) {
+      rejected = false;
+      try {
+        (void)cosmosim::core::loadFrozenConfigFromString("[numerics]\n"+key+" = "+value+"\n", "invalid_treepm_flag");
+      } catch (const cosmosim::core::ConfigError& error) {
+        rejected = std::string(error.what()).find(key) != std::string::npos;
+      }
+      CHUI_REQUIRE(rejected);
+    }
+  }
 }
 
 int main() {

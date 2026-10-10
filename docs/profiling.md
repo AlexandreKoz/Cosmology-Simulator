@@ -454,3 +454,18 @@ With `treepm_full_mac_diagnostics=false`, events explicitly say
 local and incoming targets, and continue to report unique descent and actual
 pair counts. Selected-MAC rejection/fallback counts then describe evaluated
 MACs only. Full mode retains overlapping failed guards; skipped is never passing.
+
+### Complete snapshot export and reference identity
+
+P1–P5 follow-up export consumes the entire production `.complete` snapshot set,
+including all members, rather than interpreting one rank member as a population.
+The CSV sidecar binds member/manifest checksums, persistent IDs, epoch, rectangular
+geometry, declared dialect and conversion factors. Keep that sidecar with the
+CSV and target list. `--fixed-target-ids` preserves the historical oracle IDs;
+changing their file after export deliberately fails its checksum check.
+`--total-reference-manifest` is mandatory for external total-force comparisons.
+Its evidence and frozen-state identities must match; matching-split direct
+short-force comparisons are generated separately per candidate. Python >=3.8,
+NumPy and h5py are required for these offline workflows. Exact commands and the
+external reference sidecar fields are in the
+[20261010 repair handoff](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md). No new timings were collected.

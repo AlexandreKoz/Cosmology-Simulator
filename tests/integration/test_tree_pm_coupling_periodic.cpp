@@ -178,18 +178,68 @@ void requireEquivalentForces(
     const ForceField& rhs,
     double tolerance,
     const std::string& context) {
-  requireOrThrow(lhs.ax.size() == rhs.ax.size(), context + ": force extent mismatch");
+  requireOrThrow(lhs.ax.size() == rhs.ax.size() && lhs.ay.size() == lhs.ax.size() &&
+      lhs.az.size() == lhs.ax.size() && rhs.ay.size() == rhs.ax.size() && rhs.az.size() == rhs.ax.size(),
+      context + ": force extent mismatch");
+  requireOrThrow(std::isfinite(tolerance) && tolerance >= 0.0, context + ": invalid comparison tolerance");
   for (std::size_t i = 0; i < lhs.ax.size(); ++i) {
     const std::array lhs_components{lhs.ax[i], lhs.ay[i], lhs.az[i]};
     const std::array rhs_components{rhs.ax[i], rhs.ay[i], rhs.az[i]};
     for (std::size_t axis = 0; axis < lhs_components.size(); ++axis) {
       const double scale = std::max({1.0, std::abs(lhs_components[axis]), std::abs(rhs_components[axis])});
-      if (std::abs(lhs_components[axis] - rhs_components[axis]) > tolerance * scale) {
+      if (!std::isfinite(lhs_components[axis]) || !std::isfinite(rhs_components[axis]) ||
+          !(std::abs(lhs_components[axis] - rhs_components[axis]) <= tolerance * scale)) {
         std::ostringstream message;
         message << context << ": force mismatch at target=" << i << ", axis=" << axis
                 << ", lhs=" << lhs_components[axis] << ", rhs=" << rhs_components[axis]
                 << ", tolerance=" << tolerance * scale;
         throw std::runtime_error(message.str());
+      }
+    }
+  }
+}
+
+void testForceComparatorRejectsNonfiniteComponents() {
+  const ForceField reference{{1.0}, {2.0}, {3.0}};
+  for (const double invalid : {std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::infinity()}) {
+    auto candidate = reference;
+    candidate.ay[0] = invalid;
+    bool rejected = false;
+    try { requireEquivalentForces(candidate, reference, 1e-12, "adversarial comparator"); }
+    catch (const std::runtime_error& error) {
+      rejected = std::string(error.what()).find("adversarial comparator: force mismatch") != std::string::npos;
+    }
+    requireOrThrow(rejected, "force comparator accepted a nonfinite acceleration");
+  }
+}
+
+void testCoincidentPairVectorIsZeroWithFiniteSoftening() {
+#if COSMOSIM_ENABLE_MPI
+  int world_size = 1; MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  if (world_size != 1) return; // The routing fixtures below cover distributed targets.
+#endif
+  using namespace cosmosim::gravity;
+  const std::vector<double> x(2, 0.25), mass(2, 1.0);
+  TreePmOptions options;
+  options.pm_options.box_size_mpc_comoving = 1.0;
+  options.pm_options.gravitational_constant_code = 1.0;
+  options.tree_options.gravitational_constant_code = 1.0;
+  options.tree_options.max_leaf_size = 8;
+  options.split_policy = makeTreePmSplitPolicyFromMeshSpacing(1.25, 3.0, 0.125);
+  options.short_range_only = true;
+  for (const double epsilon : {0.0, 0.01, 1e-110}) {
+    options.tree_options.softening.epsilon_comoving = epsilon;
+    for (const bool lookup : {false, true}) {
+      options.gaussian_pair_lookup_enabled = lookup;
+      TreePmDiagnostics diagnostics;
+      TreePmProfileEvent profile;
+      const auto force = solveTreePm(x, x, x, mass, {8, 8, 8}, options, &diagnostics, &profile);
+      requireOrThrow(profile.tree_profile.particle_particle_interactions == 2U,
+          "coincident pairs must remain counted direct interactions");
+      for (std::size_t i = 0; i < 2U; ++i) {
+        requireOrThrow(force.ax[i] == 0.0 && force.ay[i] == 0.0 && force.az[i] == 0.0,
+            "coincident short-range force must be the exact zero vector for both kernels");
       }
     }
   }
@@ -1749,6 +1799,9 @@ int main() {
 #if COSMOSIM_ENABLE_MPI
   MPI_Init(nullptr, nullptr);
 #endif
+  try {
+  testForceComparatorRejectsNonfiniteComponents();
+  testCoincidentPairVectorIsZeroWithFiniteSoftening();
   testRecoveryDirectPairsCutoffThreadsAndMemory();
   testPeriodicTreePmAgainstDirectReference();
   testPeriodicTreeGeometryIsSeamSafeAndTranslationInvariant();
@@ -1769,6 +1822,15 @@ int main() {
   testDistributedShortRangeExportImportMatchesSingleRankReference();
   testDistributedActiveSubsetMatchesSingleRankReference();
   testDistributedEmptyRanksIndependentTargetsAndMigration();
+#endif
+  } catch (const std::exception& error) {
+    std::cerr << "periodic TreePM regression failed: " << error.what() << '\n';
+#if COSMOSIM_ENABLE_MPI
+    MPI_Abort(MPI_COMM_WORLD, 1);
+#endif
+    return 1;
+  }
+#if COSMOSIM_ENABLE_MPI
   MPI_Finalize();
 #endif
   return 0;

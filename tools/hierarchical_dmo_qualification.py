@@ -5,52 +5,16 @@ The requested k interval is an explicit qualification target, never a claim of
 an already validated scale range. Dependencies: numpy and h5py, supplied by user.
 """
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
-import h5py
 import numpy as np
 
-
-def sha256(path):
-    h = hashlib.sha256()
-    with path.open('rb') as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
+from chui_snapshot import add_snapshot_arguments, legacy_units, read_snapshot
 
 
-def read(path):
-    with h5py.File(path, 'r') as source:
-        group = source['PartType1']
-        ids = np.asarray(group['ParticleIDs'], dtype=np.uint64)
-        positions = np.asarray(group['Coordinates'], dtype=np.float64)
-        velocities = np.asarray(group['Velocities'], dtype=np.float64)
-        header = source['Header'].attrs
-        box = np.asarray(header['BoxSize'], dtype=np.float64)
-        if box.ndim == 0:
-            axis_keys = [f'CHUIBoxSize{axis}_MpcComoving' for axis in 'XYZ']
-            if all(key in header for key in axis_keys):
-                lengths = np.array([header[key] for key in axis_keys], dtype=np.float64)
-                box = float(box) * lengths / lengths[0]
-            else:
-                box = np.repeat(box, 3)
-        if box.shape != (3,) or not np.isfinite(box).all() or (box <= 0).any():
-            raise ValueError('requires positive rectangular box lengths in Header/BoxSize')
-        mass = (np.asarray(group['Masses'], dtype=np.float64) if 'Masses' in group else
-                np.full(len(ids), float(header['MassTable'][1])))
-        a = float(header['Time'])
-        if not np.isfinite(a) or a <= 0:
-            raise ValueError('requires a finite positive cosmological scale factor')
-    if len(ids) == 0 or len(np.unique(ids)) != len(ids):
-        raise ValueError('requires unique nonempty DMO particle IDs')
-    if positions.shape != (len(ids), 3) or velocities.shape != positions.shape or mass.shape != (len(ids),):
-        raise ValueError('inconsistent snapshot particle lanes')
-    if not all(np.isfinite(x).all() for x in (positions, velocities, mass)) or (mass <= 0).any():
-        raise ValueError('nonfinite state or nonpositive mass')
-    order = np.argsort(ids, kind='stable')
-    return dict(ids=ids[order], x=positions[order], u=velocities[order], mass=mass[order], box=box, a=a)
+def read(path, legacy_dialect=None, units=None):
+    return read_snapshot(path, 'PartType1', legacy_dialect, units, need_velocity=True)
 
 
 def power(state, mesh, k_min, k_max, bins):
@@ -94,17 +58,25 @@ def main():
     parser.add_argument('--max-power-relative-error', type=float, default=0.02)
     parser.add_argument('--max-growth-relative-error', type=float, default=0.01)
     parser.add_argument('--output', type=Path, required=True)
+    add_snapshot_arguments(parser)
     args = parser.parse_args()
     if args.mesh < 8 or args.bins < 1 or not (0 < args.k_min < args.k_max):
         parser.error('invalid estimator mesh/bins or k interval')
     if not (0 < args.max_power_relative_error < 1 and 0 < args.max_growth_relative_error < 1):
         parser.error('accuracy budgets must lie in (0,1)')
-    states = {name: read(getattr(args, name.replace('-', '_'))) for name in
+    states = {name: read(getattr(args, name.replace('-', '_')), args.legacy_dialect, legacy_units(args)) for name in
               ('initial', 'global-reference', 'hierarchical', 'refined')}
     initial, reference = states['initial'], states['global-reference']
     if args.k_max > 0.25*np.min(np.pi*args.mesh/reference['box']):
         raise ValueError('requested range exceeds the conservative quarter-Nyquist offline estimator limit')
     for name, state in states.items():
+        identity = state['provenance']['identity']
+        if not identity.get('qualification_physics') or identity.get('qualification_physics') != initial['provenance']['identity'].get('qualification_physics'):
+            raise ValueError('provenance: matched scientific normalized configuration required: '+name)
+        for key in ('dialect', 'units', 'coordinate_frame', 'velocity_storage_convention',
+                    'Omega0', 'OmegaLambda', 'OmegaBaryon', 'HubbleParam'):
+            if identity[key] != initial['provenance']['identity'][key]:
+                raise ValueError('identity: incompatible cosmology/dialect/unit conventions: '+name)
         if not (np.array_equal(state['ids'], initial['ids']) and np.array_equal(state['mass'], initial['mass'])
                 and np.array_equal(state['box'], initial['box'])):
             raise ValueError(f'{name}: frozen identities, masses or geometry differ')
@@ -122,8 +94,7 @@ def main():
                   final_scale_factor=reference['a'], budgets=dict(power=args.max_power_relative_error,
                   growth=args.max_growth_relative_error), files={})
     for name in states:
-        path = getattr(args, name.replace('-', '_'))
-        result['files'][name] = dict(path=str(path), sha256=sha256(path))
+        result['files'][name] = states[name]['provenance']
     for name in ('hierarchical', 'refined'):
         p = spectra[name]
         power_error = np.abs(p/pref-1)

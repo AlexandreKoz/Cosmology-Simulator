@@ -1,4 +1,4 @@
-#include <cassert>
+#include "../support/test_require.hpp"
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -186,21 +186,21 @@ void testDecoupledGasIdentityRoundtrip() {
 
   const auto roundtrip =
       cosmosim::io::readGadgetArepoSnapshotHdf5(path, config);
-  assert(roundtrip.report.schema_version == 6U);
-  assert(roundtrip.state.cells.size() == 3U);
-  assert(roundtrip.state.gas_cell_identity.size() == 3U);
-  assert(!roundtrip.state.parentParticleIdForGasCellId(7001U).has_value());
-  assert(roundtrip.state.parentParticleIdForGasCellId(7002U).value() == 5001U);
-  assert(roundtrip.state.parentParticleIdForGasCellId(7003U).value() == 5001U);
-  assert(roundtrip.state.gas_cell_identity.rowsForParentParticleId(5001U).size() == 2U);
-  assert(roundtrip.state.owningPatchIdForGasCellId(7001U).value() == 42U);
-  assert(roundtrip.state.owningPatchIdForGasCellId(7003U).value() == 43U);
-  assert(std::abs(roundtrip.state.cells.center_x_comoving[0] - state.cells.center_x_comoving[0]) < 1.0e-14);
-  assert(std::abs(roundtrip.state.cells.center_x_comoving[2] - state.cells.center_x_comoving[2]) < 1.0e-14);
-  assert(std::abs(roundtrip.state.cells.mass_code[1] - state.cells.mass_code[1]) < 1.0e-14);
-  assert(roundtrip.report.analysis_ready);
-  assert(!roundtrip.report.evolution_ready);
-  assert(!roundtrip.report.evolution_readiness_reasons.empty());
+  CHUI_REQUIRE(roundtrip.report.schema_version == 6U);
+  CHUI_REQUIRE(roundtrip.state.cells.size() == 3U);
+  CHUI_REQUIRE(roundtrip.state.gas_cell_identity.size() == 3U);
+  CHUI_REQUIRE(!roundtrip.state.parentParticleIdForGasCellId(7001U).has_value());
+  CHUI_REQUIRE(roundtrip.state.parentParticleIdForGasCellId(7002U).value() == 5001U);
+  CHUI_REQUIRE(roundtrip.state.parentParticleIdForGasCellId(7003U).value() == 5001U);
+  CHUI_REQUIRE(roundtrip.state.gas_cell_identity.rowsForParentParticleId(5001U).size() == 2U);
+  CHUI_REQUIRE(roundtrip.state.owningPatchIdForGasCellId(7001U).value() == 42U);
+  CHUI_REQUIRE(roundtrip.state.owningPatchIdForGasCellId(7003U).value() == 43U);
+  CHUI_REQUIRE(std::abs(roundtrip.state.cells.center_x_comoving[0] - state.cells.center_x_comoving[0]) < 1.0e-14);
+  CHUI_REQUIRE(std::abs(roundtrip.state.cells.center_x_comoving[2] - state.cells.center_x_comoving[2]) < 1.0e-14);
+  CHUI_REQUIRE(std::abs(roundtrip.state.cells.mass_code[1] - state.cells.mass_code[1]) < 1.0e-14);
+  CHUI_REQUIRE(roundtrip.report.analysis_ready);
+  CHUI_REQUIRE(!roundtrip.report.evolution_ready);
+  CHUI_REQUIRE(!roundtrip.report.evolution_readiness_reasons.empty());
   std::filesystem::remove(path);
 #endif
 }
@@ -264,8 +264,8 @@ void testChuiNativeCoordinateBoundsUseCodeLengthUnits() {
   cosmosim::io::validateSnapshotSetHdf5(valid_directory).requireValid();
   const auto roundtrip = cosmosim::io::readCosmoSimScienceSnapshotHdf5(
       valid_directory, config);
-  assert(roundtrip.report.header_box_size_x == 0.05);
-  assert(std::abs(roundtrip.state.particles.position_x_comoving[0] - 4.0965) <
+  CHUI_REQUIRE(roundtrip.report.header_box_size_x == 0.05);
+  CHUI_REQUIRE(std::abs(roundtrip.state.particles.position_x_comoving[0] - 4.0965) <
          1.0e-12);
 
   // Bounds enforcement remains active after the unit fix: 50.1 kpc exceeds
@@ -281,7 +281,7 @@ void testChuiNativeCoordinateBoundsUseCodeLengthUnits() {
   } catch (const std::runtime_error&) {
     validator_rejected = true;
   }
-  assert(validator_rejected);
+  CHUI_REQUIRE(validator_rejected);
 
   bool reader_rejected = false;
   try {
@@ -290,7 +290,7 @@ void testChuiNativeCoordinateBoundsUseCodeLengthUnits() {
   } catch (const std::runtime_error&) {
     reader_rejected = true;
   }
-  assert(reader_rejected);
+  CHUI_REQUIRE(reader_rejected);
   std::filesystem::remove_all(valid_directory);
   std::filesystem::remove_all(invalid_directory);
 #endif
@@ -349,12 +349,12 @@ void testRoundtripMixedSpeciesSnapshot() {
   policy.chunk_particle_count = 2;
   cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path, payload, policy);
   const auto pending_single = cosmosim::io::inspectSnapshotSet(snapshot_path);
-  assert(!pending_single.complete);
-  assert(pending_single.num_files_per_snapshot == 1U);
-  assert(!pending_single.generation_id.empty());
+  CHUI_REQUIRE(!pending_single.complete);
+  CHUI_REQUIRE(pending_single.num_files_per_snapshot == 1U);
+  CHUI_REQUIRE(!pending_single.generation_id.empty());
   const std::filesystem::path single_integrity_path =
       std::filesystem::path(snapshot_path.string() + ".member.integrity");
-  assert(std::filesystem::is_regular_file(single_integrity_path));
+  CHUI_REQUIRE(std::filesystem::is_regular_file(single_integrity_path));
   std::filesystem::remove(single_integrity_path);
   bool missing_integrity_rejected = false;
   try {
@@ -364,16 +364,16 @@ void testRoundtripMixedSpeciesSnapshot() {
   } catch (const std::runtime_error&) {
     missing_integrity_rejected = true;
   }
-  assert(missing_integrity_rejected);
+  CHUI_REQUIRE(missing_integrity_rejected);
   cosmosim::io::writeGadgetArepoSnapshotHdf5(snapshot_path, payload, policy);
-  assert(std::filesystem::is_regular_file(single_integrity_path));
+  CHUI_REQUIRE(std::filesystem::is_regular_file(single_integrity_path));
   cosmosim::io::writeSnapshotSetCompletionMarker(
       snapshot_path, pending_single.generation_id, 1U,
       pending_single.global_part_count, false);
   const std::filesystem::path completion_path = snapshot_directory / "snap_000.complete";
   const auto complete_single = cosmosim::io::inspectSnapshotSet(completion_path);
-  assert(complete_single.complete);
-  assert(std::filesystem::is_regular_file(completion_path));
+  CHUI_REQUIRE(complete_single.complete);
+  CHUI_REQUIRE(std::filesystem::is_regular_file(completion_path));
   cosmosim::io::validateSnapshotSetHdf5(completion_path).requireValid();
 
   // A flat snapshots/ directory may contain many committed sets. Selecting one
@@ -386,12 +386,12 @@ void testRoundtripMixedSpeciesSnapshot() {
       pending_second.global_part_count, false);
   const std::filesystem::path completion_path_1 = snapshot_directory / "snap_001.complete";
   const auto complete_second = cosmosim::io::inspectSnapshotSet(completion_path_1);
-  assert(complete_second.complete);
-  assert(complete_second.member_paths.size() == 1U);
-  assert(complete_second.member_paths.front().filename() == "snap_001.hdf5");
+  CHUI_REQUIRE(complete_second.complete);
+  CHUI_REQUIRE(complete_second.member_paths.size() == 1U);
+  CHUI_REQUIRE(complete_second.member_paths.front().filename() == "snap_001.hdf5");
   const auto complete_first_again = cosmosim::io::inspectSnapshotSet(completion_path);
-  assert(complete_first_again.member_paths.size() == 1U);
-  assert(complete_first_again.member_paths.front().filename() == "snap_000.hdf5");
+  CHUI_REQUIRE(complete_first_again.member_paths.size() == 1U);
+  CHUI_REQUIRE(complete_first_again.member_paths.front().filename() == "snap_000.hdf5");
 
   const std::filesystem::path stale_marker = snapshot_directory / "snap_999.complete";
   std::filesystem::copy_file(
@@ -403,7 +403,7 @@ void testRoundtripMixedSpeciesSnapshot() {
   } catch (const std::exception&) {
     stale_marker_rejected = true;
   }
-  assert(stale_marker_rejected);
+  CHUI_REQUIRE(stale_marker_rejected);
   std::filesystem::remove(stale_marker);
 
   std::filesystem::remove(snapshot_path_1);
@@ -413,45 +413,45 @@ void testRoundtripMixedSpeciesSnapshot() {
   } catch (const std::exception&) {
     missing_member_rejected = true;
   }
-  assert(missing_member_rejected);
+  CHUI_REQUIRE(missing_member_rejected);
 
   hid_t inspect_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
-  assert(inspect_file >= 0);
-  assert(H5Aexists(inspect_file, "cosmosim_file_kind") > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/StarFormationRate", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/ParentParticleIDs", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/HasParentParticle", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/OwningPatchIDs", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/ColdCloudMassFraction", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/EffectivePressure", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/EffectiveInternalEnergy", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/IsOnEffectiveEos", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/Pressure", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/CHUI_TemperatureCode", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType0/CHUI_SoundSpeedCode", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType5/CHUI_BHSubgridMass", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType5/CHUI_BHAccretionRateMsunPerYr", H5P_DEFAULT) > 0);
-  assert(H5Lexists(inspect_file, "/PartType5/CHUI_BHEddingtonRatio", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(inspect_file >= 0);
+  CHUI_REQUIRE(H5Aexists(inspect_file, "cosmosim_file_kind") > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/StarFormationRate", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/ParentParticleIDs", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/HasParentParticle", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/OwningPatchIDs", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/ColdCloudMassFraction", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/EffectivePressure", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/EffectiveInternalEnergy", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/IsOnEffectiveEos", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/Pressure", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/CHUI_TemperatureCode", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType0/CHUI_SoundSpeedCode", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType5/CHUI_BHSubgridMass", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType5/CHUI_BHAccretionRateMsunPerYr", H5P_DEFAULT) > 0);
+  CHUI_REQUIRE(H5Lexists(inspect_file, "/PartType5/CHUI_BHEddingtonRatio", H5P_DEFAULT) > 0);
   hid_t inspect_header = H5Gopen2(inspect_file, "/Header", H5P_DEFAULT);
-  assert(inspect_header >= 0);
+  CHUI_REQUIRE(inspect_header >= 0);
   double box_x = 0.0;
   double box_y = 0.0;
   double box_z = 0.0;
   hid_t attr = H5Aopen(inspect_header, "CHUIBoxSizeX_MpcComoving", H5P_DEFAULT);
-  assert(attr >= 0);
-  assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_x) >= 0);
+  CHUI_REQUIRE(attr >= 0);
+  CHUI_REQUIRE(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_x) >= 0);
   H5Aclose(attr);
   attr = H5Aopen(inspect_header, "CHUIBoxSizeY_MpcComoving", H5P_DEFAULT);
-  assert(attr >= 0);
-  assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_y) >= 0);
+  CHUI_REQUIRE(attr >= 0);
+  CHUI_REQUIRE(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_y) >= 0);
   H5Aclose(attr);
   attr = H5Aopen(inspect_header, "CHUIBoxSizeZ_MpcComoving", H5P_DEFAULT);
-  assert(attr >= 0);
-  assert(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_z) >= 0);
+  CHUI_REQUIRE(attr >= 0);
+  CHUI_REQUIRE(H5Aread(attr, H5T_NATIVE_DOUBLE, &box_z) >= 0);
   H5Aclose(attr);
-  assert(std::abs(box_x - config.cosmology.box_size_x_mpc_comoving) < 1.0e-12);
-  assert(std::abs(box_y - config.cosmology.box_size_y_mpc_comoving) < 1.0e-12);
-  assert(std::abs(box_z - config.cosmology.box_size_z_mpc_comoving) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(box_x - config.cosmology.box_size_x_mpc_comoving) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(box_y - config.cosmology.box_size_y_mpc_comoving) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(box_z - config.cosmology.box_size_z_mpc_comoving) < 1.0e-12);
   H5Gclose(inspect_header);
   H5Fclose(inspect_file);
 
@@ -459,126 +459,126 @@ void testRoundtripMixedSpeciesSnapshot() {
       cosmosim::io::readGadgetArepoSnapshotHdf5(snapshot_path, config);
   const auto& schema = cosmosim::io::gadgetArepoSchemaMap();
 
-  assert(roundtrip.state.particles.size() == state.particles.size());
-  assert(roundtrip.state.validateUniqueParticleIds());
-  assert(roundtrip.state.metadata.scale_factor == state.metadata.scale_factor);
-  assert(roundtrip.normalized_config_text == payload.normalized_config_text);
+  CHUI_REQUIRE(roundtrip.state.particles.size() == state.particles.size());
+  CHUI_REQUIRE(roundtrip.state.validateUniqueParticleIds());
+  CHUI_REQUIRE(roundtrip.state.metadata.scale_factor == state.metadata.scale_factor);
+  CHUI_REQUIRE(roundtrip.normalized_config_text == payload.normalized_config_text);
   const auto& shared_contract = cosmosim::io::sharedIoContractNames();
-  assert(roundtrip.report.schema_name == schema.schema_name);
-  assert(roundtrip.report.schema_version == schema.schema_version);
-  assert(roundtrip.report.file_kind == shared_contract.science_snapshot_file_kind);
-  assert(!roundtrip.report.restart_compatible);
-  assert(roundtrip.report.header_time == state.metadata.scale_factor);
-  assert(roundtrip.report.header_redshift == 1.0 / state.metadata.scale_factor - 1.0);
-  assert(roundtrip.report.header_box_size_x == config.cosmology.box_size_x_mpc_comoving);
-  assert(roundtrip.report.header_box_size_y == config.cosmology.box_size_y_mpc_comoving);
-  assert(roundtrip.report.header_box_size_z == config.cosmology.box_size_z_mpc_comoving);
-  assert(roundtrip.report.header_omega_matter == config.cosmology.omega_matter);
-  assert(roundtrip.report.header_omega_lambda == config.cosmology.omega_lambda);
-  assert(roundtrip.report.header_omega_baryon == config.cosmology.omega_baryon);
-  assert(roundtrip.report.header_hubble_param == config.cosmology.hubble_param);
-  assert(roundtrip.provenance.schema_version == payload.provenance.schema_version);
-  assert(roundtrip.provenance.git_sha == payload.provenance.git_sha);
-  assert(roundtrip.provenance.config_hash_hex == payload.provenance.config_hash_hex);
-  assert(roundtrip.provenance.integrity_digest_algorithm == "sha256");
-  assert(
+  CHUI_REQUIRE(roundtrip.report.schema_name == schema.schema_name);
+  CHUI_REQUIRE(roundtrip.report.schema_version == schema.schema_version);
+  CHUI_REQUIRE(roundtrip.report.file_kind == shared_contract.science_snapshot_file_kind);
+  CHUI_REQUIRE(!roundtrip.report.restart_compatible);
+  CHUI_REQUIRE(roundtrip.report.header_time == state.metadata.scale_factor);
+  CHUI_REQUIRE(roundtrip.report.header_redshift == 1.0 / state.metadata.scale_factor - 1.0);
+  CHUI_REQUIRE(roundtrip.report.header_box_size_x == config.cosmology.box_size_x_mpc_comoving);
+  CHUI_REQUIRE(roundtrip.report.header_box_size_y == config.cosmology.box_size_y_mpc_comoving);
+  CHUI_REQUIRE(roundtrip.report.header_box_size_z == config.cosmology.box_size_z_mpc_comoving);
+  CHUI_REQUIRE(roundtrip.report.header_omega_matter == config.cosmology.omega_matter);
+  CHUI_REQUIRE(roundtrip.report.header_omega_lambda == config.cosmology.omega_lambda);
+  CHUI_REQUIRE(roundtrip.report.header_omega_baryon == config.cosmology.omega_baryon);
+  CHUI_REQUIRE(roundtrip.report.header_hubble_param == config.cosmology.hubble_param);
+  CHUI_REQUIRE(roundtrip.provenance.schema_version == payload.provenance.schema_version);
+  CHUI_REQUIRE(roundtrip.provenance.git_sha == payload.provenance.git_sha);
+  CHUI_REQUIRE(roundtrip.provenance.config_hash_hex == payload.provenance.config_hash_hex);
+  CHUI_REQUIRE(roundtrip.provenance.integrity_digest_algorithm == "sha256");
+  CHUI_REQUIRE(
       roundtrip.provenance.normalized_config_sha256_hex ==
       cosmosim::core::strongConfigHashSha256Hex(payload.normalized_config_text));
-  assert(roundtrip.provenance.enabled_features == payload.provenance.enabled_features);
-  assert(roundtrip.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
-  assert(roundtrip.provenance.gravity_treepm_pm_grid_nx == payload.provenance.gravity_treepm_pm_grid_nx);
-  assert(roundtrip.provenance.gravity_treepm_pm_grid_ny == payload.provenance.gravity_treepm_pm_grid_ny);
-  assert(roundtrip.provenance.gravity_treepm_pm_grid_nz == payload.provenance.gravity_treepm_pm_grid_nz);
-  assert(roundtrip.provenance.gravity_treepm_assignment_scheme == payload.provenance.gravity_treepm_assignment_scheme);
-  assert(
+  CHUI_REQUIRE(roundtrip.provenance.enabled_features == payload.provenance.enabled_features);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_pm_grid_nx == payload.provenance.gravity_treepm_pm_grid_nx);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_pm_grid_ny == payload.provenance.gravity_treepm_pm_grid_ny);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_pm_grid_nz == payload.provenance.gravity_treepm_pm_grid_nz);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_assignment_scheme == payload.provenance.gravity_treepm_assignment_scheme);
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_window_deconvolution ==
       payload.provenance.gravity_treepm_window_deconvolution);
-  assert(roundtrip.provenance.gravity_treepm_asmth_cells == payload.provenance.gravity_treepm_asmth_cells);
-  assert(roundtrip.provenance.gravity_treepm_rcut_cells == payload.provenance.gravity_treepm_rcut_cells);
-  assert(
+  CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_asmth_cells == payload.provenance.gravity_treepm_asmth_cells);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_rcut_cells == payload.provenance.gravity_treepm_rcut_cells);
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_mesh_spacing_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_x_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_y_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving ==
       payload.provenance.gravity_treepm_mesh_spacing_z_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_split_scale_mpc_comoving ==
       payload.provenance.gravity_treepm_split_scale_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_cutoff_radius_mpc_comoving ==
       payload.provenance.gravity_treepm_cutoff_radius_mpc_comoving);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_update_cadence_steps ==
       payload.provenance.gravity_treepm_update_cadence_steps);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_tree_opening_criterion ==
       payload.provenance.gravity_treepm_tree_opening_criterion);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_tree_opening_theta ==
       payload.provenance.gravity_treepm_tree_opening_theta);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_tree_relative_force_tolerance ==
       payload.provenance.gravity_treepm_tree_relative_force_tolerance);
-  assert(
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_treepm_tree_relative_force_acceleration_floor ==
       payload.provenance.gravity_treepm_tree_relative_force_acceleration_floor);
-  assert(roundtrip.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
-  assert(roundtrip.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
-  assert(
+  CHUI_REQUIRE(roundtrip.provenance.gravity_softening_policy == payload.provenance.gravity_softening_policy);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_softening_kernel == payload.provenance.gravity_softening_kernel);
+  CHUI_REQUIRE(
       roundtrip.provenance.gravity_softening_epsilon_kpc_comoving ==
       payload.provenance.gravity_softening_epsilon_kpc_comoving);
-  assert(roundtrip.provenance.gravity_pm_fft_backend == payload.provenance.gravity_pm_fft_backend);
-  assert(containsString(roundtrip.report.present_aliases, "/PartType0/Coordinates=Coordinates"));
-  assert(containsString(roundtrip.report.present_aliases, "/PartType1/Coordinates=Coordinates"));
-  assert(containsString(roundtrip.report.present_aliases, "/PartType3/Coordinates=Coordinates"));
-  assert(containsString(roundtrip.report.present_aliases, "/PartType4/Coordinates=Coordinates"));
-  assert(containsString(roundtrip.report.present_aliases, "/PartType5/Coordinates=Coordinates"));
-  assert(roundtrip.state.tracers.size() == 1);
-  assert(roundtrip.state.tracers.parent_particle_id[0] == 1005);
-  assert(roundtrip.state.tracers.injection_step[0] == 11);
-  assert(roundtrip.state.tracers.host_cell_index[0] == 1);
-  assert(std::abs(roundtrip.state.tracers.mass_fraction_of_host[0] - 0.25) < 1.0e-12);
-  assert(std::abs(roundtrip.state.tracers.cumulative_exchanged_mass_code[0] - 0.1) < 1.0e-12);
-  assert(roundtrip.state.cells.size() == 2);
-  assert(roundtrip.state.gas_cells.gas_cell_id[0] == 9000);
-  assert(roundtrip.state.gas_cells.gas_cell_id[1] == 9001);
-  assert(roundtrip.state.parentParticleIdForGasCellId(9000).value() == 1002);
-  assert(roundtrip.state.parentParticleIdForGasCellId(9001).value() == 1003);
-  assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[0] - 0.1) < 1.0e-12);
-  assert(std::abs(roundtrip.state.gas_cells.metal_mass_code[1] - 0.3) < 1.0e-12);
+  CHUI_REQUIRE(roundtrip.provenance.gravity_pm_fft_backend == payload.provenance.gravity_pm_fft_backend);
+  CHUI_REQUIRE(containsString(roundtrip.report.present_aliases, "/PartType0/Coordinates=Coordinates"));
+  CHUI_REQUIRE(containsString(roundtrip.report.present_aliases, "/PartType1/Coordinates=Coordinates"));
+  CHUI_REQUIRE(containsString(roundtrip.report.present_aliases, "/PartType3/Coordinates=Coordinates"));
+  CHUI_REQUIRE(containsString(roundtrip.report.present_aliases, "/PartType4/Coordinates=Coordinates"));
+  CHUI_REQUIRE(containsString(roundtrip.report.present_aliases, "/PartType5/Coordinates=Coordinates"));
+  CHUI_REQUIRE(roundtrip.state.tracers.size() == 1);
+  CHUI_REQUIRE(roundtrip.state.tracers.parent_particle_id[0] == 1005);
+  CHUI_REQUIRE(roundtrip.state.tracers.injection_step[0] == 11);
+  CHUI_REQUIRE(roundtrip.state.tracers.host_cell_index[0] == 1);
+  CHUI_REQUIRE(std::abs(roundtrip.state.tracers.mass_fraction_of_host[0] - 0.25) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(roundtrip.state.tracers.cumulative_exchanged_mass_code[0] - 0.1) < 1.0e-12);
+  CHUI_REQUIRE(roundtrip.state.cells.size() == 2);
+  CHUI_REQUIRE(roundtrip.state.gas_cells.gas_cell_id[0] == 9000);
+  CHUI_REQUIRE(roundtrip.state.gas_cells.gas_cell_id[1] == 9001);
+  CHUI_REQUIRE(roundtrip.state.parentParticleIdForGasCellId(9000).value() == 1002);
+  CHUI_REQUIRE(roundtrip.state.parentParticleIdForGasCellId(9001).value() == 1003);
+  CHUI_REQUIRE(std::abs(roundtrip.state.gas_cells.metal_mass_code[0] - 0.1) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(roundtrip.state.gas_cells.metal_mass_code[1] - 0.3) < 1.0e-12);
   for (std::size_t gas_row = 0; gas_row < 2; ++gas_row) {
-    assert(std::abs(roundtrip.state.gas_cells.pressure_code[gas_row] - state.gas_cells.pressure_code[gas_row]) < 1.0e-12);
-    assert(std::abs(roundtrip.state.gas_cells.temperature_code[gas_row] - state.gas_cells.temperature_code[gas_row]) < 1.0e-12);
-    assert(std::abs(roundtrip.state.gas_cells.sound_speed_code[gas_row] - state.gas_cells.sound_speed_code[gas_row]) < 1.0e-12);
+    CHUI_REQUIRE(std::abs(roundtrip.state.gas_cells.pressure_code[gas_row] - state.gas_cells.pressure_code[gas_row]) < 1.0e-12);
+    CHUI_REQUIRE(std::abs(roundtrip.state.gas_cells.temperature_code[gas_row] - state.gas_cells.temperature_code[gas_row]) < 1.0e-12);
+    CHUI_REQUIRE(std::abs(roundtrip.state.gas_cells.sound_speed_code[gas_row] - state.gas_cells.sound_speed_code[gas_row]) < 1.0e-12);
   }
-  assert(roundtrip.state.black_holes.size() == 1);
-  assert(roundtrip.state.black_holes.particle_index[0] < roundtrip.state.particles.size());
-  assert(roundtrip.state.black_holes.host_cell_index[0] == 1);
-  assert(std::abs(roundtrip.state.black_holes.subgrid_mass_code[0] - state.black_holes.subgrid_mass_code[0]) < 1.0e-12);
-  assert(std::abs(roundtrip.state.black_holes.accretion_rate_code[0] - state.black_holes.accretion_rate_code[0]) < 1.0e-12);
-  assert(std::abs(roundtrip.state.black_holes.feedback_energy_code[0] - state.black_holes.feedback_energy_code[0]) < 1.0e-12);
-  assert(std::abs(roundtrip.state.black_holes.eddington_ratio[0] - state.black_holes.eddington_ratio[0]) < 1.0e-12);
-  assert(std::abs(roundtrip.state.black_holes.cumulative_accreted_mass_code[0] - state.black_holes.cumulative_accreted_mass_code[0]) < 1.0e-12);
-  assert(std::abs(roundtrip.state.black_holes.cumulative_feedback_energy_code[0] - state.black_holes.cumulative_feedback_energy_code[0]) < 1.0e-12);
-  assert(roundtrip.state.star_particles.size() == 2);
+  CHUI_REQUIRE(roundtrip.state.black_holes.size() == 1);
+  CHUI_REQUIRE(roundtrip.state.black_holes.particle_index[0] < roundtrip.state.particles.size());
+  CHUI_REQUIRE(roundtrip.state.black_holes.host_cell_index[0] == 1);
+  CHUI_REQUIRE(std::abs(roundtrip.state.black_holes.subgrid_mass_code[0] - state.black_holes.subgrid_mass_code[0]) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(roundtrip.state.black_holes.accretion_rate_code[0] - state.black_holes.accretion_rate_code[0]) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(roundtrip.state.black_holes.feedback_energy_code[0] - state.black_holes.feedback_energy_code[0]) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(roundtrip.state.black_holes.eddington_ratio[0] - state.black_holes.eddington_ratio[0]) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(roundtrip.state.black_holes.cumulative_accreted_mass_code[0] - state.black_holes.cumulative_accreted_mass_code[0]) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(roundtrip.state.black_holes.cumulative_feedback_energy_code[0] - state.black_holes.cumulative_feedback_energy_code[0]) < 1.0e-12);
+  CHUI_REQUIRE(roundtrip.state.star_particles.size() == 2);
   for (std::size_t star_row = 0; star_row < 2; ++star_row) {
-    assert(roundtrip.state.star_particles.birth_key[star_row] == state.star_particles.birth_key[star_row]);
-    assert(roundtrip.state.star_particles.parent_gas_cell_id[star_row] ==
+    CHUI_REQUIRE(roundtrip.state.star_particles.birth_key[star_row] == state.star_particles.birth_key[star_row]);
+    CHUI_REQUIRE(roundtrip.state.star_particles.parent_gas_cell_id[star_row] ==
            state.star_particles.parent_gas_cell_id[star_row]);
-    assert(roundtrip.state.star_particles.birth_tick[star_row] == state.star_particles.birth_tick[star_row]);
-    assert(roundtrip.state.star_particles.birth_ordinal[star_row] == state.star_particles.birth_ordinal[star_row]);
-    assert(std::abs(roundtrip.state.star_particles.birth_mass_code[star_row] -
+    CHUI_REQUIRE(roundtrip.state.star_particles.birth_tick[star_row] == state.star_particles.birth_tick[star_row]);
+    CHUI_REQUIRE(roundtrip.state.star_particles.birth_ordinal[star_row] == state.star_particles.birth_ordinal[star_row]);
+    CHUI_REQUIRE(std::abs(roundtrip.state.star_particles.birth_mass_code[star_row] -
                     state.star_particles.birth_mass_code[star_row]) < 1.0e-12);
-    assert(std::abs(roundtrip.state.star_particles.metallicity_mass_fraction[star_row] -
+    CHUI_REQUIRE(std::abs(roundtrip.state.star_particles.metallicity_mass_fraction[star_row] -
                     state.star_particles.metallicity_mass_fraction[star_row]) < 1.0e-12);
   }
-  assert(roundtrip.state.particle_sidecar.gravity_softening_comoving.size() ==
+  CHUI_REQUIRE(roundtrip.state.particle_sidecar.gravity_softening_comoving.size() ==
          roundtrip.state.particles.size());
   const auto assert_softening_for_id = [&](
       const std::uint64_t particle_id, const double expected_softening) {
@@ -589,8 +589,8 @@ void testRoundtripMixedSpeciesSnapshot() {
         break;
       }
     }
-    assert(roundtrip_index < roundtrip.state.particles.size());
-    assert(std::abs(
+    CHUI_REQUIRE(roundtrip_index < roundtrip.state.particles.size());
+    CHUI_REQUIRE(std::abs(
                roundtrip.state.particle_sidecar.gravity_softening_comoving[roundtrip_index] -
                expected_softening) < 1.0e-12);
   };
@@ -614,7 +614,7 @@ void testRoundtripMixedSpeciesSnapshot() {
     checksum_out += roundtrip.state.particles.position_x_comoving[i] +
                     roundtrip.state.particles.mass_code[i] * 0.001;
   }
-  assert(checksum_in == checksum_out);
+  CHUI_REQUIRE(checksum_in == checksum_out);
 
   bool restart_reader_rejected_snapshot = false;
   std::string restart_reader_error;
@@ -624,29 +624,29 @@ void testRoundtripMixedSpeciesSnapshot() {
     restart_reader_rejected_snapshot = true;
     restart_reader_error = ex.what();
   }
-  assert(restart_reader_rejected_snapshot);
-  assert(restart_reader_error.find("science_snapshot") != std::string::npos);
+  CHUI_REQUIRE(restart_reader_rejected_snapshot);
+  CHUI_REQUIRE(restart_reader_error.find("science_snapshot") != std::string::npos);
 
   hid_t legacy_file = H5Fopen(snapshot_path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(legacy_file >= 0);
+  CHUI_REQUIRE(legacy_file >= 0);
   hid_t legacy_provenance = H5Gopen2(legacy_file, "/Provenance", H5P_DEFAULT);
-  assert(legacy_provenance >= 0);
+  CHUI_REQUIRE(legacy_provenance >= 0);
   for (const char* attribute_name : {
            "gravity_treepm_tree_opening_criterion",
            "gravity_treepm_tree_opening_theta",
            "gravity_treepm_tree_relative_force_tolerance",
            "gravity_treepm_tree_relative_force_acceleration_floor"}) {
-    assert(H5Adelete(legacy_provenance, attribute_name) >= 0);
+    CHUI_REQUIRE(H5Adelete(legacy_provenance, attribute_name) >= 0);
   }
   H5Gclose(legacy_provenance);
   H5Fclose(legacy_file);
 
   const cosmosim::io::SnapshotReadResult legacy_roundtrip =
       cosmosim::io::readGadgetArepoSnapshotHdf5(snapshot_path, config);
-  assert(legacy_roundtrip.provenance.gravity_treepm_tree_opening_criterion == "com_distance");
-  assert(legacy_roundtrip.provenance.gravity_treepm_tree_opening_theta == 0.7);
-  assert(legacy_roundtrip.provenance.gravity_treepm_tree_relative_force_tolerance == 0.005);
-  assert(
+  CHUI_REQUIRE(legacy_roundtrip.provenance.gravity_treepm_tree_opening_criterion == "com_distance");
+  CHUI_REQUIRE(legacy_roundtrip.provenance.gravity_treepm_tree_opening_theta == 0.7);
+  CHUI_REQUIRE(legacy_roundtrip.provenance.gravity_treepm_tree_relative_force_tolerance == 0.005);
+  CHUI_REQUIRE(
       legacy_roundtrip.provenance.gravity_treepm_tree_relative_force_acceleration_floor ==
       1.0e-30);
 
@@ -663,8 +663,8 @@ void testRoundtripMixedSpeciesSnapshot() {
     threw = true;
     error_message = ex.what();
   }
-  assert(threw);
-  assert(error_message.find("COSMOSIM_ENABLE_HDF5=OFF") != std::string::npos);
+  CHUI_REQUIRE(threw);
+  CHUI_REQUIRE(error_message.find("COSMOSIM_ENABLE_HDF5=OFF") != std::string::npos);
 
   threw = false;
   error_message.clear();
@@ -674,8 +674,8 @@ void testRoundtripMixedSpeciesSnapshot() {
     threw = true;
     error_message = ex.what();
   }
-  assert(threw);
-  assert(error_message.find("COSMOSIM_ENABLE_HDF5=OFF") != std::string::npos);
+  CHUI_REQUIRE(threw);
+  CHUI_REQUIRE(error_message.find("COSMOSIM_ENABLE_HDF5=OFF") != std::string::npos);
 #endif
 }
 
@@ -686,33 +686,33 @@ void testMassTableFallbackSnapshotImport() {
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_snapshot_mass_table_only.hdf5");
 
   hid_t file = H5Fcreate(snapshot_path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-  assert(file >= 0);
+  CHUI_REQUIRE(file >= 0);
   hid_t header = H5Gcreate2(file, "/Header", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  assert(header >= 0);
+  CHUI_REQUIRE(header >= 0);
   hid_t part1 = H5Gcreate2(file, "/PartType1", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  assert(part1 >= 0);
+  CHUI_REQUIRE(part1 >= 0);
 
   const std::array<std::uint32_t, 6> counts = {0, 2, 0, 0, 0, 0};
   const std::array<std::uint32_t, 6> zeros = {0, 0, 0, 0, 0, 0};
   const std::array<double, 6> mass_table = {0.0, 5.0, 0.0, 0.0, 0.0, 0.0};
   hsize_t vec_dims[1] = {6};
   hid_t vec_space = H5Screate_simple(1, vec_dims, nullptr);
-  assert(vec_space >= 0);
+  CHUI_REQUIRE(vec_space >= 0);
   hid_t attr = H5Acreate2(header, "NumPart_ThisFile", H5T_STD_U32LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
-  assert(attr >= 0);
-  assert(H5Awrite(attr, H5T_NATIVE_UINT32, counts.data()) >= 0);
+  CHUI_REQUIRE(attr >= 0);
+  CHUI_REQUIRE(H5Awrite(attr, H5T_NATIVE_UINT32, counts.data()) >= 0);
   H5Aclose(attr);
   attr = H5Acreate2(header, "NumPart_Total", H5T_STD_U32LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
-  assert(attr >= 0);
-  assert(H5Awrite(attr, H5T_NATIVE_UINT32, counts.data()) >= 0);
+  CHUI_REQUIRE(attr >= 0);
+  CHUI_REQUIRE(H5Awrite(attr, H5T_NATIVE_UINT32, counts.data()) >= 0);
   H5Aclose(attr);
   attr = H5Acreate2(header, "NumPart_Total_HighWord", H5T_STD_U32LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
-  assert(attr >= 0);
-  assert(H5Awrite(attr, H5T_NATIVE_UINT32, zeros.data()) >= 0);
+  CHUI_REQUIRE(attr >= 0);
+  CHUI_REQUIRE(H5Awrite(attr, H5T_NATIVE_UINT32, zeros.data()) >= 0);
   H5Aclose(attr);
   attr = H5Acreate2(header, "MassTable", H5T_IEEE_F64LE, vec_space, H5P_DEFAULT, H5P_DEFAULT);
-  assert(attr >= 0);
-  assert(H5Awrite(attr, H5T_NATIVE_DOUBLE, mass_table.data()) >= 0);
+  CHUI_REQUIRE(attr >= 0);
+  CHUI_REQUIRE(H5Awrite(attr, H5T_NATIVE_DOUBLE, mass_table.data()) >= 0);
   H5Aclose(attr);
   H5Sclose(vec_space);
 
@@ -723,23 +723,23 @@ void testMassTableFallbackSnapshotImport() {
   const std::array<std::uint64_t, 2> ids = {1, 0};
   hsize_t coords_dims[2] = {2, 3};
   hid_t coords_space = H5Screate_simple(2, coords_dims, nullptr);
-  assert(coords_space >= 0);
+  CHUI_REQUIRE(coords_space >= 0);
   hid_t dataset = H5Dcreate2(part1, "Coordinates", H5T_IEEE_F64LE, coords_space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  assert(dataset >= 0);
-  assert(H5Dwrite(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, coords.data()) >= 0);
+  CHUI_REQUIRE(dataset >= 0);
+  CHUI_REQUIRE(H5Dwrite(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, coords.data()) >= 0);
   H5Dclose(dataset);
   dataset = H5Dcreate2(part1, "Velocities", H5T_IEEE_F64LE, coords_space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  assert(dataset >= 0);
-  assert(H5Dwrite(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, vels.data()) >= 0);
+  CHUI_REQUIRE(dataset >= 0);
+  CHUI_REQUIRE(H5Dwrite(dataset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, vels.data()) >= 0);
   H5Dclose(dataset);
   H5Sclose(coords_space);
 
   hsize_t id_dims[1] = {2};
   hid_t id_space = H5Screate_simple(1, id_dims, nullptr);
-  assert(id_space >= 0);
+  CHUI_REQUIRE(id_space >= 0);
   dataset = H5Dcreate2(part1, "ParticleIDs", H5T_STD_U64LE, id_space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  assert(dataset >= 0);
-  assert(H5Dwrite(dataset, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, ids.data()) >= 0);
+  CHUI_REQUIRE(dataset >= 0);
+  CHUI_REQUIRE(H5Dwrite(dataset, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, ids.data()) >= 0);
   H5Dclose(dataset);
   H5Sclose(id_space);
 
@@ -753,15 +753,15 @@ void testMassTableFallbackSnapshotImport() {
   import_options.dialect = cosmosim::io::SnapshotDialect::kChuiNative;
   const auto imported = cosmosim::io::importExternalSnapshotHdf5(
       snapshot_path, config, import_options);
-  assert(imported.state.particles.size() == 2);
-  assert(imported.state.particles.mass_code[0] == 5.0);
-  assert(imported.state.particles.mass_code[1] == 5.0);
-  assert(imported.state.particle_sidecar.particle_id[0] == 2U);
-  assert(imported.state.particle_sidecar.particle_id[1] == 1U);
-  assert(containsString(
+  CHUI_REQUIRE(imported.state.particles.size() == 2);
+  CHUI_REQUIRE(imported.state.particles.mass_code[0] == 5.0);
+  CHUI_REQUIRE(imported.state.particles.mass_code[1] == 5.0);
+  CHUI_REQUIRE(imported.state.particle_sidecar.particle_id[0] == 2U);
+  CHUI_REQUIRE(imported.state.particle_sidecar.particle_id[1] == 1U);
+  CHUI_REQUIRE(containsString(
       imported.report.present_aliases,
       "external_id_mapping=zero_present_plus_one_v1"));
-  assert(containsString(imported.report.defaulted_fields, "/PartType1/Masses=MassTable"));
+  CHUI_REQUIRE(containsString(imported.report.defaulted_fields, "/PartType1/Masses=MassTable"));
   std::filesystem::remove(snapshot_path);
 #else
   (void)config;
@@ -801,7 +801,7 @@ void testPersistentIdAndMissingFieldContracts() {
   } catch (const std::exception&) {
     zero_rejected = true;
   }
-  assert(zero_rejected);
+  CHUI_REQUIRE(zero_rejected);
   std::filesystem::remove(zero_path);
 
   cosmosim::core::SimulationState state;
@@ -815,10 +815,10 @@ void testPersistentIdAndMissingFieldContracts() {
       "missing_fields", "missing_fields", 0, payload.normalized_config_text);
   cosmosim::io::writeScienceSnapshotHdf5(path, payload);
   hid_t file = H5Fopen(path.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(file >= 0);
-  assert(H5Ldelete(file, "/PartType4/Metallicity", H5P_DEFAULT) >= 0);
-  assert(H5Ldelete(file, "/PartType3/TracerParentParticleID", H5P_DEFAULT) >= 0);
-  assert(H5Fclose(file) >= 0);
+  CHUI_REQUIRE(file >= 0);
+  CHUI_REQUIRE(H5Ldelete(file, "/PartType4/Metallicity", H5P_DEFAULT) >= 0);
+  CHUI_REQUIRE(H5Ldelete(file, "/PartType3/TracerParentParticleID", H5P_DEFAULT) >= 0);
+  CHUI_REQUIRE(H5Fclose(file) >= 0);
 
   bool reject_missing = false;
   try {
@@ -826,18 +826,18 @@ void testPersistentIdAndMissingFieldContracts() {
   } catch (const std::runtime_error&) {
     reject_missing = true;
   }
-  assert(reject_missing);
-  assert(!cosmosim::io::validateSnapshotSetHdf5(path).valid);
+  CHUI_REQUIRE(reject_missing);
+  CHUI_REQUIRE(!cosmosim::io::validateSnapshotSetHdf5(path).valid);
 
   cosmosim::io::SnapshotReadOptions unavailable_options;
   unavailable_options.missing_field_policy =
       cosmosim::io::SnapshotMissingFieldPolicy::kMarkUnavailable;
   const auto unavailable =
       cosmosim::io::readGadgetArepoSnapshotHdf5(path, config, unavailable_options);
-  assert(containsString(unavailable.report.unavailable_fields, "/PartType4/Metallicity"));
-  assert(containsString(unavailable.report.unavailable_fields, "/PartType3/TracerParentParticleID"));
-  assert(unavailable.report.analysis_ready);
-  assert(!unavailable.report.evolution_ready);
+  CHUI_REQUIRE(containsString(unavailable.report.unavailable_fields, "/PartType4/Metallicity"));
+  CHUI_REQUIRE(containsString(unavailable.report.unavailable_fields, "/PartType3/TracerParentParticleID"));
+  CHUI_REQUIRE(unavailable.report.analysis_ready);
+  CHUI_REQUIRE(!unavailable.report.evolution_ready);
   std::filesystem::remove(path);
 #endif
 }
@@ -894,10 +894,10 @@ void testSingleFileDistributedReadbackCompletionContract() {
       cosmosim::io::SnapshotCompletionIntegrityMode::kDistributedScienceReadback);
   const std::filesystem::path marker = directory / "snap_043.complete";
   const auto complete = cosmosim::io::inspectSnapshotSet(marker);
-  assert(complete.complete);
-  assert(complete.num_files_per_snapshot == 1U);
-  assert(complete.member_paths.size() == 1U);
-  assert(complete.member_paths.front().filename() == "snap_043.hdf5");
+  CHUI_REQUIRE(complete.complete);
+  CHUI_REQUIRE(complete.num_files_per_snapshot == 1U);
+  CHUI_REQUIRE(complete.member_paths.size() == 1U);
+  CHUI_REQUIRE(complete.member_paths.front().filename() == "snap_043.hdf5");
   cosmosim::io::validateSnapshotSetHdf5(marker).requireValid();
 
   // Production Parallel-HDF5 output has already compared every rank-owned ID
@@ -964,21 +964,21 @@ void testSnapshotSetCompletionContract() {
   }
 
   auto before_marker = cosmosim::io::inspectSnapshotSet(directory);
-  assert(before_marker.num_files_per_snapshot == 2U);
-  assert(before_marker.global_part_count == global_counts);
-  assert(!before_marker.complete);
+  CHUI_REQUIRE(before_marker.num_files_per_snapshot == 2U);
+  CHUI_REQUIRE(before_marker.global_part_count == global_counts);
+  CHUI_REQUIRE(!before_marker.complete);
 
   cosmosim::io::writeSnapshotSetCompletionMarker(
       directory, "snapshot_set_generation", 2U, global_counts, false);
   const auto complete = cosmosim::io::inspectSnapshotSet(directory);
-  assert(complete.complete);
-  assert(complete.member_paths.size() == 2U);
+  CHUI_REQUIRE(complete.complete);
+  CHUI_REQUIRE(complete.member_paths.size() == 2U);
   cosmosim::io::validateSnapshotSetHdf5(directory).requireValid();
   const auto merged = cosmosim::io::readCosmoSimScienceSnapshotHdf5(directory, config);
-  assert(merged.state.particles.size() == 4U);
-  assert(merged.report.analysis_ready);
-  assert(merged.report.evolution_ready);
-  assert(merged.state.validatePersistentParticleIds());
+  CHUI_REQUIRE(merged.state.particles.size() == 4U);
+  CHUI_REQUIRE(merged.report.analysis_ready);
+  CHUI_REQUIRE(merged.report.evolution_ready);
+  CHUI_REQUIRE(merged.state.validatePersistentParticleIds());
 
   cosmosim::io::SnapshotReadOptions constrained;
   constrained.budget.max_particles = 3U;
@@ -989,7 +989,7 @@ void testSnapshotSetCompletionContract() {
   } catch (const std::length_error&) {
     budget_rejected = true;
   }
-  assert(budget_rejected);
+  CHUI_REQUIRE(budget_rejected);
 
   cosmosim::io::SnapshotReadOptions byte_constrained;
   byte_constrained.budget.max_materialized_bytes = 1U;
@@ -1000,7 +1000,7 @@ void testSnapshotSetCompletionContract() {
   } catch (const std::length_error&) {
     byte_budget_rejected = true;
   }
-  assert(byte_budget_rejected);
+  CHUI_REQUIRE(byte_budget_rejected);
 
   // Marker presence alone is insufficient: it must bind the set metadata.
   const std::filesystem::path marker = directory / "snapshot_set_generation.complete";
@@ -1008,7 +1008,7 @@ void testSnapshotSetCompletionContract() {
   const std::string original_marker(
       (std::istreambuf_iterator<char>(original_marker_stream)),
       std::istreambuf_iterator<char>());
-  assert(!original_marker.empty());
+  CHUI_REQUIRE(!original_marker.empty());
   {
     std::ofstream stream(marker, std::ios::trunc);
     stream << "schema=chui_snapshot_set_v1\n"
@@ -1016,7 +1016,7 @@ void testSnapshotSetCompletionContract() {
            << "num_files_per_snapshot=2\n"
            << "global_part_count=1,1,0,0,0,0\n";
   }
-  assert(!cosmosim::io::inspectSnapshotSet(directory).complete);
+  CHUI_REQUIRE(!cosmosim::io::inspectSnapshotSet(directory).complete);
 
   // Restore the valid strong manifest, then prove member-level scientific
   // disagreement is rejected independently of manifest presence.
@@ -1026,13 +1026,13 @@ void testSnapshotSetCompletionContract() {
   }
   const auto member_one = directory / "snap_042.1.hdf5";
   hid_t mismatch_file = H5Fopen(member_one.string().c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
-  assert(mismatch_file >= 0);
+  CHUI_REQUIRE(mismatch_file >= 0);
   hid_t mismatch_header = H5Gopen2(mismatch_file, "/Header", H5P_DEFAULT);
-  assert(mismatch_header >= 0);
+  CHUI_REQUIRE(mismatch_header >= 0);
   hid_t omega_attr = H5Aopen(mismatch_header, "OmegaBaryon", H5P_DEFAULT);
-  assert(omega_attr >= 0);
+  CHUI_REQUIRE(omega_attr >= 0);
   double omega_baryon = 0.123456789;
-  assert(H5Awrite(omega_attr, H5T_NATIVE_DOUBLE, &omega_baryon) >= 0);
+  CHUI_REQUIRE(H5Awrite(omega_attr, H5T_NATIVE_DOUBLE, &omega_baryon) >= 0);
   H5Aclose(omega_attr);
   H5Gclose(mismatch_header);
   H5Fclose(mismatch_file);
@@ -1042,7 +1042,7 @@ void testSnapshotSetCompletionContract() {
   } catch (const std::runtime_error&) {
     member_mismatch_rejected = true;
   }
-  assert(member_mismatch_rejected);
+  CHUI_REQUIRE(member_mismatch_rejected);
   std::filesystem::remove_all(directory);
 #endif
 }

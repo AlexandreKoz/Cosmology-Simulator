@@ -784,8 +784,13 @@ The analytic pair law is still
 `(r*r+epsilon*epsilon)^(-3/2) - L(r,a)/r^3`, with `epsilon=max(epsilon_i,epsilon_j)`.
 `S(0)=1`, `L(0)=0`. For `q=r/(2a)<1/8`, evaluate
 `L/q^3 = (4/sqrt(pi))*sum(n=0..7, (-q*q)^n/(n!*(2n+3)))`.
-The coefficient limit is `1/(6*sqrt(pi)*a^3)`; exact coincident-pair residual
-calls preserve the prior finite-softening convention and zero vector force.
+The long-range coefficient limit is `1/(6*sqrt(pi)*a^3)`. At exactly zero
+radius with positive finite softening the residual coefficient is
+`epsilon^(-3) - 1/(6*sqrt(pi)*a^3)`, evaluated by a scaled subtraction to avoid
+`inf-inf`. At zero softening the established coincident coefficient remains
+zero. Production counts coincident direct interactions and returns their exact
+zero vector before multiplying an overflowing coefficient by zero. Analytic and
+lookup selections share this treatment; nonzero residuals and cutoff are unchanged.
 Checked APIs reject nonfinite/negative inputs; unchecked functions require
 prevalidated inputs. Representational overflow at extreme finite physical
 scales is not an additional supported arbitrary-precision contract.

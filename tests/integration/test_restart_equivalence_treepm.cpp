@@ -1,4 +1,4 @@
-#include <cassert>
+#include "../support/test_require.hpp"
 #include <cmath>
 #include <filesystem>
 #include <utility>
@@ -75,7 +75,7 @@ void applyProductionTreePmKick(cosmosim::tests::RestartEquivalenceStepContext& c
       options,
       nullptr,
       &diagnostics);
-  assert(std::isfinite(diagnostics.force_l2_total));
+  CHUI_REQUIRE(std::isfinite(diagnostics.force_l2_total));
 
   for (std::size_t active_slot = 0; active_slot < context.active_particle_indices.size(); ++active_slot) {
     const std::uint32_t particle_index = context.active_particle_indices[active_slot];
@@ -117,9 +117,9 @@ int main() {
   scenario.tolerances.scalar_abs = 1.0e-12;
   const auto result = cosmosim::tests::runRestartEquivalenceScenario(std::move(scenario));
   const auto pm_state = result.restarted_integrator_state.pm_sync_state.exportPersistentState();
-  assert(pm_state.cadence_steps == 3);
-  assert(pm_state.field_version == result.direct_integrator_state.pm_sync_state.exportPersistentState().field_version);
-  assert(result.restarted_integrator_state.pm_long_range_field_valid);
+  CHUI_REQUIRE(pm_state.cadence_steps == 3);
+  CHUI_REQUIRE(pm_state.field_version == result.direct_integrator_state.pm_sync_state.exportPersistentState().field_version);
+  CHUI_REQUIRE(result.restarted_integrator_state.pm_long_range_field_valid);
   std::filesystem::remove(restart_path);
 #endif
   return 0;

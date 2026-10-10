@@ -1,5 +1,5 @@
+#include "../support/test_require.hpp"
 #include <array>
-#include <cassert>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -32,17 +32,17 @@ void testDeterministicActivationOrder() {
 
   for (std::size_t step = 0; step < expected.size(); ++step) {
     const auto active = scheduler.beginSubstep();
-    assert(active.size() == expected[step].size());
+    CHUI_REQUIRE(active.size() == expected[step].size());
     for (std::size_t i = 0; i < active.size(); ++i) {
-      assert(active[i] == expected[step][i]);
+      CHUI_REQUIRE(active[i] == expected[step][i]);
     }
     scheduler.endSubstep();
   }
 
   const auto& diagnostics = scheduler.diagnostics();
-  assert(diagnostics.occupancy_by_bin[0] == 2);
-  assert(diagnostics.occupancy_by_bin[1] == 2);
-  assert(diagnostics.occupancy_by_bin[2] == 2);
+  CHUI_REQUIRE(diagnostics.occupancy_by_bin[0] == 2);
+  CHUI_REQUIRE(diagnostics.occupancy_by_bin[1] == 2);
+  CHUI_REQUIRE(diagnostics.occupancy_by_bin[2] == 2);
 }
 
 
@@ -59,21 +59,21 @@ void testDiagnosticsDoNotAlterSchedulerTruth() {
   const auto active = scheduler.beginSubstep();
   (void)active;
   const auto& diagnostics = scheduler.diagnostics();
-  assert(diagnostics.occupancy_by_bin.size() == 4);
-  assert(diagnostics.active_count_by_bin.size() == 4);
+  CHUI_REQUIRE(diagnostics.occupancy_by_bin.size() == 4);
+  CHUI_REQUIRE(diagnostics.active_count_by_bin.size() == 4);
   const auto after_diagnostics = scheduler.exportPersistentState();
-  assert(after_diagnostics.current_tick == before.current_tick);
-  assert(after_diagnostics.max_bin == before.max_bin);
-  assert(after_diagnostics.bin_index == before.bin_index);
-  assert(after_diagnostics.next_activation_tick == before.next_activation_tick);
-  assert(after_diagnostics.pending_bin_index == before.pending_bin_index);
+  CHUI_REQUIRE(after_diagnostics.current_tick == before.current_tick);
+  CHUI_REQUIRE(after_diagnostics.max_bin == before.max_bin);
+  CHUI_REQUIRE(after_diagnostics.bin_index == before.bin_index);
+  CHUI_REQUIRE(after_diagnostics.next_activation_tick == before.next_activation_tick);
+  CHUI_REQUIRE(after_diagnostics.pending_bin_index == before.pending_bin_index);
 
   const std::uint32_t active_sum = diagnostics.active_elements;
   (void)active_sum;
   const auto after_read = scheduler.exportPersistentState();
-  assert(after_read.bin_index == before.bin_index);
-  assert(after_read.next_activation_tick == before.next_activation_tick);
-  assert(after_read.pending_bin_index == before.pending_bin_index);
+  CHUI_REQUIRE(after_read.bin_index == before.bin_index);
+  CHUI_REQUIRE(after_read.next_activation_tick == before.next_activation_tick);
+  CHUI_REQUIRE(after_read.pending_bin_index == before.pending_bin_index);
 }
 
 void testImportRejectsSchedulerSchemaInconsistency() {
@@ -94,7 +94,7 @@ void testImportRejectsSchedulerSchemaInconsistency() {
   } catch (const std::invalid_argument&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 }  // namespace

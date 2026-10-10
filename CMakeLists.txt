@@ -130,7 +130,7 @@ function(cosmosim_apply_test_defaults)
       list(APPEND cosmosim_existing_labels python)
     endif()
 
-    if(COSMOSIM_ENABLE_MPI AND cosmosim_test_name MATCHES "two_rank|three_rank|four_rank|eight_rank|mpi_np[0-9]+")
+    if(COSMOSIM_ENABLE_MPI AND cosmosim_test_name MATCHES "two_rank|three_rank|four_rank|eight_rank|[2348]_rank|_np[0-9]+$")
       list(APPEND cosmosim_existing_labels mpi distributed)
     endif()
     if(cosmosim_test_name MATCHES "runtime_app_smoke")
@@ -142,16 +142,25 @@ function(cosmosim_apply_test_defaults)
       set(cosmosim_timeout "${COSMOSIM_CTEST_LONG_TIMEOUT_SECONDS}")
     endif()
 
-    set_tests_properties(${cosmosim_test_name}
-      PROPERTIES
-        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-        TIMEOUT "${cosmosim_timeout}")
+    # Explicit fixture directories and deadlock budgets belong to each test.
+    get_property(cosmosim_has_directory TEST ${cosmosim_test_name} PROPERTY WORKING_DIRECTORY SET)
+    get_property(cosmosim_has_timeout TEST ${cosmosim_test_name} PROPERTY TIMEOUT SET)
+    if(NOT cosmosim_has_directory)
+      set_tests_properties(${cosmosim_test_name} PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+    endif()
+    if(NOT cosmosim_has_timeout)
+      set_tests_properties(${cosmosim_test_name} PROPERTIES TIMEOUT "${cosmosim_timeout}")
+    endif()
 
-    if(cosmosim_test_name MATCHES "four_rank")
+    if(cosmosim_test_name MATCHES "_np([0-9]+)$")
+      set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS ${CMAKE_MATCH_1})
+    elseif(cosmosim_test_name MATCHES "eight_rank|8_rank")
+      set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 8)
+    elseif(cosmosim_test_name MATCHES "four_rank|4_rank")
       set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 4)
-    elseif(cosmosim_test_name MATCHES "three_rank")
+    elseif(cosmosim_test_name MATCHES "three_rank|3_rank")
       set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 3)
-    elseif(cosmosim_test_name MATCHES "two_rank")
+    elseif(cosmosim_test_name MATCHES "two_rank|2_rank")
       set_tests_properties(${cosmosim_test_name} PROPERTIES PROCESSORS 2)
     endif()
 
@@ -930,6 +939,15 @@ if(COSMOSIM_ENABLE_TESTS)
     add_test(
       NAME integration_chui_launcher
       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/test_chui_launcher.py ${PROJECT_SOURCE_DIR}/chui)
+  endif()
+
+  if(Python3_Interpreter_FOUND AND Python3_VERSION VERSION_GREATER_EQUAL "3.8")
+    add_test(NAME python_treepm_snapshot_tools
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/python/test_treepm_snapshot_tools.py)
+    set_tests_properties(python_treepm_snapshot_tools PROPERTIES
+      SKIP_RETURN_CODE 77 LABELS "python;hdf5;treepm;snapshot;integrity;qualification")
+  else()
+    message(STATUS "Offline TreePM snapshot tests unavailable: Python >=3.8 interpreter required")
   endif()
 
   add_executable(test_unit_runtime_resources tests/unit/test_runtime_resources.cpp)
@@ -2219,9 +2237,9 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_validation_tree_pm_ewald_accuracy PRIVATE cosmosim_gravity)
   if(COSMOSIM_ENABLE_FFTW)
     add_test(NAME validation_tree_pm_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy)
-    add_test(NAME validation_tree_pm_recovery_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy)
+    add_test(NAME validation_tree_pm_recovery_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy --recovery-qualification)
     set_tests_properties(validation_tree_pm_recovery_ewald_accuracy PROPERTIES
-      ENVIRONMENT "COSMOSIM_TREEPM_RECOVERY_QUALIFICATION=1;COSMOSIM_EWALD_SOFTENING_RATIO=0.016637952"
+      ENVIRONMENT "COSMOSIM_EWALD_SOFTENING_RATIO=0.016637952"
       LABELS "validation;gravity;treepm;periodic;accuracy;production_fft;qualification")
     set_tests_properties(
       validation_tree_pm_ewald_accuracy

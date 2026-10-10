@@ -1,5 +1,11 @@
 # Unified TreePM performance recovery and hierarchical qualification — 20261010
 
+
+Follow-up source repairs supersede the coincident coefficient, offline snapshot
+reader, restart compatibility and test-selection contracts described below; see
+[the qualification/reliability repair](treepm_p1p5_qualification_and_test_reliability_repair_20261010.md). This original campaign
+report remains historical evidence of implementation, not executed qualification.
+
 Mode: feature implementation with targeted correctness repairs, using the current
 checkout. The starting working tree was clean. The older supplied archive was
 not used. The external P0 profile is accepted as supplied evidence; none of its
