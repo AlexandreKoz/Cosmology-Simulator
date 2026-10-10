@@ -1375,11 +1375,19 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
       }
     }
     if (all_rows.size() != state.particles.size()) throw std::logic_error("hierarchical drift identity scratch is not admitted");
-    integrator.inside_kdk_step = true;
-    integrator.last_completed_restart_safe = false;
+    for (std::size_t row = 0U; row < all_rows.size(); ++row) {
+      if (all_rows[row] != row) throw std::logic_error("hierarchical all-source drift requires the exact identity row set");
+    }
+    if (!std::isfinite(integrator.dt_time_code) || integrator.dt_time_code <= 0.0 ||
+        state.homogeneousDmoLastDriftTimeCode() != integrator.current_time_code ||
+        state.homogeneousDmoLastDriftScaleFactor() != integrator.current_scale_factor) {
+      throw std::logic_error("hierarchical block requires positive quantum and synchronized source position epoch");
+    }
     active = particles.beginSubstep();
     static_cast<void>(cells.beginSubstep());
     if (active.size() != all_rows.size()) throw std::logic_error("block start is not all-active");
+    integrator.inside_kdk_step = true;
+    integrator.last_completed_restart_safe = false;
   });
   const auto kick_integral = [&](std::size_t begin, std::size_t end, double a_now) {
     // dp/dt=A/a. Store u=p/a at the COMMON current position epoch, so kick
@@ -1428,6 +1436,8 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
         context.active_gravity_particles = {};
         context.has_active_gravity_particles = false;
         context.workspace = &workspace;
+        context.particle_scheduler = &particles;
+        context.gas_cell_scheduler = &cells;
         context.cosmology_background = background;
         context.mode_policy = mode_policy;
         context.profiler_session = profiler;
@@ -3243,6 +3253,28 @@ double computeComovingGravityTimeStep(
        .acceleration_magnitude_code =
            input.scale_free_acceleration_magnitude_code / scale_factor_cubed},
       eta);
+}
+
+double computeComovingDisplacementTimeStep(const ComovingDisplacementTimeStepInput& input) {
+  if (!std::isfinite(input.mesh_or_split_length_comoving_code) ||
+      input.mesh_or_split_length_comoving_code <= 0.0 ||
+      !std::isfinite(input.velocity_magnitude_peculiar_code) ||
+      input.velocity_magnitude_peculiar_code < 0.0 ||
+      !std::isfinite(input.scale_free_acceleration_magnitude_code) ||
+      input.scale_free_acceleration_magnitude_code < 0.0 ||
+      !std::isfinite(input.scale_factor) || input.scale_factor <= 0.0) {
+    throw std::invalid_argument("comoving displacement timestep requires finite positive length/scale and nonnegative speed/acceleration");
+  }
+  // At the synchronized epoch v_com=u/a, g_com=A/a^3. In an expanding
+  // background these frozen-epoch denominators are conservative. Solve
+  // v_com dt + g_com dt^2/2 <= ell without cancellation. This is a local
+  // resolution-crossing estimate, not a bound on subsequent force growth.
+  const long double a = input.scale_factor;
+  const long double v = input.velocity_magnitude_peculiar_code/a;
+  const long double g = ((input.scale_free_acceleration_magnitude_code/a)/a)/a;
+  const long double ell = input.mesh_or_split_length_comoving_code;
+  if (v == 0.0L && g == 0.0L) return std::numeric_limits<double>::infinity();
+  return static_cast<double>(2.0L*ell/(v + std::hypot(v,std::sqrt(2.0L*g*ell))));
 }
 
 double combineTimeStepCriteria(

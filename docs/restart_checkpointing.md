@@ -450,3 +450,22 @@ transient topology across an uninterrupted run, and spatial EMA starts cold on
 restart; compare these modes separately without an unsupported bitwise claim.
 New normalized config fields change hashes; readers remain compatible, while
 strict workflow hash matching is not relaxed.
+
+## TreePM recovery continuation note — 20261010
+
+This campaign changes no snapshot/restart dataset or schema version. The
+hierarchical dispatcher checks the exact admitted all-source row set and the
+common synchronized position epoch before opening a block; endpoint publication
+and scheduler-owned alignment remain mandatory. The workflow adds a globally
+reduced mesh/split displacement restriction to the coarse interval, so nonzero
+rung trajectories/step counts can differ from the earlier provisional source.
+No force bootstrap is removed, and no new force history is serialized.
+
+The two normalized booleans `numerics.treepm_gaussian_pair_lookup_enabled` and
+`numerics.treepm_full_mac_diagnostics` enter the existing config/provenance hash.
+Old `.param.txt` files obtain defaults, but normalizing them with this version
+changes their hash. Existing strict restart/config compatibility is preserved;
+the campaign does not authorize bypassing it for old checkpoints. The immutable
+coefficient table is derived runtime cache data and is rebuilt on demand after
+restart. Fixed octant traversal changes accumulation order, so old force-vector
+checksums are numerical baselines rather than new bitwise replay expectations.

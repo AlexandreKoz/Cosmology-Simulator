@@ -1178,6 +1178,8 @@ struct ConfigKeySpec {
       {"numerics.treepm_tree_opening_theta", "0.7"},
       {"numerics.treepm_tree_relative_force_tolerance", "0.005"},
       {"numerics.treepm_tree_relative_force_acceleration_floor", "1.0e-30"},
+      {"numerics.treepm_gaussian_pair_lookup_enabled", "false"},
+      {"numerics.treepm_full_mac_diagnostics", "true"},
       {"numerics.treepm_adaptive_acceptance_enabled", "false"},
       {"numerics.treepm_adaptive_maximum_opening_angle", "0.25"},
       {"numerics.treepm_identical_source_tree_reuse_enabled", "false"},
@@ -2316,6 +2318,10 @@ class NormalizedConfigStream {
          << frozen.config.numerics.treepm_tree_relative_force_tolerance << '\n';
   stream << "treepm_tree_relative_force_acceleration_floor = "
          << frozen.config.numerics.treepm_tree_relative_force_acceleration_floor << '\n';
+  stream << "treepm_gaussian_pair_lookup_enabled = "
+         << (frozen.config.numerics.treepm_gaussian_pair_lookup_enabled ? "true" : "false") << '\n';
+  stream << "treepm_full_mac_diagnostics = "
+         << (frozen.config.numerics.treepm_full_mac_diagnostics ? "true" : "false") << '\n';
   stream << "treepm_adaptive_acceptance_enabled = "
          << (frozen.config.numerics.treepm_adaptive_acceptance_enabled ? "true" : "false") << '\n';
   stream << "treepm_adaptive_maximum_opening_angle = "
@@ -3005,6 +3011,12 @@ class NormalizedConfigStream {
           "numerics.treepm_tree_relative_force_acceleration_floor",
           defaultFor("numerics.treepm_tree_relative_force_acceleration_floor")),
       "numerics.treepm_tree_relative_force_acceleration_floor");
+  frozen.config.numerics.treepm_gaussian_pair_lookup_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_gaussian_pair_lookup_enabled", defaultFor("numerics.treepm_gaussian_pair_lookup_enabled")),
+      "numerics.treepm_gaussian_pair_lookup_enabled");
+  frozen.config.numerics.treepm_full_mac_diagnostics = parseBool(
+      requireString(entries, consumed, "numerics.treepm_full_mac_diagnostics", defaultFor("numerics.treepm_full_mac_diagnostics")),
+      "numerics.treepm_full_mac_diagnostics");
   frozen.config.numerics.treepm_adaptive_acceptance_enabled = parseBool(
       requireString(entries, consumed, "numerics.treepm_adaptive_acceptance_enabled",
                     defaultFor("numerics.treepm_adaptive_acceptance_enabled")),

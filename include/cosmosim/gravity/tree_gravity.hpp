@@ -67,6 +67,7 @@ struct TreeGravityProfile {
   std::uint64_t accepted_leaves = 0;
   std::uint64_t selected_mac_rejections = 0;
   std::uint64_t relative_mac_rejections = 0;
+  std::uint64_t skipped_mac_evaluations = 0;
   std::uint64_t maximum_angle_rejections = 0;
   std::uint64_t strict_envelope_rejections = 0;
   std::uint64_t softening_rejections = 0;

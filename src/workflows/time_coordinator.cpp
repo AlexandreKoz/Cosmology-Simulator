@@ -1490,16 +1490,40 @@ void TimeCoordinator::runHierarchicalSegment(
           .scale_factor = integrator.current_scale_factor}, 0.2);
     };
     double local_min = std::numeric_limits<double>::infinity();
+    double local_speed_max = 0.0;
+    double local_acceleration_max = 0.0;
     preparation_failure = {};
     try {
       if (ax.size() != state.particles.size() || ay.size() != ax.size() || az.size() != ax.size()) {
         throw std::logic_error("hierarchical timestep criteria lack synchronized total force rows");
       }
-      for (const auto row : all_rows) local_min = std::min(local_min, criterion(row));
+      for (const auto row : all_rows) {
+        local_min = std::min(local_min, criterion(row));
+        const double speed = std::hypot(state.particles.velocity_x_peculiar[row],
+            state.particles.velocity_y_peculiar[row], state.particles.velocity_z_peculiar[row]);
+        const double acceleration = std::hypot(ax[row], ay[row], az[row]);
+        if (!std::isfinite(speed) || !std::isfinite(acceleration)) {
+          throw std::runtime_error("hierarchical coarse criterion received nonfinite speed or force");
+        }
+        local_speed_max = std::max(local_speed_max, speed);
+        local_acceleration_max = std::max(local_acceleration_max, acceleration);
+      }
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical timestep criteria");
     const auto periods = particles.binPeriodTicks(particles.maxBin());
     double coarse_dt = mpi.allreduceMinDouble(local_min) * static_cast<double>(periods);
+    const double speed_max = -mpi.allreduceMinDouble(-local_speed_max);
+    const double acceleration_max = -mpi.allreduceMinDouble(-local_acceleration_max);
+    const double dx = config.cosmology.box_size_x_mpc_comoving / config.numerics.treepm_pm_grid_nx;
+    const double dy = config.cosmology.box_size_y_mpc_comoving / config.numerics.treepm_pm_grid_ny;
+    const double dz = config.cosmology.box_size_z_mpc_comoving / config.numerics.treepm_pm_grid_nz;
+    const double split_scale = config.numerics.treepm_asmth_cells*std::cbrt(dx*dy*dz);
+    const double displacement_dt = core::computeComovingDisplacementTimeStep({
+        .mesh_or_split_length_comoving_code = std::min({dx,dy,dz,split_scale}),
+        .velocity_magnitude_peculiar_code = speed_max,
+        .scale_free_acceleration_magnitude_code = acceleration_max,
+        .scale_factor = background != nullptr ? integrator.current_scale_factor : 1.0});
+    coarse_dt = std::min(coarse_dt, displacement_dt);
     if (background != nullptr) coarse_dt = std::min(coarse_dt, core::computeCosmologyExpansionTimeStep(
         *background, integrator.current_scale_factor, config.numerics.cosmology_max_delta_ln_a,
         config.numerics.cosmology_max_hubble_time_fraction, integrator.time_si_per_code));
@@ -1536,7 +1560,8 @@ void TimeCoordinator::runHierarchicalSegment(
         .simulation_time_code = integrator.current_time_code, .scale_factor = integrator.current_scale_factor,
         .message = "source-implemented synchronized power-of-two DMO KDK block; qualification pending",
         .payload = {{"quantum_time_code", formatRuntimeDouble(quantum)},
-            {"coarse_interval_time_code", formatRuntimeDouble(coarse_dt)}, {"fine_ticks", std::to_string(periods)},
+            {"coarse_interval_time_code", formatRuntimeDouble(coarse_dt)},
+            {"pm_displacement_limit_time_code", formatRuntimeDouble(displacement_dt)}, {"fine_ticks", std::to_string(periods)},
             {"pm_policy", "coarse_endpoint_half_kicks"}, {"rung_assignment", "fixed_within_block"}}});
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical output and event preparation");

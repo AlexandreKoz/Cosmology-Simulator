@@ -765,3 +765,56 @@ targets. Ordinary callers leave these spans empty and retain total-force
 behavior. `short_range_only` is an integrator split surface, forbids PM
 refresh/capture and zoom correction, and returns short-range-only diagnostics.
 Existing explicit PM cache-reuse compatibility rules are unchanged.
+
+## Unified recovery implementation (2026-10-10)
+
+Production DFS pushes children in reverse octant order and visits increasing
+octants. There is no child-distance sorting or child-order geometry. This changes
+summation order, preserving identities, pair softening, MACs and inclusive cutoff.
+Worker stacks keep the existing `1+7*max_depth` bound and overflow exception.
+
+Node-center nearest-image deltas are evaluated once per visited node with all
+three axis lengths. AABB cutoff/containment uses squared distances, with the
+former square-root comparison retained within eight machine epsilons of the
+cutoff and for extreme/nonfinite squared scales. Leaves omit COM/MAC geometry;
+internal nodes reuse the same center deltas for containment. General `nearbyint`
+minimum-image behavior, including half-box ties and multiple wraps, is retained.
+
+The analytic pair law is still
+`(r*r+epsilon*epsilon)^(-3/2) - L(r,a)/r^3`, with `epsilon=max(epsilon_i,epsilon_j)`.
+`S(0)=1`, `L(0)=0`. For `q=r/(2a)<1/8`, evaluate
+`L/q^3 = (4/sqrt(pi))*sum(n=0..7, (-q*q)^n/(n!*(2n+3)))`.
+The coefficient limit is `1/(6*sqrt(pi)*a^3)`; exact coincident-pair residual
+calls preserve the prior finite-softening convention and zero vector force.
+Checked APIs reject nonfinite/negative inputs; unchecked functions require
+prevalidated inputs. Representational overflow at extreme finite physical
+scales is not an additional supported arbitrary-precision contract.
+
+`TreePmGaussianCoefficientTable` is an additive public diagnostic/kernel API.
+It tabulates `H(t)=L(sqrt(t))/t^(3/2)`, `t=(r/(2a))^2`, using 4096 Hermite cells
+on `[0,64]`. Near zero the same analytic series is used. Endpoints/outside values
+use analytic fallback. The standalone target is **absolute H error <=5e-11**;
+this is an unexecuted regression budget, not a relative residual-force bound.
+The enabled coordinator lazily reserves and owns one immutable 65,552-byte
+array object (`sizeof` is authoritative), retained until coordinator destruction.
+Initialization precedes OpenMP traversal and participates in collective failure
+handling. Split changes use new dimensionless coordinates/normalization without
+rebuilding the table. Uniform and variable pair softenings share this table.
+
+`TreePmOptions::gaussian_pair_lookup_enabled=false` and
+`full_mac_diagnostics=true` preserve analytic/full accounting defaults. The
+additive `residual_block_size` direct-API option is bounded to `[1,4096]`, defaults
+to 64, and is intended for the serial diagnostic sweep. Production workflow
+block size remains 64; its memory preflight models that default. Nondefault
+embedded block sizes require the caller to model the corresponding diagnostic
+scratch capacity. No production configuration alias is introduced for it.
+
+In adaptive acceptance, the Newtonian operand of the residual-error `max` is
+checked before expensive derivatives. A proven rejection preserves its existing
+relative-MAC counter. Fast diagnostics additionally skip the entire selected MAC
+after independent rejection, count every cheap failed guard, and explicitly
+count skipped MACs. Full diagnostics retain overlapping failed-guard counts.
+No force-history floor is fabricated. Existing `alpha=0.005`, maximum angle
+`0.25`, strict envelope, softening, and cutoff containment remain enforced.
+Quadrupoles retain analytic derivative-consistent radial terms and the full
+second-moment trace; the pair table never supplies multipole derivatives.

@@ -1,5 +1,17 @@
 # Repair open issues
 
+## Unified TreePM recovery qualification pending — 20261010
+
+The [source handoff](repair/treepm_unified_performance_recovery_20261010.md)
+implements P1–P5 changes and tests without executing compilation or validation,
+as requested. Gaussian lookup is opt-in; full overlapping MAC counters remain
+default; hierarchical KDK stays provisional with rung-zero production default.
+Pending gates include full-snapshot force/timing comparisons, FFTW Ewald,
+MPI/thread equivalence, governed allocation failure, hierarchical restart and
+growth/power refinement. The historical P0 snapshot/oracle tools are absent from
+this checkout; the new frozen-source driver does not impersonate them. Nonlinear
+long-time and isolated-orbit hierarchical qualification remain open extensions.
+
 ## P6 qualification pending — campaign label 20261006
 
 P6 is source implementation only. No P6 subsystem has new validation evidence.

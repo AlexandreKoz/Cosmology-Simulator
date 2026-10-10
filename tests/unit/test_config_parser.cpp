@@ -1570,7 +1570,28 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
 
 }  // namespace
 
+void testTreePmPerformanceFlagsRoundTrip() {
+  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
+      "[numerics]\ntreepm_gaussian_pair_lookup_enabled = true\ntreepm_full_mac_diagnostics = false\n",
+      "treepm_performance_flags");
+  assert(frozen.config.numerics.treepm_gaussian_pair_lookup_enabled);
+  assert(!frozen.config.numerics.treepm_full_mac_diagnostics);
+  const auto replay = cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text,"flags_replay");
+  assert(replay.config.numerics.treepm_gaussian_pair_lookup_enabled);
+  assert(!replay.config.numerics.treepm_full_mac_diagnostics);
+  const auto defaults = cosmosim::core::loadFrozenConfigFromString("","flags_defaults");
+  assert(!defaults.config.numerics.treepm_gaussian_pair_lookup_enabled);
+  assert(defaults.config.numerics.treepm_full_mac_diagnostics);
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        "[numerics]\ntreepm_gaussian_pair_lookup_enabled = maybe\n", "flags_invalid");
+  } catch (const cosmosim::core::ConfigError&) { rejected = true; }
+  assert(rejected);
+}
+
 int main() {
+  testTreePmPerformanceFlagsRoundTrip();
   testCommentsWhitespaceSectionsAndUnits();
   testDuplicateKeyFails();
   testRequiredSectionAndFieldFailures();

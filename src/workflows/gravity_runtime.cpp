@@ -418,6 +418,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_tree_pm_options.acceptance_policy = config.numerics.treepm_adaptive_acceptance_enabled
         ? gravity::TreePmAcceptancePolicy::kAdaptiveRelative
         : gravity::TreePmAcceptancePolicy::kStrictReference;
+    m_tree_pm_options.gaussian_pair_lookup_enabled = config.numerics.treepm_gaussian_pair_lookup_enabled;
+    m_tree_pm_options.full_mac_diagnostics = config.numerics.treepm_full_mac_diagnostics;
     m_tree_pm_options.adaptive_maximum_opening_angle =
         config.numerics.treepm_adaptive_maximum_opening_angle;
     m_tree_pm_options.tree_options.gravitational_constant_code =
@@ -1013,6 +1015,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
                  m_tree_pm_options.tree_options.opening_criterion ==
                     gravity::TreeOpeningCriterion::kRelativeForceError),
                 .hierarchical_kdk_enabled = m_config.numerics.hierarchical_max_rung > 0,
+                .gaussian_pair_lookup_enabled = m_config.numerics.treepm_gaussian_pair_lookup_enabled,
                 .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
                 .multipole_order = m_tree_pm_options.tree_options.multipole_order,
                 .pm_shape = m_pm_grid_shape,
@@ -1043,6 +1046,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
     }
     std::uint64_t phase_resident_peak =
         governed_peak.known_peak_bytes - governed_peak.communication_arena_bytes;
+    if (m_config.numerics.treepm_gaussian_pair_lookup_enabled) {
+      // The coefficient table has its own persistent commitment. Keep it in
+      // whole-runtime preflight, exclude it from this overlapping phase lease.
+      const auto table_bytes = sizeof(gravity::TreePmGaussianCoefficientTable);
+      if (table_bytes > phase_resident_peak) throw std::logic_error("Gaussian table exceeds modeled gravity peak");
+      phase_resident_peak -= table_bytes;
+    }
     if (representation == gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo) {
       // The sole uint32 identity lane is physically owned and admitted by the
       // governed TransientStepWorkspace scratch arena. The gravity estimate
@@ -1398,6 +1408,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
              m_tree_pm_options.tree_options.opening_criterion ==
                 gravity::TreeOpeningCriterion::kRelativeForceError),
             .hierarchical_kdk_enabled = m_config.numerics.hierarchical_max_rung > 0,
+            .gaussian_pair_lookup_enabled = m_config.numerics.treepm_gaussian_pair_lookup_enabled,
             .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
             .multipole_order = m_tree_pm_options.tree_options.multipole_order,
             .pm_shape = m_pm_grid_shape,
@@ -2059,6 +2070,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
       context.profiler_session->counters().addCount("treepm.local.cutoff_skipped_pairs", m_last_tree_pm_diagnostics.local_traversal.cutoff_skipped_pairs);
       context.profiler_session->counters().addCount("treepm.local.selected_mac_rejections", m_last_tree_pm_diagnostics.local_traversal.selected_mac_rejections);
       context.profiler_session->counters().addCount("treepm.local.relative_mac_rejections", m_last_tree_pm_diagnostics.local_traversal.relative_mac_rejections);
+      context.profiler_session->counters().addCount("treepm.local.skipped_mac_evaluations", m_last_tree_pm_diagnostics.local_traversal.skipped_mac_evaluations);
       context.profiler_session->counters().addCount("treepm.local.maximum_angle_rejections", m_last_tree_pm_diagnostics.local_traversal.maximum_angle_rejections);
       context.profiler_session->counters().addCount("treepm.local.strict_envelope_rejections", m_last_tree_pm_diagnostics.local_traversal.strict_envelope_rejections);
       context.profiler_session->counters().addCount("treepm.local.softening_rejections", m_last_tree_pm_diagnostics.local_traversal.softening_rejections);
@@ -2075,6 +2087,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
       context.profiler_session->counters().addCount("treepm.incoming.cutoff_skipped_pairs", m_last_tree_pm_diagnostics.incoming_traversal.cutoff_skipped_pairs);
       context.profiler_session->counters().addCount("treepm.incoming.selected_mac_rejections", m_last_tree_pm_diagnostics.incoming_traversal.selected_mac_rejections);
       context.profiler_session->counters().addCount("treepm.incoming.relative_mac_rejections", m_last_tree_pm_diagnostics.incoming_traversal.relative_mac_rejections);
+      context.profiler_session->counters().addCount("treepm.incoming.skipped_mac_evaluations", m_last_tree_pm_diagnostics.incoming_traversal.skipped_mac_evaluations);
       context.profiler_session->counters().addCount("treepm.incoming.maximum_angle_rejections", m_last_tree_pm_diagnostics.incoming_traversal.maximum_angle_rejections);
       context.profiler_session->counters().addCount("treepm.incoming.strict_envelope_rejections", m_last_tree_pm_diagnostics.incoming_traversal.strict_envelope_rejections);
       context.profiler_session->counters().addCount("treepm.incoming.softening_rejections", m_last_tree_pm_diagnostics.incoming_traversal.softening_rejections);
@@ -2169,6 +2182,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .message = "locality-driven TreePM short-range communication metrics",
           .payload = {
               {"tree_acceptance_policy", m_config.numerics.treepm_adaptive_acceptance_enabled ? "adaptive_relative" : "strict_reference"},
+              {"gaussian_pair_kernel", m_tree_pm_options.gaussian_pair_lookup_enabled ? "lookup_experimental" : "analytic"},
+              {"mac_accounting", m_tree_pm_options.full_mac_diagnostics ? "full_overlapping" : "fast_guard_short_circuit"},
               {"adaptive_maximum_opening_angle", formatRuntimeDouble(m_tree_pm_options.adaptive_maximum_opening_angle)},
               {"tree_full_rebuild_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.full_rebuild_ms)},
               {"tree_build_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.build_ms)},
@@ -2198,6 +2213,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"local_cutoff_skipped_pairs", std::to_string(m_last_tree_pm_diagnostics.local_traversal.cutoff_skipped_pairs)},
               {"local_selected_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.selected_mac_rejections)},
               {"local_relative_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.relative_mac_rejections)},
+              {"local_skipped_mac_evaluations", std::to_string(m_last_tree_pm_diagnostics.local_traversal.skipped_mac_evaluations)},
               {"local_maximum_angle_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.maximum_angle_rejections)},
               {"local_strict_envelope_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.strict_envelope_rejections)},
               {"local_softening_rejections", std::to_string(m_last_tree_pm_diagnostics.local_traversal.softening_rejections)},
@@ -2214,6 +2230,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"incoming_cutoff_skipped_pairs", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.cutoff_skipped_pairs)},
               {"incoming_selected_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.selected_mac_rejections)},
               {"incoming_relative_mac_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.relative_mac_rejections)},
+              {"incoming_skipped_mac_evaluations", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.skipped_mac_evaluations)},
               {"incoming_maximum_angle_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.maximum_angle_rejections)},
               {"incoming_strict_envelope_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.strict_envelope_rejections)},
               {"incoming_softening_rejections", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.softening_rejections)},

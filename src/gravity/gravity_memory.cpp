@@ -639,6 +639,11 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       "gravity.estimate.bounded_force_feedback", bounded_feedback_bytes,
       "coordinator and workflow current-force summaries, two decayed bins and one planner view; fixed size independent of particle and solve counts");
 
+  if (input.gaussian_pair_lookup_enabled) {
+    addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kPersistent,
+        "gravity.estimate.gaussian_pair_table", sizeof(TreePmGaussianCoefficientTable),
+        "one immutable Hermite coefficient table per enabled coordinator, independent of N and split scale");
+  }
   if (cuda_owned_workspace > 0U) {
     addEstimate(builder, core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
                 "gravity.estimate.cuda_owned_persistent_workspace", cuda_owned_workspace,

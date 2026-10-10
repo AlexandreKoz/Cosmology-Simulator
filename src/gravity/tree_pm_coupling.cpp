@@ -37,6 +37,7 @@
 // shared hot tree interaction invariants
 #include "internal/tree_interaction_common.hpp"
 #include "internal/tree_pm_acceptance.hpp"
+#include "internal/tree_pm_geometry.hpp"
 #include "internal/tree_pm_transport_planner.hpp"
 
 namespace cosmosim::gravity {
@@ -305,6 +306,9 @@ void validateTreePmPreflight(
     default:
       throw std::invalid_argument("TreePM tree opening criterion is invalid");
   }
+  if (options.residual_block_size == 0U || options.residual_block_size > 4096U) {
+    throw std::invalid_argument("TreePM residual_block_size must be in [1,4096]");
+  }
   switch (options.acceptance_policy) {
     case TreePmAcceptancePolicy::kStrictReference:
     case TreePmAcceptancePolicy::kAdaptiveRelative:
@@ -492,6 +496,9 @@ void validateTreePmPreflight(
   mix(options.topology_refit_enabled ? 1U : 0U);
   mix(options.short_range_only ? 1U : 0U);
   mix(options.spatial_work_history_enabled ? 1U : 0U);
+  mix(options.gaussian_pair_lookup_enabled ? 1U : 0U);
+  mix(options.full_mac_diagnostics ? 1U : 0U);
+  mix(options.residual_block_size);
   mix(static_cast<std::uint64_t>(options.acceptance_policy));
   mix_double(options.adaptive_maximum_opening_angle);
   mix(static_cast<std::uint64_t>(options.tree_options.opening_criterion));
@@ -795,31 +802,14 @@ struct BoundedTreeStack {
   }
 };
 
-void pushChildrenNearFirstPeriodic(
-    const TreeNodeSoa& nodes,
-    TreeLocalIndex node_index,
-    double px,
-    double py,
-    double pz,
-    const PeriodicBoxLengths& box_lengths,
-    BoundedTreeStack& stack) {
-  std::array<std::pair<double, TreeLocalIndex>, 8> child_dist2{};
-  std::size_t count = 0;
+void pushChildrenReverseOctant(
+    const TreeNodeSoa& nodes, TreeLocalIndex node_index, BoundedTreeStack& stack) {
+  // LIFO visits increasing octants. Independent of target position and worker
+  // count; the bounded stack retains exactly the same worst-case occupancy.
   const std::size_t child_offset = static_cast<std::size_t>(node_index) * 8U;
-  for (std::uint8_t octant = 0; octant < 8U; ++octant) {
-    const TreeLocalIndex child = nodes.child_index[child_offset + octant];
-    if (child == kInvalidTreeLocalIndex) {
-      continue;
-    }
-    const double dx = minimumImageDelta(nodes.center_x_comoving[child] - px, box_lengths.lx);
-    const double dy = minimumImageDelta(nodes.center_y_comoving[child] - py, box_lengths.ly);
-    const double dz = minimumImageDelta(nodes.center_z_comoving[child] - pz, box_lengths.lz);
-    child_dist2[count++] = {dx * dx + dy * dy + dz * dz, child};
-  }
-  std::sort(child_dist2.begin(), child_dist2.begin() + static_cast<std::ptrdiff_t>(count),
-      [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
-  for (std::size_t i = count; i > 0; --i) {
-    stack.push_back(child_dist2[i - 1].second);
+  for (std::size_t octant = 8U; octant > 0U; --octant) {
+    const TreeLocalIndex child = nodes.child_index[child_offset + octant - 1U];
+    if (child != kInvalidTreeLocalIndex) stack.push_back(child);
   }
 }
 
@@ -1143,41 +1133,6 @@ void requireTreePmMpiSuccess(int error_code, std::string_view context) {
 }
 #endif
 
-[[nodiscard]] double minimumDistanceToNodeAabb(
-    double px,
-    double py,
-    double pz,
-    double cx,
-    double cy,
-    double cz,
-    double half_size_comoving,
-    const PeriodicBoxLengths& box_lengths) {
-  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_lengths.lx));
-  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_lengths.ly));
-  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_lengths.lz));
-  const double ex = std::max(0.0, dx_abs - half_size_comoving);
-  const double ey = std::max(0.0, dy_abs - half_size_comoving);
-  const double ez = std::max(0.0, dz_abs - half_size_comoving);
-  return std::sqrt(ex * ex + ey * ey + ez * ez);
-}
-
-[[nodiscard]] double maximumDistanceToNodeAabb(
-    double px,
-    double py,
-    double pz,
-    double cx,
-    double cy,
-    double cz,
-    double half_size_comoving,
-    const PeriodicBoxLengths& box_lengths) {
-  const double dx_abs = std::abs(minimumImageDelta(cx - px, box_lengths.lx));
-  const double dy_abs = std::abs(minimumImageDelta(cy - py, box_lengths.ly));
-  const double dz_abs = std::abs(minimumImageDelta(cz - pz, box_lengths.lz));
-  const double max_x = dx_abs + half_size_comoving;
-  const double max_y = dy_abs + half_size_comoving;
-  const double max_z = dz_abs + half_size_comoving;
-  return std::sqrt(max_x * max_x + max_y * max_y + max_z * max_z);
-}
 
 struct ShortRangeTargetRequestPacket {
   std::uint32_t wire_version = 1U;
@@ -1864,7 +1819,8 @@ TreePmCoordinator::TreePmCoordinator(
     parallel::PmSlabLayout pm_layout,
     parallel::MpiContext mpi_context,
     core::MemoryGovernor* memory_governor)
-    : m_shape(pm_shape),
+    : m_memory_governor(memory_governor),
+      m_shape(pm_shape),
       m_mpi_context(std::move(mpi_context)),
       m_grid(pm_shape, std::move(pm_layout)),
       m_pm_solver(pm_shape),
@@ -1914,6 +1870,17 @@ const parallel::PmSlabHaloExchangeResult& TreePmCoordinator::lastPmSlabHaloExcha
 
 core::MemoryReport TreePmCoordinator::memoryReport() const {
   core::MemoryReportBuilder builder;
+  if (m_gaussian_table) {
+    builder.addEntry(core::MemoryEntry{
+        .subsystem = core::MemorySubsystem::kTree,
+        .lifetime = core::MemoryLifetime::kPersistent,
+        .memory_class = core::MemoryClass::kPersistentCache,
+        .label = "treepm.gaussian_pair_table",
+        .current_size_bytes = sizeof(TreePmGaussianCoefficientTable),
+        .owned_capacity_bytes = sizeof(TreePmGaussianCoefficientTable),
+        .high_water_bytes = sizeof(TreePmGaussianCoefficientTable),
+        .governed_commitment = m_gaussian_table_commitment.committed()});
+  }
   m_grid.appendMemoryReport(builder);
   m_pm_solver.appendMemoryReport(builder);
   m_tree_solver.appendMemoryReport(builder);
@@ -3293,7 +3260,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   };
 
   const auto traversal_start = std::chrono::steady_clock::now();
-  constexpr std::size_t k_residual_block_size = kTreePmResidualBlockSize;
+  const std::size_t k_residual_block_size = options.residual_block_size;
+
   const TreeNodeSoa& nodes = m_tree_solver.nodes();
   const TreeMortonOrdering& ordering = m_tree_solver.ordering();
   const PeriodicBoxLengths box_lengths = options.pm_options.boundary_condition == PmBoundaryCondition::kPeriodic
@@ -3374,6 +3342,16 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       (target_count + k_residual_block_size - 1U) / k_residual_block_size;
   std::exception_ptr traversal_workspace_failure;
   try {
+    if (options.gaussian_pair_lookup_enabled && !m_gaussian_table) {
+      auto reservation = m_memory_governor != nullptr
+          ? m_memory_governor->reserve(core::MemoryClass::kPersistentCache,
+              sizeof(TreePmGaussianCoefficientTable), "treepm.gaussian_pair_table")
+          : core::MemoryReservation{};
+      auto table = std::make_unique<const TreePmGaussianCoefficientTable>();
+      if (reservation.valid()) reservation.commit();
+      m_gaussian_table = std::move(table);
+      m_gaussian_table_commitment = std::move(reservation);
+    }
     if (m_worker_stack_storage.size() < required_stack_slots) {
       m_worker_stack_storage.resize(required_stack_slots, 0U);
     }
@@ -3430,6 +3408,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         "TreePM peer rank rejected residual traversal workspace preparation");
   }
 
+  const auto* gaussian_table = options.gaussian_pair_lookup_enabled ? m_gaussian_table.get() : nullptr;
+  const double split_scale = options.split_policy.split_scale_comoving;
+  const double inverse_2a_squared = (0.25/split_scale)/split_scale;
+  const double inverse_8a_cubed = ((0.125/split_scale)/split_scale)/split_scale;
+  const bool lookup_scaling_representable = std::isnormal(inverse_2a_squared) &&
+      std::isnormal(inverse_8a_cubed);
   const auto worker_stack = [&](std::size_t worker_slot) -> BoundedTreeStack {
     return BoundedTreeStack{
         .data = m_worker_stack_storage.data() + worker_slot * stack_slots_per_worker,
@@ -3516,7 +3500,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   // immutable tree/source/softening lanes, the caller-owned hot counters,
   // optional spatial scratch, and the caller-owned bounded stack. Opening MAC,
   // 0.08 screened-quadrupole envelope, cutoff, softening combine rule, and
-  // per-target child order are unchanged from the serial contract.
+  // child order follow the same deterministic contract on every worker.
   std::uint64_t incoming_evaluated_target_count = 0;
   int observed_openmp_workers = 1;
   auto evaluateTargetAgainstLocalTree = [&](
@@ -3550,64 +3534,50 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       ++counters.visited_nodes;
 
       const double half_size = nodes.half_size_comoving[node_index];
-      const double min_node_distance = minimumDistanceToNodeAabb(
-          px,
-          py,
-          pz,
-          nodes.center_x_comoving[node_index],
-          nodes.center_y_comoving[node_index],
-          nodes.center_z_comoving[node_index],
-          half_size,
-          box_lengths);
-      if (min_node_distance > cutoff_radius_comoving) {
+      const double node_dx = minimumImageDelta(nodes.center_x_comoving[node_index] - px, box_lengths.lx);
+      const double node_dy = minimumImageDelta(nodes.center_y_comoving[node_index] - py, box_lengths.ly);
+      const double node_dz = minimumImageDelta(nodes.center_z_comoving[node_index] - pz, box_lengths.lz);
+      const internal::TreePmAabbDistances geometry(node_dx, node_dy, node_dz, half_size);
+      if (!internal::treePmSquaredDistanceWithinCutoff(
+              geometry.minimum_squared, cutoff_radius_comoving, cutoff_radius2_comoving)) {
         ++counters.cutoff_pruned_nodes;
-        if (!skip_self) {
-          ++counters.remote_pairs_pruned_by_bounds;
-        }
+        if (!skip_self) ++counters.remote_pairs_pruned_by_bounds;
         continue;
       }
-
-      const double dx = minimumImageDelta(nodes.com_x_comoving[node_index] - px, box_lengths.lx);
-      const double dy = minimumImageDelta(nodes.com_y_comoving[node_index] - py, box_lengths.ly);
-      const double dz = minimumImageDelta(nodes.com_z_comoving[node_index] - pz, box_lengths.lz);
-      const double r2 = dx * dx + dy * dy + dz * dz;
-      const double r = std::sqrt(std::max(r2, 1.0e-30));
-
       const bool is_leaf = nodes.child_count[node_index] == 0;
-      const double center_dx = nodes.center_x_comoving[node_index] - nodes.com_x_comoving[node_index];
-      const double center_dy = nodes.center_y_comoving[node_index] - nodes.com_y_comoving[node_index];
-      const double center_dz = nodes.center_z_comoving[node_index] - nodes.com_z_comoving[node_index];
-      const double com_offset = std::sqrt(center_dx * center_dx + center_dy * center_dy + center_dz * center_dz);
-      const bool target_inside_node = !is_leaf &&
-          (skip_self || options.acceptance_policy == TreePmAcceptancePolicy::kAdaptiveRelative) &&
-          internal::targetInsideNodeAabbFromCenterDelta(
-              minimumImageDelta(nodes.center_x_comoving[node_index] - px, box_lengths.lx),
-              minimumImageDelta(nodes.center_y_comoving[node_index] - py, box_lengths.ly),
-              minimumImageDelta(nodes.center_z_comoving[node_index] - pz, box_lengths.lz),
-              half_size);
-      const bool node_within_cutoff = is_leaf || (maximumDistanceToNodeAabb(
-          px,
-          py,
-          pz,
-          nodes.center_x_comoving[node_index],
-          nodes.center_y_comoving[node_index],
-          nodes.center_z_comoving[node_index],
-          half_size,
-          box_lengths) <= cutoff_radius_comoving);
-      const bool accept = internal::acceptTreePmNode(
-          internal::TreeNodeAcceptanceInput{
-              .is_leaf = is_leaf,
-              .target_inside_node = target_inside_node,
-              .half_size = half_size,
-              .com_center_offset = com_offset,
-              .node_mass_code = nodes.mass_code[node_index],
-              .r2 = r2,
-              .previous_acceleration_available = previous_acceleration_available,
-              .previous_acceleration_magnitude_code = previous_acceleration_magnitude_code,
-              .target_softening_comoving = target_softening_comoving,
-              .node_softening_min_comoving = nodes.softening_min_comoving[node_index],
-              .node_softening_max_comoving = nodes.softening_max_comoving[node_index],
-          }, node_within_cutoff, options, counters);
+      // Leaves always evaluate their individual pairs: COM/MAC/containment
+      // geometry cannot affect that decision and is unnecessary there.
+      double dx = 0.0, dy = 0.0, dz = 0.0;
+      bool accept = is_leaf;
+      if (!is_leaf) {
+        dx = minimumImageDelta(nodes.com_x_comoving[node_index] - px, box_lengths.lx);
+        dy = minimumImageDelta(nodes.com_y_comoving[node_index] - py, box_lengths.ly);
+        dz = minimumImageDelta(nodes.com_z_comoving[node_index] - pz, box_lengths.lz);
+        const double r2 = dx*dx + dy*dy + dz*dz;
+        const double center_dx = nodes.center_x_comoving[node_index] - nodes.com_x_comoving[node_index];
+        const double center_dy = nodes.center_y_comoving[node_index] - nodes.com_y_comoving[node_index];
+        const double center_dz = nodes.center_z_comoving[node_index] - nodes.com_z_comoving[node_index];
+        const double com_offset = std::sqrt(center_dx*center_dx + center_dy*center_dy + center_dz*center_dz);
+        const bool target_inside_node =
+            (skip_self || options.acceptance_policy == TreePmAcceptancePolicy::kAdaptiveRelative) &&
+            internal::targetInsideNodeAabbFromCenterDelta(node_dx, node_dy, node_dz, half_size);
+        const bool node_within_cutoff = internal::treePmSquaredDistanceWithinCutoff(
+            geometry.maximumSquared(half_size), cutoff_radius_comoving, cutoff_radius2_comoving);
+        accept = internal::acceptTreePmNode(
+            internal::TreeNodeAcceptanceInput{
+                .is_leaf = false,
+                .target_inside_node = target_inside_node,
+                .half_size = half_size,
+                .com_center_offset = com_offset,
+                .node_mass_code = nodes.mass_code[node_index],
+                .r2 = r2,
+                .previous_acceleration_available = previous_acceleration_available,
+                .previous_acceleration_magnitude_code = previous_acceleration_magnitude_code,
+                .target_softening_comoving = target_softening_comoving,
+                .node_softening_min_comoving = nodes.softening_min_comoving[node_index],
+                .node_softening_max_comoving = nodes.softening_max_comoving[node_index],
+            }, node_within_cutoff, options, counters);
+      }
 
       if (accept) {
         ++counters.accepted_nodes;
@@ -3628,7 +3598,6 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               ++counters.cutoff_skipped_pairs;
               continue;
             }
-            const double sr = std::sqrt(std::max(sr2, 1.0e-30));
             const double source_softening =
                 source_softening_base[
                     static_cast<std::size_t>(source_index) *
@@ -3637,9 +3606,17 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             // PM carries the unsoftened Gaussian long-range field.  The tree therefore
             // evaluates the exact residual needed to recover the requested softened
             // force, rather than multiplying a softened force by the Newtonian split.
-            const double residual_factor = treePmSoftenedShortRangeInvR3Unchecked(
-                sr2, pair_epsilon, options.split_policy.split_scale_comoving) *
-                options.tree_options.gravitational_constant_code;
+            double residual_inv_r3;
+            if (gaussian_table != nullptr && sr2 > 0.0) {
+              const double gaussian_t = lookup_scaling_representable ? sr2*inverse_2a_squared : 64.0;
+              const double long_inv_r3 = gaussian_t < 64.0
+                  ? gaussian_table->dimensionlessCoefficient(gaussian_t)*inverse_8a_cubed
+                  : gaussian_table->longRangeInvR3(sr2, split_scale);
+              residual_inv_r3 = softenedInvR3Unchecked(sr2, pair_epsilon)-long_inv_r3;
+            } else {
+              residual_inv_r3 = treePmSoftenedShortRangeInvR3Unchecked(sr2, pair_epsilon, split_scale);
+            }
+            const double residual_factor = residual_inv_r3 * options.tree_options.gravitational_constant_code;
             ax += residual_factor * mass_code[source_index] * sx;
             ay += residual_factor * mass_code[source_index] * sy;
             az += residual_factor * mass_code[source_index] * sz;
@@ -3664,7 +3641,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         }
       } else {
         ++counters.opened_nodes;
-        pushChildrenNearFirstPeriodic(nodes, node_index, px, py, pz, box_lengths, stack);
+        pushChildrenReverseOctant(nodes, node_index, stack);
       }
     }
     if (spatial_counters != nullptr && skip_self) {
@@ -3701,6 +3678,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     dst.accepted_leaves += src.accepted_leaves;
     dst.selected_mac_rejections += src.selected_mac_rejections;
     dst.relative_mac_rejections += src.relative_mac_rejections;
+    dst.skipped_mac_evaluations += src.skipped_mac_evaluations;
     dst.maximum_angle_rejections += src.maximum_angle_rejections;
     dst.strict_envelope_rejections += src.strict_envelope_rejections;
     dst.softening_rejections += src.softening_rejections;
@@ -5297,6 +5275,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     tree_profile->accepted_internal_multipoles += local_owned_targets.accepted_internal_multipoles + incoming_remote_targets.accepted_internal_multipoles;
     tree_profile->accepted_leaves += local_owned_targets.accepted_leaves + incoming_remote_targets.accepted_leaves;
     tree_profile->selected_mac_rejections += local_owned_targets.selected_mac_rejections + incoming_remote_targets.selected_mac_rejections;
+    tree_profile->skipped_mac_evaluations += local_owned_targets.skipped_mac_evaluations + incoming_remote_targets.skipped_mac_evaluations;
     tree_profile->relative_mac_rejections += local_owned_targets.relative_mac_rejections + incoming_remote_targets.relative_mac_rejections;
     tree_profile->maximum_angle_rejections += local_owned_targets.maximum_angle_rejections + incoming_remote_targets.maximum_angle_rejections;
     tree_profile->strict_envelope_rejections += local_owned_targets.strict_envelope_rejections + incoming_remote_targets.strict_envelope_rejections;
