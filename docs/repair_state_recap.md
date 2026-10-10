@@ -1,5 +1,13 @@
 # Repair state recap (post-repair audit snapshot)
 
+20261010 unified TreePM recovery: production traversal, stable analytic residual,
+opt-in governed Gaussian lookup, staged MAC accounting, external split sweeps,
+and hierarchical coarse-displacement/source-epoch hardening are implemented in
+source. New scientific qualification tests are written. Compilation, tests and
+performance qualification were explicitly deferred by the user; no new passing
+evidence or capability certification is asserted. See the
+[implementation and manual commands](repair/treepm_unified_performance_recovery_20261010.md).
+
 P6 campaign label 20261006: source architecture implemented, qualification
 pending. No build, tests, or numerical campaigns executed. Current details:
 [implementation](repair/p6_preproduction_performance_architecture_implementation_20261006.md)

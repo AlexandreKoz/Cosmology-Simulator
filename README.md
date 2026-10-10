@@ -32,7 +32,7 @@ That result establishes an **operational DMO first-light path**, not scientific 
 
 ### Provisional or intentionally fail-closed
 
-- `hierarchical_max_rung > 0` is not a supported production path; the reference workflow remains rung-zero.
+- Collisionless hierarchical KDK is available for opt-in qualification with `hierarchical_max_rung > 0`; it remains provisional. The safe production default is rung zero.
 - Distributed IC import and multi-rank DMO execution remain provisional until the dependency-complete rank matrix and rank-equivalence gates are closed.
 - Rank-count-changing restart is unsupported.
 - Power-spectrum output is computationally available on supported FFT backends but is not yet a scientific production-certification claim.
@@ -41,6 +41,8 @@ That result establishes an **operational DMO first-light path**, not scientific 
 ### Future acceptance gates
 
 The next DMO qualification stages are an external-IC clean-tree replay with the repaired normalized artifact, multi-rank equivalence, linear-growth validation, power-spectrum validation/convergence, and larger-target memory/runtime qualification before any 512³ production claim.
+
+The [20261010 TreePM recovery handoff](docs/repair/treepm_unified_performance_recovery_20261010.md) documents the deterministic traversal update, stable analytic Gaussian residual, experimental direct-pair lookup, frozen-source mesh/leaf/block sweep, and hierarchical qualification tests. These source changes have not been compiled, tested, or benchmarked in that campaign; lookup stays disabled by default.
 
 ## Quickstart
 

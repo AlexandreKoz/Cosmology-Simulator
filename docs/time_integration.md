@@ -434,3 +434,35 @@ scheduler lanes. Restart v23 already carries bins, next activation, common
 integration/drift epochs, PM cadence, source generation and synchronized total
 force history. Transient split forces, meshes, trees and the table are rebuilt.
 Exact restart equivalence and multirate convergence remain required tests.
+
+## Hierarchical recovery safeguards (2026-10-10; provisional)
+
+The existing collisionless block dispatcher remains the only hierarchical KDK
+implementation. It now rejects incomplete/duplicated all-source drift identity
+rows and a mismatched common position epoch before opening a block, and supplies
+its scheduler pointers through the direct dispatcher seam. The in-flight marker
+is set only after block-start active-set checks. The workflow retains the fresh
+synchronized bootstrap in both continued and resumed blocks: removing it would
+require a separately established split-cache/history restart equivalence contract.
+
+An independent coarse PM resolution-crossing estimate augments existing
+softening/gravity, expansion, output, endpoint and explicit-dt restrictions.
+At synchronized scale `a`, let `v=max_rank,particle |u|/a`,
+`g=max_rank,particle |A|/a^3`, and
+`ell=min(dx_mesh,dy_mesh,dz_mesh,Gaussian_split_length)`.
+Require `v*dt + g*dt^2/2 <= ell`, evaluated stably as
+`dt=2*ell/(v+hypot(v,sqrt(2*g*ell)))`. Both zero returns infinity.
+The helper uses existing comoving/peculiar conventions; existing softening
+criteria still select rungs. Rank maxima use two unconditional reductions before
+any solver dispatch. The frozen-epoch estimate limits PM scale crossings; it is
+not a rigorous future-force-growth bound. Expansion limits remain independent.
+This changes optional hierarchical coarse intervals and therefore trajectories,
+scheduler ticks and output cadence; global rung-zero behavior is untouched.
+
+The production-workflow restart/refinement test and Zel'dovich fundamental-mode
+qualification are registered for dependency-complete builds. The growth gate
+compares global KDK with two hierarchical temporal resolutions, retains the
+existing linear-response envelope, and targets only `k=2*pi/L` (six Cartesian
+modes of the 4^3 fixture). Broader growth, power, nonlinear orbit stability and
+large-rung qualification remain pending. `hierarchical_max_rung=0` and all
+provisional capability classifications are retained.

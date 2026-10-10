@@ -111,11 +111,9 @@ ForceField computeDirectShortRangeResidual(
       if (r2 > cutoff2) {
         continue;
       }
-      const double r = std::sqrt(std::max(r2, 1.0e-30));
-      const double split_factor = cosmosim::gravity::treePmGaussianShortRangeForceFactor(
-          r, options.split_policy.split_scale_comoving);
-      const double softened_factor = cosmosim::gravity::softenedInvR3(r2, options.tree_options.softening) *
-          split_factor * options.tree_options.gravitational_constant_code;
+      const double softened_factor = cosmosim::gravity::treePmSoftenedShortRangeInvR3(
+          r2, options.tree_options.softening.epsilon_comoving,
+          options.split_policy.split_scale_comoving) * options.tree_options.gravitational_constant_code;
       field.ax[target] += softened_factor * mass[source] * dx;
       field.ay[target] += softened_factor * mass[source] * dy;
       field.az[target] += softened_factor * mass[source] * dz;

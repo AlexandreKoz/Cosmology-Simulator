@@ -414,3 +414,43 @@ version 1. `ProfilerSession::events()` now returns recent ordered detail only;
 consumers needing lifetime counts must use severity totals/counters. Retained
 payload/string capacity is included in memory reports; prospective admission of
 each dynamic event payload remains a follow-up limitation.
+
+## Frozen-source split/leaf/block sweeps
+
+`bench_tree_pm_sweep` and `python3 tools/treepm_sweep.py` provide external
+benchmark controls without another simulation-input language. The driver reads
+`id,x,y,z,mass,epsilon` CSV in increasing unique ID order, or generates a fixed
+synthetic fixture. Full-population force refreshes are timed; fixed sampled IDs
+are used for accuracy. It always refreshes PM, rebuilds the tree by default,
+and reports warmups separately from repeated measured evaluations.
+
+Sweep mesh `64,96,128,192`, leaf `4,8,16,32`, optional block/thread axes, strict or
+adaptive acceptance, analytic or opt-in lookup. Cell-valued `asmth`/`rcut` derive
+the candidate physical split from its own mesh. CSV softenings are preserved;
+`--epsilon` applies only to generated sources. `--history bootstrap` uses a
+strict analytic same-snapshot total force and labels it explicitly; `fallback`
+supplies no history. Neither reconstructs the simulation's historical KDK state.
+
+JSONL records distinguish wall, PM kernel phases, tree build/multipoles and
+traversal; wall is the authoritative end-to-end measurement. Counts, actual
+workers, solver-retained capacities, current RSS and process peak RSS are
+reported. Driver arrays contribute to RSS, not solver-owned capacities. Fixed
+force CSV contains total, Tree-only, and independently accumulated matching
+short residuals. Relative L2, P95/P99/max normalized errors, absolute tails and
+small-force absolute maxima accompany each oracle comparison. The normalization
+floor is explicitly `1e-3*RMS(reference)`.
+
+The Python workflow saves exact commands, binary/source/target/reference hashes,
+stdout/stderr, candidate status and CSV/Markdown tradeoff reports. Each candidate
+runs in a fresh process. A failed backend/geometry is a saved failure, never a
+silent resolution substitution. `--ewald-level` is limited to <=4096 uniform-
+softening sources and uses the independent existing periodic Ewald reference;
+increase the level before accepting its result. Large meshes require FFTW.
+The diagnostic is a single-owner benchmark; MPI qualification uses registered
+force/workflow tests. See [manual commands](repair/treepm_unified_performance_recovery_20261010.md).
+
+With `treepm_full_mac_diagnostics=false`, events explicitly say
+`mac_accounting=fast_guard_short_circuit`, include skipped MAC counts for both
+local and incoming targets, and continue to report unique descent and actual
+pair counts. Selected-MAC rejection/fallback counts then describe evaluated
+MACs only. Full mode retains overlapping failed guards; skipped is never passing.

@@ -657,3 +657,22 @@ but strict workflow config-hash checks are retained: old normalized provenance
 is not silently treated as the new config. Qualification must establish an
 explicit fixture/config migration if needed. No config tests were added or run
 in this source-only campaign; they are required in the second campaign.
+
+## TreePM recovery controls (2026-10-10; qualification pending)
+
+Both keys use the typed `[numerics]` boolean parser and normalized `.param.txt`
+dump; their values participate in the normalized configuration hash.
+
+| Key | Default | Contract |
+|---|---|---|
+| `treepm_gaussian_pair_lookup_enabled` | `false` | Experimental cubic-Hermite Gaussian long-range radial coefficient for direct leaf pairs. Plummer softening is evaluated independently. Accepted-node monopoles/quadrupoles and MAC derivatives remain analytic. Enable only for controlled qualification. |
+| `treepm_full_mac_diagnostics` | `true` | Preserve overlapping rejection accounting. `false` short-circuits the selected MAC when an independent guard already rejects, and reports `skipped_mac_evaluations`; a skipped MAC is neither passing nor failing evidence. Force acceptance policies are unchanged. |
+
+These additions change newly normalized text/hashes even when defaults are
+selected. Existing strict restart/config compatibility checks remain in force;
+no checkpoint hash is rewritten or grandfathered silently. Snapshot/restart
+schemas are unchanged. New code remains replay-deterministic under its existing
+execution contract, but reverse-octant traversal changes accumulation order
+relative to earlier revisions. Compare older checksums with numerical tolerances.
+No production mesh, leaf-capacity, OpenMP scheduling, acceptance, or hierarchical
+rung default changes. `hierarchical_max_rung=0` remains the safe global-KDK default.

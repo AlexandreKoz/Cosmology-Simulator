@@ -632,3 +632,35 @@ tests, MPI runs, benchmarks or scientific validation. Existing build/test floors
 remain required for the second campaign. The exact staged matrix and evidence
 requirements are in [p6_validation_campaign_plan_20261006.md](repair/p6_validation_campaign_plan_20261006.md).
 Optional modes must not become defaults until those gates are accepted.
+
+## TreePM unified recovery qualification (2026-10-10)
+
+New source coverage, **not executed**:
+
+- `unit_tree_pm_split_kernel`: independent long-double Gaussian coefficient,
+  zero/tiny/extreme scales, full Hermite interval/edges, multiple softenings,
+  invalid inputs, squared cutoff decisions and full/fast MAC decisions.
+- `integration_tree_pm_coupling_periodic`: production direct-pair interaction
+  counts at inclusive cutoff, rectangular/multi-wrap/half-box fixtures,
+  analytic/lookup and worker reproducibility, retained table accounting.
+- `validation_tree_pm_recovery_ewald_accuracy`: strict/adaptive and analytic/
+  lookup with the existing Ewald accuracy budgets and finite softening.
+  Adaptive reference-history cases use explicitly converged Ewald magnitudes,
+  not simulated historical KDK history.
+- `integration_hierarchical_timestep_regression`: displacement law, production
+  core block dispatcher free expansion/momentum, sparse activations, source
+  epochs, endpoint safety and malformed drift identity rejection.
+- `integration_hierarchical_treepm_workflow` (plus `_np2`, `_np4`): full production
+  workflow global-reference refinement, replay, PM endpoints, restart and mass.
+- `validation_hierarchical_dmo_growth_single_rank`, `_mpi_np2`, `_mpi_np4`, and
+  `validation_hierarchical_dmo_rank_equivalence`: existing Zel'dovich fixture,
+  growth/power refinement at its six fundamental modes and stable-ID physical
+  rank comparisons using the existing equivalence tolerance.
+
+The frozen-source sweep produces a new direct short reference for each physical
+split. Its optional small-N Ewald comparison requires increasing image/mode
+limits to demonstrate convergence. An external total reference must match
+particle IDs, masses, cosmological state and units. Timing alone never qualifies
+mesh/leaf choices. No speedup, force budget, or hierarchical scale range is newly
+certified by writing these tests. Exact commands and remaining gates are in
+[the campaign report](repair/treepm_unified_performance_recovery_20261010.md).

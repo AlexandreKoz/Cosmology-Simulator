@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "cosmosim/core/memory_accounting.hpp"
+#include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/gravity/gravity_communication_arena.hpp"
 #include "cosmosim/gravity/gravity_state_identity.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
@@ -39,6 +40,7 @@ struct alignas(64) TreePmTraversalCounters {
   std::uint64_t accepted_leaves = 0;
   std::uint64_t selected_mac_rejections = 0;
   std::uint64_t relative_mac_rejections = 0;
+  std::uint64_t skipped_mac_evaluations = 0;  // fast accounting only; never a pass
   std::uint64_t maximum_angle_rejections = 0;
   std::uint64_t strict_envelope_rejections = 0;
   std::uint64_t softening_rejections = 0;
@@ -133,6 +135,13 @@ struct TreePmOptions {
   TreePmSplitPolicy split_policy{};
   TreePmAcceptancePolicy acceptance_policy = TreePmAcceptancePolicy::kStrictReference;
   double adaptive_maximum_opening_angle = 0.25;
+  // Opt-in until force qualification; affects direct leaf pairs only.
+  bool gaussian_pair_lookup_enabled = false;
+  // True retains overlapping forensic rejection counters. False skips MAC work
+  // after an independent failed guard and increments skipped_mac_evaluations.
+  bool full_mac_diagnostics = true;
+  // Diagnostic API tuning only. Production workflow retains 64-target blocks.
+  std::size_t residual_block_size = kTreePmResidualBlockSize;
   bool spatial_work_history_enabled = false;
   // Exact snapshot reuse and certified motion refit are independent policies.
   bool identical_source_tree_reuse_enabled = false;
@@ -381,6 +390,9 @@ class TreePmCoordinator {
       const TreeSofteningView& softening_view = {});
 
  private:
+  core::MemoryGovernor* m_memory_governor = nullptr;
+  core::MemoryReservation m_gaussian_table_commitment;
+  std::unique_ptr<const TreePmGaussianCoefficientTable> m_gaussian_table;
   // Per-target-family residual traversal bundle. The coordinator maintains
   // one instance for locally owned targets and one for incoming remote
   // targets so pair evaluations can be reported without double counting.

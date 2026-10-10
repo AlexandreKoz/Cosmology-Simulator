@@ -29,7 +29,7 @@ namespace cosmosim::gravity::internal {
   const double inv_d5 = 1.0 / (d * d * std::sqrt(d));
   const double inv_r3 = 1.0 / (in.r2 * r);
   const double inv_r4 = 1.0 / (in.r2 * in.r2);
-  const double s = treePmGaussianShortRangeForceFactorUnchecked(r, split_scale);
+  const double long_factor = treePmGaussianLongRangeForceFactorUnchecked(r, split_scale);
   const double q = r / (2.0 * split_scale);
   const double exponential = std::exp(-q * q);
   constexpr double k_inv_sqrt_pi = 0.564189583547756286948079451560772586;
@@ -38,10 +38,10 @@ namespace cosmosim::gravity::internal {
   const double s_second = k_inv_sqrt_pi * exponential *
       (-r / scale3 + 0.25 * r * in.r2 / (scale3 * split_scale * split_scale));
   const double first = -3.0 * r * inv_d5 + s_first * inv_r3 -
-      3.0 * (s - 1.0) * inv_r4;
+      3.0 * (-long_factor) * inv_r4;
   const double second = -3.0 * inv_d5 + 15.0 * in.r2 * inv_d5 / d +
       s_second * inv_r3 - 6.0 * s_first * inv_r4 +
-      12.0 * (s - 1.0) * inv_r4 / r;
+      12.0 * (-long_factor) * inv_r4 / r;
   const double width = 2.0 * in.half_size;
   const double rho = std::sqrt(3.0) * in.half_size + in.com_center_offset;
   const double proxy = g_code * in.node_mass_code * std::max(
@@ -58,31 +58,56 @@ namespace cosmosim::gravity::internal {
   const bool softening_ok = passesSofteningEnvelopeGuard(
       false, in.half_size, r, in.target_softening_comoving,
       in.node_softening_min_comoving, in.node_softening_max_comoving);
+  const bool strict = options.acceptance_policy == TreePmAcceptancePolicy::kStrictReference;
+  const bool envelope_ok = strict
+      ? options.tree_options.multipole_order == TreeMultipoleOrder::kQuadrupole &&
+          (2.0 * in.half_size / r) < 0.08
+      : (2.0 * in.half_size / r) < options.adaptive_maximum_opening_angle;
+  if (!envelope_ok) {
+    if (strict) ++counters.strict_envelope_rejections;
+    else ++counters.maximum_angle_rejections;
+  }
+  if (!softening_ok) ++counters.softening_rejections;
+  if (in.target_inside_node) ++counters.near_node_rejections;
+  if (!within_cutoff) ++counters.cutoff_containment_rejections;
+  // All cheap independent guards are counted in both modes. In fast mode a
+  // skipped selected MAC is neither a passing guard nor a rejection count.
+  if (!options.full_mac_diagnostics && (!envelope_ok || !softening_ok ||
+      in.target_inside_node || !within_cutoff || !std::isfinite(in.r2))) {
+    ++counters.skipped_mac_evaluations;
+    return false;
+  }
   bool mac_ok = false;
-  bool envelope_ok = false;
-  if (options.acceptance_policy == TreePmAcceptancePolicy::kStrictReference) {
+  if (strict) {
     mac_ok = acceptNodeByMac(false, in.target_inside_node, in.half_size,
         in.com_center_offset, in.node_mass_code, in.r2,
         in.previous_acceleration_available, in.previous_acceleration_magnitude_code,
         options.tree_options);
-    envelope_ok = options.tree_options.multipole_order == TreeMultipoleOrder::kQuadrupole &&
-        (2.0 * in.half_size / r) < 0.08;
-    if (!envelope_ok) ++counters.strict_envelope_rejections;
     if (!mac_ok) ++counters.selected_mac_rejections;
   } else {
-    // No fabricated acceleration floor. Tiny/zero, missing, negative or
-    // nonfinite history uses geometric fallback, deterministic per target.
+    // No fabricated acceleration floor. Invalid history uses the existing MAC.
     const bool history_ok = in.previous_acceleration_available &&
         std::isfinite(in.previous_acceleration_magnitude_code) &&
         in.previous_acceleration_magnitude_code >
             options.tree_options.relative_force_acceleration_floor_code;
     if (history_ok) {
-      const double estimate = residualAccuracyProxy(in,
-          options.split_policy.split_scale_comoving,
-          options.tree_options.gravitational_constant_code);
       const double allowance = options.tree_options.relative_force_tolerance *
           in.previous_acceleration_magnitude_code;
-      mac_ok = std::isfinite(estimate) && std::isfinite(allowance) && estimate <= allowance;
+      // This is one operand of max() in residualAccuracyProxy, using identical
+      // arithmetic. If it already rejects, derivatives cannot change the
+      // decision, even with full overlapping forensic accounting enabled.
+      const double width = 2.0 * in.half_size;
+      const double inv_r4 = 1.0 / (in.r2 * in.r2);
+      const double lower_proxy = options.tree_options.gravitational_constant_code *
+          in.node_mass_code * (width * width * inv_r4);
+      if (std::isfinite(allowance) && std::isfinite(lower_proxy) && lower_proxy > allowance) {
+        mac_ok = false;
+      } else {
+        const double estimate = residualAccuracyProxy(in,
+            options.split_policy.split_scale_comoving,
+            options.tree_options.gravitational_constant_code);
+        mac_ok = std::isfinite(estimate) && std::isfinite(allowance) && estimate <= allowance;
+      }
       if (!mac_ok) ++counters.relative_mac_rejections;
     } else {
       ++counters.geometric_history_fallbacks;
@@ -90,14 +115,7 @@ namespace cosmosim::gravity::internal {
           in.half_size, in.com_center_offset, in.r2);
       if (!mac_ok) ++counters.selected_mac_rejections;
     }
-    envelope_ok = (2.0 * in.half_size / r) < options.adaptive_maximum_opening_angle;
-    if (!envelope_ok) ++counters.maximum_angle_rejections;
   }
-  if (!softening_ok) ++counters.softening_rejections;
-  if (in.target_inside_node) ++counters.near_node_rejections;
-  if (!within_cutoff) ++counters.cutoff_containment_rejections;
-  // Rejection counters overlap: each failed guard is counted. Opened nodes
-  // remain the unique number of descent decisions.
   return mac_ok && envelope_ok && softening_ok && within_cutoff &&
       !in.target_inside_node && std::isfinite(in.r2);
 }

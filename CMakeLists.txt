@@ -1966,6 +1966,23 @@ if(COSMOSIM_ENABLE_TESTS)
   add_custom_target(stage1_runtime_truth_targets DEPENDS ${cosmosim_stage1_runtime_truth_targets})
 
 
+  if(COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW)
+    add_executable(test_integration_hierarchical_treepm_workflow tests/integration/test_hierarchical_treepm_workflow.cpp)
+    target_link_libraries(test_integration_hierarchical_treepm_workflow PRIVATE cosmosim_all)
+    add_test(NAME integration_hierarchical_treepm_workflow COMMAND test_integration_hierarchical_treepm_workflow)
+    cosmosim_mark_runtime_truth_test(integration_hierarchical_treepm_workflow scheduler restart treepm equivalence integration)
+    if(COSMOSIM_ENABLE_MPI AND COSMOSIM_HDF5_PARALLEL)
+      foreach(hierarchical_ranks IN ITEMS 2 4)
+        add_test(NAME integration_hierarchical_treepm_workflow_np${hierarchical_ranks}
+          COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${hierarchical_ranks}
+                  ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_integration_hierarchical_treepm_workflow> ${MPIEXEC_POSTFLAGS})
+        set_tests_properties(integration_hierarchical_treepm_workflow_np${hierarchical_ranks}
+          PROPERTIES LABELS "integration;mpi;scheduler;treepm;restart;equivalence"
+          PROCESSORS ${hierarchical_ranks})
+      endforeach()
+    endif()
+  endif()
+
   # This smoke exercises the production TreePM runtime path.  Keep it out of
   # HDF5-only builds, where the runtime correctly refuses to substitute the
   # diagnostic naive-DFT backend for FFTW.
@@ -2202,6 +2219,10 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_validation_tree_pm_ewald_accuracy PRIVATE cosmosim_gravity)
   if(COSMOSIM_ENABLE_FFTW)
     add_test(NAME validation_tree_pm_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy)
+    add_test(NAME validation_tree_pm_recovery_ewald_accuracy COMMAND test_validation_tree_pm_ewald_accuracy)
+    set_tests_properties(validation_tree_pm_recovery_ewald_accuracy PROPERTIES
+      ENVIRONMENT "COSMOSIM_TREEPM_RECOVERY_QUALIFICATION=1;COSMOSIM_EWALD_SOFTENING_RATIO=0.016637952"
+      LABELS "validation;gravity;treepm;periodic;accuracy;production_fft;qualification")
     set_tests_properties(
       validation_tree_pm_ewald_accuracy
       PROPERTIES LABELS "validation;gravity;treepm;periodic;accuracy;production_fft")
@@ -2236,6 +2257,11 @@ if(COSMOSIM_ENABLE_TESTS)
     PROPERTIES LABELS "integration;gravity;dmo;workflow;empty_rank")
   if(COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW)
     add_test(NAME validation_dmo_zeldovich_workflow_single_rank COMMAND test_validation_dmo_zeldovich_workflow)
+    add_test(NAME validation_hierarchical_dmo_growth_single_rank
+      COMMAND test_validation_dmo_zeldovich_workflow --hierarchical-qualification)
+    set_tests_properties(validation_hierarchical_dmo_growth_single_rank PROPERTIES
+      FIXTURES_SETUP hierarchical_growth_artifacts
+      LABELS "validation;gravity;dmo;workflow;scheduler;power_spectrum;qualification")
     set_tests_properties(
       validation_dmo_zeldovich_workflow_single_rank
       PROPERTIES FIXTURES_SETUP dmo_zeldovich_rank_state_artifacts
@@ -2254,6 +2280,20 @@ if(COSMOSIM_ENABLE_TESTS)
     endforeach()
   endif()
   if(COSMOSIM_ENABLE_MPI AND COSMOSIM_ENABLE_HDF5 AND COSMOSIM_ENABLE_FFTW)
+    foreach(hierarchical_np IN ITEMS 2 4)
+      add_test(NAME validation_hierarchical_dmo_growth_mpi_np${hierarchical_np}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${hierarchical_np} ${MPIEXEC_PREFLAGS}
+                $<TARGET_FILE:test_validation_dmo_zeldovich_workflow> --hierarchical-qualification ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(validation_hierarchical_dmo_growth_mpi_np${hierarchical_np} PROPERTIES
+        PROCESSORS ${hierarchical_np} FIXTURES_SETUP hierarchical_growth_artifacts
+        LABELS "validation;gravity;dmo;workflow;mpi;scheduler;power_spectrum;qualification")
+    endforeach()
+    add_test(NAME validation_hierarchical_dmo_rank_equivalence
+      COMMAND test_validation_dmo_zeldovich_workflow --compare-hierarchical-artifacts)
+    set_tests_properties(validation_hierarchical_dmo_rank_equivalence PROPERTIES
+      FIXTURES_REQUIRED hierarchical_growth_artifacts
+      DEPENDS "validation_hierarchical_dmo_growth_single_rank;validation_hierarchical_dmo_growth_mpi_np2;validation_hierarchical_dmo_growth_mpi_np4"
+      LABELS "validation;gravity;dmo;workflow;mpi;rank_equivalence;qualification")
     foreach(dmo_np IN ITEMS 2 3 4 8)
       add_test(
         NAME validation_dmo_zeldovich_workflow_mpi_np${dmo_np}
@@ -2388,6 +2428,9 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
 
   add_executable(bench_tree_pm_coupling bench/bench_tree_pm_coupling.cpp)
   target_link_libraries(bench_tree_pm_coupling PRIVATE cosmosim_gravity)
+  add_executable(bench_tree_pm_sweep bench/bench_tree_pm_sweep.cpp tests/support/periodic_ewald_reference.cpp)
+  target_include_directories(bench_tree_pm_sweep PRIVATE tests/support)
+  target_link_libraries(bench_tree_pm_sweep PRIVATE cosmosim_gravity)
   add_executable(bench_tree_pm_force_error_map bench/bench_tree_pm_force_error_map.cpp)
   target_link_libraries(bench_tree_pm_force_error_map PRIVATE cosmosim_gravity)
   target_compile_definitions(bench_tree_pm_force_error_map PRIVATE COSMOSIM_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

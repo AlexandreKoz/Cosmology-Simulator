@@ -449,3 +449,20 @@ model to SFC cuts. Oversized future ranks can still be rejected at runtime.
 Qualification must exercise simultaneous planner, migration, hierarchy, PM,
 Tree, arena and output/restart peaks under finite budgets; allocator/backend
 unknowns retain existing reserves. These are limitations, not a 256^3 fit claim.
+
+## Optional TreePM coefficient owner (2026-10-10)
+
+The Gaussian pair table has one `kPersistentCache` reservation per enabled
+`TreePmCoordinator`, admitted before its sole allocation and committed only after
+construction. Its report entry uses the physical `sizeof` capacity and marks
+`governed_commitment`; failed allocation releases pending admission. Destruction
+frees the object before releasing its commitment. Disabling lookup on a later
+call retains the bounded table as an explicit cache high-water. No table exists
+on the default analytic path. Split/softening changes require no new allocation.
+
+Whole-gravity preflight includes the optional capacity. The workflow phase lease
+excludes it because the coordinator holds the separate persistent commitment,
+just as the communication arena has its own owner. No per-particle storage is
+added by this optimization; existing optional hierarchical split-force lanes
+remain governed by their existing transactions. This does not certify a large
+DMO simulation's whole-process fit.

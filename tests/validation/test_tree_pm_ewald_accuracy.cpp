@@ -103,6 +103,8 @@ struct SolverProfile {
   std::size_t max_leaf_size = 16;
   bool supply_converged_reference_force_scale = false;
   bool accuracy_certified = false;
+  cosmosim::gravity::TreePmAcceptancePolicy acceptance_policy = cosmosim::gravity::TreePmAcceptancePolicy::kStrictReference;
+  bool gaussian_pair_lookup_enabled = false;
 };
 
 struct ErrorMetrics {
@@ -490,6 +492,9 @@ void validateFixture(const ParticleFixture& fixture) {
   // Exercise the documented production defaults on the FFTW certification
   // path. The small naive-DFT fallback differs only in its explicitly
   // non-certifying bounded cutoff.
+  options.acceptance_policy = solver_profile.acceptance_policy;
+  options.gaussian_pair_lookup_enabled = solver_profile.gaussian_pair_lookup_enabled;
+  options.full_mac_diagnostics = false;
   options.tree_options.opening_theta = solver_profile.opening_theta;
   options.tree_options.opening_criterion = solver_profile.opening_criterion;
   options.tree_options.multipole_order = solver_profile.multipole_order;
@@ -1074,6 +1079,21 @@ void testTreePmAgainstIndependentEwald() {
         fixture.label == "xyz_seam_rectangular" ||
         fixture.label == "dmo_zeldovich_4cubed_initial";
     runAndRecord(fixture, ewald_reference, certified_profile, measure_translation, &results);
+    if (std::getenv("COSMOSIM_TREEPM_RECOVERY_QUALIFICATION") != nullptr) {
+      for (const bool adaptive : {false,true}) for (const bool lookup : {false,true}) {
+        auto candidate=certified_profile;
+        candidate.label=std::string("recovery_")+(adaptive?"adaptive":"strict")+(lookup?"_lookup":"_analytic");
+        candidate.accuracy_certified=false; // Writing this gate does not certify a mode.
+        candidate.acceptance_policy=adaptive ? cosmosim::gravity::TreePmAcceptancePolicy::kAdaptiveRelative :
+            cosmosim::gravity::TreePmAcceptancePolicy::kStrictReference;
+        candidate.gaussian_pair_lookup_enabled=lookup;
+        candidate.supply_converged_reference_force_scale=adaptive;
+        runAndRecord(fixture,ewald_reference,candidate,measure_translation,&results);
+#if COSMOSIM_ENABLE_FFTW
+        requireOrThrow(meetsAccuracyTarget(results.back()),"recovery TreePM failed unchanged Ewald accuracy target");
+#endif
+      }
+    }
     if (fixture.label == "dmo_zeldovich_4cubed_initial") {
       requireOrThrow(
           results.back().diagnostics.cutoff_radius_comoving <

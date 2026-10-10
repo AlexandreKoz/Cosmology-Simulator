@@ -1333,6 +1333,98 @@ void runEmptyRankSmoke(const ParallelRuntime& runtime, const std::filesystem::pa
 }
 
 #if COSMOSIM_ENABLE_HDF5
+[[nodiscard]] std::filesystem::path hierarchicalGrowthRoot(std::string_view backend,int ranks) {
+  return std::filesystem::path(COSMOSIM_DMO_ARTIFACT_ROOT)/
+      ("hierarchical_"+std::string(backend)+"_np"+std::to_string(ranks));
+}
+
+void runHierarchicalGrowthQualification(const ParallelRuntime& runtime) {
+  const auto root=hierarchicalGrowthRoot(currentExecutionBackend(),runtime.world_size);
+  if (runtime.world_rank==0) {std::filesystem::remove_all(root);std::filesystem::create_directories(root);}
+  barrier();
+  const auto initial=makeZeldovichState();
+  const auto initial_mode=directFourierMetrics(initial,runtime.world_rank==0);
+  const auto gathered_initial=gatherParticlesByStableId(initial,runtime,runtime.world_rank==0);
+  const auto run_case=[&](const char* label,unsigned rung,double dt,std::uint64_t steps) {
+    auto text=configText(runtime.world_size,label);
+    if (rung>0U) {
+      const std::string old="hierarchical_max_rung = 0";
+      text.replace(text.find(old),old.size(),"hierarchical_max_rung = "+std::to_string(rung));
+    }
+    const auto frozen=cosmosim::core::loadFrozenConfigFromString(text,label);
+    const cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
+    const auto report=runner.run(root/label,cosmosim::workflows::ReferenceWorkflowOptions{
+        .dt_time_code=dt,.write_outputs=true,.initial_state_override=&initial,.max_steps_override=steps});
+    requireGlobally(report.completed_steps==steps && report.restart_roundtrip_ok,runtime,
+        "hierarchical growth segment did not reach its prescribed duration/restart boundary");
+    return cosmosim::io::readRestartCheckpointHdf5(report.restart_path);
+  };
+  const auto reference=run_case("global_fine",0U,k_step_dt_code/4.0,8U);
+  const auto coarse=run_case("hierarchical_coarse",2U,k_step_dt_code,2U);
+  const auto refined=run_case("hierarchical_refined",2U,k_step_dt_code/2.0,4U);
+  requireOrThrow(std::abs(reference.integrator_state.current_time_code-coarse.integrator_state.current_time_code)<1e-15 &&
+      std::abs(reference.integrator_state.current_time_code-refined.integrator_state.current_time_code)<1e-15,
+      "hierarchical growth comparison has mismatched time endpoints");
+  const auto ref_mode=directFourierMetrics(reference.state,true);
+  const auto coarse_mode=directFourierMetrics(coarse.state,true);
+  const auto fine_mode=directFourierMetrics(refined.state,true);
+  const double coarse_error=std::abs(coarse_mode.fundamental_amplitude/ref_mode.fundamental_amplitude-1.0);
+  const double fine_error=std::abs(fine_mode.fundamental_amplitude/ref_mode.fundamental_amplitude-1.0);
+  const double expected_growth=refined.integrator_state.current_scale_factor/k_initial_scale_factor-1.0;
+  const double measured_growth=fine_mode.fundamental_amplitude/initial_mode.fundamental_amplitude-1.0;
+  requireOrThrow(expected_growth>0.0 && std::abs(measured_growth/expected_growth-1.0)<=0.075,
+      "hierarchical growing-mode increment failed the existing 7.5 percent linear-response envelope");
+  requireOrThrow(fine_error<=1e-4 && fine_error<=coarse_error+1e-12,
+      "hierarchical growing mode failed global-reference refinement");
+  const auto gathered_ref=gatherParticlesByStableId(reference.state,runtime,true);
+  const auto gathered_coarse=gatherParticlesByStableId(coarse.state,runtime,true);
+  const auto gathered_fine=gatherParticlesByStableId(refined.state,runtime,true);
+  if (runtime.world_rank==0) {
+    const auto frozen=cosmosim::core::loadFrozenConfigFromString(configText(runtime.world_size,"hierarchical_spectrum"),"hierarchical_spectrum");
+    cosmosim::analysis::DiagnosticsEngine diagnostics(frozen.config);
+    const cosmosim::analysis::PowerSpectrumEstimateOptions options{
+        .mesh_n=k_power_spectrum_mesh_n,.bin_count=k_power_spectrum_bin_count,
+        .mass_assignment=cosmosim::analysis::PowerSpectrumMassAssignment::kCloudInCell,
+        .window_correction=cosmosim::analysis::PowerSpectrumWindowCorrection::kDeconvolveAssignmentWindow,
+        .shot_noise_policy=cosmosim::analysis::PowerSpectrumShotNoisePolicy::kReportWithoutSubtraction};
+    const auto p0=diagnostics.computePowerSpectrumEstimate(gathered_initial,options);
+    const auto pr=diagnostics.computePowerSpectrumEstimate(gathered_ref,options);
+    const auto pc=diagnostics.computePowerSpectrumEstimate(gathered_coarse,options);
+    const auto pf=diagnostics.computePowerSpectrumEstimate(gathered_fine,options);
+    const auto& initial_bin=fundamentalPowerBin(p0);
+    const auto& reference_bin=fundamentalPowerBin(pr);
+    const auto& coarse_bin=fundamentalPowerBin(pc);
+    const auto& fine_bin=fundamentalPowerBin(pf);
+    requireOrThrow(reference_bin.mode_count==6U && fine_bin.mode_count==6U && initial_bin.power_code_volume>0.0,
+        "hierarchical spectrum gate must isolate the six fundamental Cartesian modes");
+    const double pc_error=std::abs(coarse_bin.power_code_volume/reference_bin.power_code_volume-1.0);
+    const double pf_error=std::abs(fine_bin.power_code_volume/reference_bin.power_code_volume-1.0);
+    requireOrThrow(pf_error<=2e-4 && pf_error<=pc_error+2e-12,
+        "hierarchical fundamental power failed global-reference refinement");
+    const double power_growth=std::sqrt(fine_bin.power_code_volume/initial_bin.power_code_volume)-1.0;
+    requireOrThrow(std::abs(power_growth/expected_growth-1.0)<=0.075,
+        "hierarchical production power-spectrum growth failed the linear-response envelope");
+    writePhysicalStateArtifact(root/"physical_state.tsv",PhysicalStateArtifact{
+        .execution_backend=std::string(currentExecutionBackend()),.world_size=runtime.world_size,
+        .current_time_code=coarse.integrator_state.current_time_code,
+        .current_scale_factor=coarse.integrator_state.current_scale_factor,
+        .step_index=coarse.integrator_state.step_index,.state=gathered_coarse});
+    std::cout<<std::setprecision(17)<<"HIERARCHICAL_GROWTH_QUALIFICATION ranks="<<runtime.world_size
+        <<" target_k="<<2.0*k_pi/k_box_size_mpc_comoving<<" target_modes=6"
+        <<" coarse_growth_error="<<coarse_error<<" refined_growth_error="<<fine_error
+        <<" coarse_power_error="<<pc_error<<" refined_power_error="<<pf_error<<'\n';
+  }
+  barrier();
+}
+
+void compareHierarchicalRankArtifacts() {
+  const auto reference=readPhysicalStateArtifact(hierarchicalGrowthRoot("mpi",1)/"physical_state.tsv");
+  for (const int ranks:{2,4}) {
+    const auto candidate=readPhysicalStateArtifact(hierarchicalGrowthRoot("mpi",ranks)/"physical_state.tsv");
+    static_cast<void>(requirePhysicalStateEquivalent(reference,candidate,"hierarchical np1/np"+std::to_string(ranks)));
+  }
+}
+
 void runScientificValidation(const ParallelRuntime& runtime, const std::filesystem::path& root) {
   const cosmosim::core::SimulationState initial_state = makeZeldovichState();
   const StateSummary initial_summary = summarizeState(
@@ -1742,6 +1834,22 @@ int main(int argc, char** argv) {
 #endif
   const ParallelRuntime runtime = parallelRuntime();
   try {
+    if (argc==2 && (std::string_view(argv[1])=="--hierarchical-qualification" ||
+        std::string_view(argv[1])=="--compare-hierarchical-artifacts")) {
+#if COSMOSIM_ENABLE_HDF5 && COSMOSIM_ENABLE_FFTW
+      if (std::string_view(argv[1])=="--hierarchical-qualification") runHierarchicalGrowthQualification(runtime);
+      else {
+        requireOrThrow(runtime.world_size==1,"hierarchical artifact comparison requires one process");
+        compareHierarchicalRankArtifacts();
+      }
+#else
+      throw std::runtime_error("hierarchical growth qualification requires HDF5 and FFTW");
+#endif
+#if COSMOSIM_ENABLE_MPI
+      MPI_Finalize();
+#endif
+      return 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--compare-rank-artifacts") {
       requireOrThrow(
           runtime.world_size == 1,

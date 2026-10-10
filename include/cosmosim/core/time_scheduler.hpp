@@ -136,6 +136,18 @@ struct ComovingGravityTimeStepInput {
   double scale_factor = 1.0;
 };
 
+// Independent coarse PM displacement criterion. The force/softening criterion
+// still selects particle rungs; this limits the interval between PM kicks.
+struct ComovingDisplacementTimeStepInput {
+  double mesh_or_split_length_comoving_code = 0.0;
+  double velocity_magnitude_peculiar_code = 0.0;
+  double scale_free_acceleration_magnitude_code = 0.0;
+  double scale_factor = 1.0;
+};
+
+[[nodiscard]] double computeComovingDisplacementTimeStep(
+    const ComovingDisplacementTimeStepInput& input);
+
 // Narrow runtime view consumed by adaptive timestep criteria. It is deliberately
 // smaller than SimulationState: criteria loops read only velocities, sound speed,
 // softening, source-module rates, and force-output spans needed to propose bins.

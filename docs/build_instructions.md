@@ -213,3 +213,30 @@ tests, MPI runs, benchmarks or scientific validation. Existing build/test floors
 remain required for the second campaign. The exact staged matrix and evidence
 requirements are in [p6_validation_campaign_plan_20261006.md](repair/p6_validation_campaign_plan_20261006.md).
 Optional modes must not become defaults until those gates are accepted.
+
+## Unified TreePM recovery manual validation — 20261010
+
+No configure, build, or test command was executed during this implementation.
+Run the following on a host with the corresponding preset dependencies:
+
+```bash
+./scripts/ci/check_repo_hygiene.sh
+cmake --preset cpu-only-debug
+cmake --build --preset build-cpu-debug
+ctest --preset test-cpu-debug --output-on-failure
+cmake --preset pm-hdf5-fftw-debug
+cmake --build --preset build-pm-hdf5-fftw-debug
+ctest --preset test-pm-hdf5-fftw-debug --output-on-failure -R 'tree_pm|treepm|hierarchical|dmo_zeldovich'
+cmake --preset mpi-hdf5-fftw-release
+cmake --build --preset build-mpi-hdf5-fftw-release
+ctest --preset test-mpi-hdf5-fftw-release --output-on-failure -R 'tree_pm|treepm|hierarchical|dmo_zeldovich'
+```
+
+OpenMP is enabled when available. Verify observed workers in benchmark records;
+an environment request does not prove that OpenMP was compiled or that the OS
+provided the requested team. The Release MPI preset requires the repository's
+Parallel-HDF5/FFTW-MPI dependency contract. `bench_tree_pm_sweep` is deliberately
+a single-owner diagnostic, including in that build; run distributed scientific
+checks through the registered MPI tests. Exact frozen-snapshot, Ewald, sweep,
+perf and hierarchical diagnostic commands are in the
+[campaign handoff](repair/treepm_unified_performance_recovery_20261010.md).

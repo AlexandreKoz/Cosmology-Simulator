@@ -221,8 +221,8 @@ struct NumericsConfig {
   // further bounded by current MemoryGovernor headroom.
   std::uint64_t hydro_active_batch_max_cells = 0;
   int max_global_steps = 1024;
-  // Production ReferenceWorkflow is intentionally single-rung until each
-  // particle/cell has an explicit last-kick epoch and per-bin KDK factors.
+  // Zero retains the safe global KDK default. Nonzero selects the provisional
+  // synchronized collisionless DMO hierarchy; scientific qualification pending.
   int hierarchical_max_rung = 0;
   int amr_max_level = 10;
   double gravity_softening_kpc_comoving = 1.0;
@@ -244,6 +244,8 @@ struct NumericsConfig {
   double treepm_tree_opening_theta = 0.7;
   double treepm_tree_relative_force_tolerance = 0.005;
   double treepm_tree_relative_force_acceleration_floor = 1.0e-30;
+  bool treepm_gaussian_pair_lookup_enabled = false;
+  bool treepm_full_mac_diagnostics = true;
   bool treepm_adaptive_acceptance_enabled = false;
   double treepm_adaptive_maximum_opening_angle = 0.25;
   bool treepm_identical_source_tree_reuse_enabled = false;

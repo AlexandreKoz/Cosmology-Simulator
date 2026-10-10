@@ -14,6 +14,10 @@
 #include "cosmosim/core/build_config.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 #if COSMOSIM_ENABLE_MPI
 #include <mpi.h>
 #endif
@@ -189,6 +193,93 @@ void requireEquivalentForces(
       }
     }
   }
+}
+
+void testRecoveryDirectPairsCutoffThreadsAndMemory() {
+#if COSMOSIM_ENABLE_MPI
+  int world_size=1; MPI_Comm_size(MPI_COMM_WORLD,&world_size);
+  if (world_size!=1) return;  // Separate distributed fixtures below own MPI routing.
+#endif
+  using namespace cosmosim::gravity;
+  constexpr std::size_t n=96U;
+  std::vector<double> x(n),y(n),z(n),mass(n,1.0),epsilon(n);
+  std::vector<std::uint8_t> overrides(n,1U);
+  std::vector<std::uint32_t> active(n);
+  for (std::size_t i=0;i<n;++i) {
+    active[i]=static_cast<std::uint32_t>(i);
+    x[i]=std::fmod(0.173*i,2.0);y[i]=std::fmod(0.257*i,3.0);z[i]=std::fmod(0.317*i,4.0);
+    epsilon[i]=0.002+0.0001*(i%7U);
+    // Exercise general multiple-image wrapping and negative coordinates.
+    if (i%2U) {x[i]-=8.0;y[i]+=9.0;z[i]-=20.0;}
+  }
+  TreePmOptions options;
+  options.pm_options.box_size_x_mpc_comoving=2.0;options.pm_options.box_size_y_mpc_comoving=3.0;
+  options.pm_options.box_size_z_mpc_comoving=4.0;
+  options.pm_options.gravitational_constant_code=1.0;
+  options.tree_options.gravitational_constant_code=1.0;
+  options.tree_options.max_leaf_size=1;
+  options.tree_options.multipole_order=TreeMultipoleOrder::kMonopole; // strict descends to pairs
+  options.split_policy=makeTreePmSplitPolicyFromMeshSpacing(1.25,3.0,0.125);
+  options.short_range_only=true;
+  const double cutoff=options.split_policy.cutoff_radius_comoving;
+  x[0]=0.0;y[0]=0.0;z[0]=0.0;
+  x[1]=cutoff;y[1]=0.0;z[1]=0.0;
+  x[2]=std::nextafter(cutoff,1.0);y[2]=0.0;z[2]=0.0;
+  x[3]=std::nextafter(cutoff,0.0);y[3]=0.0;z[3]=0.0;
+  x[4]=1.0;y[4]=0.0;z[4]=0.0; // exact half-box tie
+  ForceField direct{std::vector<double>(n),std::vector<double>(n),std::vector<double>(n)};
+  std::uint64_t expected_pairs=0;
+  for (std::size_t i=0;i<n;++i) for (std::size_t j=0;j<n;++j) {
+    if (i==j) continue;
+    const double dx=minimumImageDelta(x[j]-x[i],2.0),dy=minimumImageDelta(y[j]-y[i],3.0),dz=minimumImageDelta(z[j]-z[i],4.0);
+    const double r2=dx*dx+dy*dy+dz*dz;
+    if (r2>cutoff*cutoff) continue;
+    ++expected_pairs;
+    const double f=treePmSoftenedShortRangeInvR3(r2,std::max(epsilon[i],epsilon[j]),options.split_policy.split_scale_comoving);
+    direct.ax[i]+=f*dx;direct.ay[i]+=f*dy;direct.az[i]+=f*dz;
+  }
+  cosmosim::core::MemoryGovernor governor;
+  {
+    const PmGridShape shape{8,8,8};
+    const auto layout=cosmosim::parallel::makePmSlabLayout(8,8,8,1,0);
+    TreePmCoordinator coordinator(shape,layout,cosmosim::parallel::MpiContext(false,1,0),&governor);
+    ForceField field{std::vector<double>(n),std::vector<double>(n),std::vector<double>(n)};
+    const TreeSofteningView soften{.source_particle_epsilon_comoving=epsilon,
+        .source_particle_epsilon_override_mask=overrides};
+    TreePmForceAccumulatorView acc{active,field.ax,field.ay,field.az};
+    TreePmDiagnostics analytic,lookup;
+    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&analytic,soften);
+    requireOrThrow(analytic.local_traversal.direct_pair_evaluations==expected_pairs,"cutoff/identity changed pair set");
+    requireOrThrow(relativeL2Error(field,direct)<1e-13,"reverse-octant traversal changed physical interactions");
+    const auto baseline=field;
+    options.gaussian_pair_lookup_enabled=true;options.full_mac_diagnostics=false;
+    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&lookup,soften);
+    requireOrThrow(lookup.local_traversal.direct_pair_evaluations==expected_pairs,"lookup changed pair set");
+    requireOrThrow(lookup.local_traversal.visited_nodes==analytic.local_traversal.visited_nodes,"fast MAC changed traversal decisions");
+    requireOrThrow(relativeL2Error(field,baseline)<5e-9,"lookup exceeded force regression budget");
+    bool accounted=false;
+    for (const auto& entry:coordinator.memoryReport().entries) if (entry.label=="treepm.gaussian_pair_table") {
+      requireOrThrow(entry.owned_capacity_bytes==sizeof(TreePmGaussianCoefficientTable) && entry.governed_commitment,
+          "lookup retained storage is not governed physical capacity");accounted=true;
+    }
+    requireOrThrow(accounted,"lookup table absent from memory report");
+#if defined(_OPENMP)
+    const int old_threads=omp_get_max_threads();
+    omp_set_num_threads(1);
+    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&lookup,soften);
+    const auto one_thread=field;
+    omp_set_num_threads(4);
+    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&lookup,soften);
+    requireOrThrow(field.ax==one_thread.ax && field.ay==one_thread.ay && field.az==one_thread.az,
+        "target force accumulation changed with worker count");
+    omp_set_num_threads(old_threads);
+#endif
+    const auto retained=governor.snapshot().committed_bytes;
+    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,nullptr,soften);
+    requireOrThrow(governor.snapshot().committed_bytes==retained,"lookup table retained another allocation across epochs");
+    coordinator.shutdownMpiResources();
+  }
+  requireOrThrow(governor.snapshot().committed_bytes==0U,"lookup commitment outlived coordinator");
 }
 
 void testPeriodicTreePmAgainstDirectReference() {
@@ -1658,6 +1749,7 @@ int main() {
 #if COSMOSIM_ENABLE_MPI
   MPI_Init(nullptr, nullptr);
 #endif
+  testRecoveryDirectPairsCutoffThreadsAndMemory();
   testPeriodicTreePmAgainstDirectReference();
   testPeriodicTreeGeometryIsSeamSafeAndTranslationInvariant();
   testRelativeForceErrorMacUsesOwnerHistoryAcrossPeriodicSeam();
