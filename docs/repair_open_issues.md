@@ -1,5 +1,15 @@
 # Repair open issues
 
+20261012 Attempt 1 source repairs and optimizations await all execution gates:
+composed runtime first light, analytic/table/SIMD/shared-derivative accuracy,
+MPI collective failure/rank equivalence, restart migration, actual snapshot
+units/softening, adaptive 0.25 and separately 0.5, evolved trajectories,
+split-dependent independent total references and measured live-set memory.
+Cross-instance table pooling, detailed table-hit telemetry and PM workspace
+redesign are not implemented; no performance evidence justifies extra O(N)
+storage or new defaults. Compilation/tests/benchmarks were explicitly deferred
+by user. See the [exact status table](repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+
 
 20261010 P1–P5 corrective follow-up: Python 3.8-compatible complete-snapshot
 reading, coincident residual/zero-vector repair, constrained verified-v23

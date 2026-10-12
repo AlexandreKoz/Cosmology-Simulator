@@ -75,7 +75,11 @@ struct TreeGravityProfile {
   std::uint64_t cutoff_containment_rejections = 0;
   std::uint64_t geometric_history_fallbacks = 0;
   std::uint64_t reuse_attempted = 0;
-  std::uint64_t reuse_accepted = 0;
+  std::uint64_t reuse_accepted = 0;  // compatibility: identical reuse or motion refit
+  std::uint64_t refit_attempted = 0;
+  std::uint64_t refit_accepted = 0;
+  std::uint64_t refit_rejected = 0;
+  double geometry_preparation_ms = 0.0;
   // 0=disabled; 1=no valid tree; 2=source identity changed/unavailable;
   // 3=ownership/frame changed; 4=build options/softening changed; 5=identical reuse;
   // 6=certified motion refit; 7=original leaf escape; 8=row layout unknown/changed.

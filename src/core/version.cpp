@@ -22,7 +22,11 @@ std::string buildProvenance() {
   stream << "project=" << projectName() << ";version=" << versionString() << ";preset="
          << COSMOSIM_BUILD_PRESET << ";build_type=" << COSMOSIM_BUILD_TYPE << ";mpi="
          << COSMOSIM_ENABLE_MPI << ";hdf5=" << COSMOSIM_ENABLE_HDF5 << ";fftw="
-         << COSMOSIM_ENABLE_FFTW << ";cuda=" << COSMOSIM_ENABLE_CUDA;
+         << COSMOSIM_ENABLE_FFTW << ";cuda=" << COSMOSIM_ENABLE_CUDA
+         << ";compiler=" << COSMOSIM_BUILD_COMPILER << ";native_cpu=" << COSMOSIM_ENABLE_NATIVE_CPU
+         << ";lto=" << COSMOSIM_ENABLE_LTO << ";source=" << COSMOSIM_SOURCE_IDENTITY
+         << ";source_manifest_sha256=" << COSMOSIM_SOURCE_MANIFEST_SHA256
+         << ";dependencies=" << COSMOSIM_DEPENDENCY_PROVIDERS;
   return stream.str();
 }
 

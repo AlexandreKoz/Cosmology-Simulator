@@ -73,7 +73,7 @@ namespace {
     case RuntimeStageViewKind::kDriftParticles:
       switch (resource) {
         case Key::kParticlePosition: return Mode::kReadWrite;
-        case Key::kParticleVelocity: return Mode::kRead;
+        case Key::kParticleVelocity: return Mode::kReadWrite;
         case Key::kMigrationOwnership: return Mode::kRead;
         default: return std::nullopt;
       }
@@ -599,6 +599,10 @@ bool RuntimeModuleRegistry::frozen() const noexcept { return m_frozen; }
 
 std::size_t RuntimeModuleRegistry::descriptorCount() const noexcept {
   return m_descriptors.size();
+}
+
+std::span<const RuntimeModuleDescriptor> RuntimeModuleRegistry::descriptors() const noexcept {
+  return m_descriptors;
 }
 
 RuntimeExecutionPlan RuntimeModuleRegistry::freezeAndInstantiate(

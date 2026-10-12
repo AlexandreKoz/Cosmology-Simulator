@@ -245,6 +245,12 @@ struct NumericsConfig {
   double treepm_tree_relative_force_tolerance = 0.005;
   double treepm_tree_relative_force_acceleration_floor = 1.0e-30;
   bool treepm_gaussian_pair_lookup_enabled = false;
+  bool treepm_full_residual_lookup_enabled = false;
+  bool treepm_leaf_simd_enabled = false;
+  bool treepm_radial_coefficients_enabled = false;
+  int treepm_residual_block_size = 64;
+  int treepm_tree_max_leaf_size = 16;
+
   bool treepm_full_mac_diagnostics = true;
   bool treepm_adaptive_acceptance_enabled = false;
   double treepm_adaptive_maximum_opening_angle = 0.25;

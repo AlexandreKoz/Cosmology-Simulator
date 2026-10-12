@@ -1,5 +1,13 @@
 # Repair state recap (post-repair audit snapshot)
 
+20261012 Attempt 1 recovery: confirmed drift velocity access repaired, composed
+runtime coverage added, bounded geometry and optional governed arithmetic/SIMD
+paths implemented, production block/leaf controls and staged experiments wired,
+launcher mode and source/toolchain provenance repaired. **IMPLEMENTED IN SOURCE
+— NOT VALIDATED.** No compilation, scientific/MPI tests, benchmarks or long-run
+convergence executed, by request. Exact dispositions and manual commands:
+[handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+
 
 20261010 P1–P5 corrective follow-up: Python 3.8-compatible complete-snapshot
 reading, coincident residual/zero-vector repair, constrained verified-v23

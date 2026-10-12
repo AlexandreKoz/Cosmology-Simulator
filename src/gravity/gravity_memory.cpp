@@ -477,10 +477,12 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       checkedAdd(kTreePmResidualCounterBytes, kTreePmResidualSpatialCounterBytes,
                  "gravity residual worker counter bundle overflow"),
       "gravity residual worker counter overflow");
+  if (input.residual_block_size == 0U || input.residual_block_size > 4096U)
+    throw std::invalid_argument("gravity memory residual_block_size must be in [1,4096]");
   const std::uint64_t residual_block_count = checkedAdd(
-      input.local_target_count, kTreePmResidualBlockSize - 1U,
+      input.local_target_count, input.residual_block_size - 1U,
       "gravity residual diagnostic block count overflow") /
-      kTreePmResidualBlockSize;
+      input.residual_block_size;
   const std::uint64_t treepm_block_diagnostic_bytes = checkedMul(
       residual_block_count, sizeof(double),
       "gravity residual block diagnostic overflow");
@@ -633,8 +635,8 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
 
   const std::uint64_t bounded_feedback_bytes = checkedAdd(
       checkedMul(2U, sizeof(TreePmDiagnostics), "TreePM diagnostic object bytes"),
-      checkedMul(3U, sizeof(std::array<double, parallel::k_spatial_work_bin_count>),
-          "TreePM spatial history bytes"), "TreePM fixed feedback bytes");
+      checkedAdd(96U, checkedMul(3U, sizeof(std::array<double, parallel::k_spatial_work_bin_count>),
+          "TreePM spatial history bytes"), "TreePM coordinate bound bytes"), "TreePM fixed feedback bytes");
   addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kPersistent,
       "gravity.estimate.bounded_force_feedback", bounded_feedback_bytes,
       "coordinator and workflow current-force summaries, two decayed bins and one planner view; fixed size independent of particle and solve counts");

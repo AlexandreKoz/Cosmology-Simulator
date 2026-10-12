@@ -1179,6 +1179,12 @@ struct ConfigKeySpec {
       {"numerics.treepm_tree_relative_force_tolerance", "0.005"},
       {"numerics.treepm_tree_relative_force_acceleration_floor", "1.0e-30"},
       {"numerics.treepm_gaussian_pair_lookup_enabled", "false"},
+      {"numerics.treepm_full_residual_lookup_enabled", "false"},
+      {"numerics.treepm_leaf_simd_enabled", "false"},
+      {"numerics.treepm_radial_coefficients_enabled", "false"},
+      {"numerics.treepm_residual_block_size", "64"},
+      {"numerics.treepm_tree_max_leaf_size", "16"},
+
       {"numerics.treepm_full_mac_diagnostics", "true"},
       {"numerics.treepm_adaptive_acceptance_enabled", "false"},
       {"numerics.treepm_adaptive_maximum_opening_angle", "0.25"},
@@ -1831,6 +1837,11 @@ void validateConfig(const SimulationConfig& config) {
       config.numerics.treepm_tree_opening_theta <= 0.0) {
     throw ConfigError("numerics.treepm_tree_opening_theta must be finite and > 0");
   }
+  const int block = config.numerics.treepm_residual_block_size;
+  if (block != 16 && block != 32 && block != 64 && block != 128 && block != 256)
+    throw ConfigError("numerics.treepm_residual_block_size must be 16, 32, 64, 128 or 256");
+  if (config.numerics.treepm_tree_max_leaf_size < 1 || config.numerics.treepm_tree_max_leaf_size > 1024)
+    throw ConfigError("numerics.treepm_tree_max_leaf_size must be in [1,1024]");
   if (!std::isfinite(config.numerics.treepm_adaptive_maximum_opening_angle) ||
       config.numerics.treepm_adaptive_maximum_opening_angle <= 0.0 ||
       config.numerics.treepm_adaptive_maximum_opening_angle > 0.5) {
@@ -2320,6 +2331,11 @@ class NormalizedConfigStream {
          << frozen.config.numerics.treepm_tree_relative_force_acceleration_floor << '\n';
   stream << "treepm_gaussian_pair_lookup_enabled = "
          << (frozen.config.numerics.treepm_gaussian_pair_lookup_enabled ? "true" : "false") << '\n';
+  stream << "treepm_full_residual_lookup_enabled = " << (frozen.config.numerics.treepm_full_residual_lookup_enabled ? "true" : "false") << '\n';
+  stream << "treepm_radial_coefficients_enabled = " << (frozen.config.numerics.treepm_radial_coefficients_enabled ? "true" : "false") << '\n';
+  stream << "treepm_leaf_simd_enabled = " << (frozen.config.numerics.treepm_leaf_simd_enabled ? "true" : "false") << '\n';
+  stream << "treepm_residual_block_size = " << frozen.config.numerics.treepm_residual_block_size << '\n';
+  stream << "treepm_tree_max_leaf_size = " << frozen.config.numerics.treepm_tree_max_leaf_size << '\n';
   stream << "treepm_full_mac_diagnostics = "
          << (frozen.config.numerics.treepm_full_mac_diagnostics ? "true" : "false") << '\n';
   stream << "treepm_adaptive_acceptance_enabled = "
@@ -3014,6 +3030,21 @@ class NormalizedConfigStream {
   frozen.config.numerics.treepm_gaussian_pair_lookup_enabled = parseBool(
       requireString(entries, consumed, "numerics.treepm_gaussian_pair_lookup_enabled", defaultFor("numerics.treepm_gaussian_pair_lookup_enabled")),
       "numerics.treepm_gaussian_pair_lookup_enabled");
+  frozen.config.numerics.treepm_full_residual_lookup_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_full_residual_lookup_enabled", defaultFor("numerics.treepm_full_residual_lookup_enabled")),
+      "numerics.treepm_full_residual_lookup_enabled");
+  frozen.config.numerics.treepm_radial_coefficients_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_radial_coefficients_enabled", defaultFor("numerics.treepm_radial_coefficients_enabled")),
+      "numerics.treepm_radial_coefficients_enabled");
+  frozen.config.numerics.treepm_leaf_simd_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_leaf_simd_enabled", defaultFor("numerics.treepm_leaf_simd_enabled")),
+      "numerics.treepm_leaf_simd_enabled");
+  frozen.config.numerics.treepm_residual_block_size = parseNumber<int>(
+      requireString(entries, consumed, "numerics.treepm_residual_block_size", defaultFor("numerics.treepm_residual_block_size")),
+      "numerics.treepm_residual_block_size");
+  frozen.config.numerics.treepm_tree_max_leaf_size = parseNumber<int>(
+      requireString(entries, consumed, "numerics.treepm_tree_max_leaf_size", defaultFor("numerics.treepm_tree_max_leaf_size")),
+      "numerics.treepm_tree_max_leaf_size");
   frozen.config.numerics.treepm_full_mac_diagnostics = parseBool(
       requireString(entries, consumed, "numerics.treepm_full_mac_diagnostics", defaultFor("numerics.treepm_full_mac_diagnostics")),
       "numerics.treepm_full_mac_diagnostics");

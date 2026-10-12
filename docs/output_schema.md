@@ -1,5 +1,15 @@
 # Output schema guide
 
+20261012 adds source identity, source-manifest SHA-256 and dependency-provider
+text to existing build/derived-runtime provenance, without changing science
+snapshot v6, checkpoint v23 or provenance v7 field schemas. Source archives
+retain unavailable Git identity; a manifest checksum is explicitly a source
+identity, never a fabricated commit. Normalized configuration includes five
+new conservative TreePM controls; verified predecessor migration uses the
+documented `treepm_normalized_defaults_v2` receipt. See
+[restart admission](restart_checkpointing.md) and the
+[source handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+
 This guide documents snapshot, restart, and provenance payload contracts currently implemented in CosmoSim.
 
 Authoritative interfaces:

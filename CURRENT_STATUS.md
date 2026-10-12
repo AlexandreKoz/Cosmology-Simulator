@@ -1,5 +1,18 @@
 # Current repository status
 
+## Attempt 1 TreePM recovery — 2026-10-12
+
+**IMPLEMENTED IN SOURCE — NOT VALIDATED.** The confirmed drift velocity
+permission mismatch is repaired, with actual composed-graph regression
+coverage. Production now has bounded periodic arithmetic and early descent,
+optional governed full-residual/worker SIMD/shared radial kernels, typed
+block/leaf controls, separated experiments and build/archive provenance.
+All compilation, scientific/MPI tests, benchmarks and long-run convergence
+remain **NOT RUN — deferred by user**. Strict/full-diagnostic/global-KDK
+defaults remain; no speedup or 48 GiB fit is claimed. See the
+[disposition table and exact manual gates](docs/repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+Historical passing evidence below does not qualify these source changes.
+
 ## P6 source architecture — campaign label 20261006
 
 **SOURCE-IMPLEMENTED / VALIDATION PENDING.** This campaign executed no build,

@@ -162,21 +162,32 @@ def sweep(args):
     elif args.total_reference_manifest:
         raise ValueError('reference: --total-reference-manifest requires --total-reference')
     binary_hash = digest(executable)
-    axes = itertools.product(comma_values(args.meshes, int), comma_values(args.leaves, int),
-                             comma_values(args.blocks, int), comma_values(args.threads, int),
-                             comma_values(args.policies, str), comma_values(args.kernels, str))
+    axis_values = [comma_values(args.meshes, int), comma_values(args.leaves, int),
+                   comma_values(args.blocks, int), comma_values(args.threads, int),
+                   comma_values(args.policies, str), comma_values(args.kernels, str),
+                   comma_values(args.asmths, float) if args.asmths else [args.asmth],
+                   comma_values(args.rcuts, float) if args.rcuts else [args.rcut]]
+    candidate_count = math.prod(len(values) for values in axis_values)
+    if not 1 <= candidate_count <= args.maximum_candidates:
+        raise ValueError(f'{candidate_count} candidates exceeds staged budget {args.maximum_candidates}')
+    axes = itertools.product(*axis_values)
+    if not math.isfinite(args.maximum_angle) or not 0 < args.maximum_angle <= 0.5:
+        raise ValueError('maximum angle must be in (0,0.5]')
     rows = []
-    for mesh, leaf, block, threads, policy, kernel in axes:
+    for mesh, leaf, block, threads, policy, kernel, asmth, rcut in axes:
         if min(mesh, leaf, block, threads) <= 0 or block > 4096:
             raise ValueError('positive mesh/leaf/block/thread axes required; block <=4096')
-        name = f'm{mesh}_l{leaf}_b{block}_t{threads}_{policy}_{kernel}'
+        if not all(math.isfinite(x) and x > 0 for x in (asmth, rcut)):
+            raise ValueError('split parameters must be finite positive')
+        name = f'm{mesh}_l{leaf}_b{block}_t{threads}_{policy}_{kernel}_a{asmth}_c{rcut}'
         forces = args.output / f'{name}.forces.csv'
         command = [str(executable), '--mesh', str(mesh), '--leaf', str(leaf), '--block', str(block),
                    '--policy', policy, '--kernel', kernel, '--history', args.history,
+                   '--maximum-angle', str(args.maximum_angle), '--reuse', args.reuse, '--refit', args.refit,
                    '--accounting', args.accounting, '--repeats', str(args.repeats),
                    '--warmups', str(args.warmups), '--count', str(args.count), '--targets', str(args.targets),
                    '--box-x', str(args.box_x), '--box-y', str(args.box_y), '--box-z', str(args.box_z),
-                   '--asmth', str(args.asmth), '--rcut', str(args.rcut), '--epsilon', str(args.epsilon),
+                   '--asmth', str(asmth), '--rcut', str(rcut), '--epsilon', str(args.epsilon),
                    '--g', str(args.g), '--scale-factor', str(args.scale_factor),
                    '--ewald-level', str(args.ewald_level)]
         if args.particles:
@@ -200,19 +211,23 @@ def sweep(args):
                         returncode=result.returncode)
         (args.output / f'{name}.manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
         row = dict(candidate=name, mesh=mesh, leaf=leaf, block=block, threads=threads,
-                   policy=policy, kernel=kernel, status='failed' if result.returncode else 'measured')
+                   policy=policy, kernel=kernel, asmth_cells=asmth, rcut_cells=rcut, status='failed' if result.returncode else 'measured')
         if result.returncode == 0:
             records = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
             timings = [r for r in records if r['record'] == 'timing']
             if len(timings) != args.repeats:
                 raise ValueError(f'{name}: incomplete timing records')
-            for field in ('wall_ms', 'pm_ms', 'tree_build_ms', 'traversal_ms', 'pairs', 'nodes', 'opened', 'multipoles'):
+            for field in ('wall_ms', 'pm_ms', 'tree_build_ms', 'traversal_ms', 'pairs', 'nodes', 'opened', 'multipoles',
+                          'source_preprocess_ms', 'refit_ms', 'full_rebuild_ms', 'geometry_preparation_ms',
+                          'residual_lookup_targets', 'simd_leaf_targets', 'skipped_geometry'):
                 row[field] = statistics.median(r[field] for r in timings)
             row['peak_rss_bytes'] = max((r['peak_rss_bytes'] or 0) for r in timings) or None
             row['solver_retained_bytes'] = max(r['solver_retained_bytes'] for r in timings)
             row['observed_workers'] = max(r['workers'] for r in timings)
             config = next(r for r in records if r['record'] == 'configuration')
-            row.update(split=config['split'], cutoff=config['cutoff'])
+            row.update(split=config['split'], cutoff=config['cutoff'], maximum_angle=config['maximum_angle'],
+                       softening=config['softening'], build=config['build'], cpu=config['cpu'],
+                       reuse=config['reuse'], refit=config['refit'])
             for record in records:
                 if record['record'] == 'accuracy':
                     prefix = 'short' if record['kind'].startswith('matching_split') else 'ewald'
@@ -230,7 +245,8 @@ def sweep(args):
         baseline = next((b for b in rows if b['status']=='measured' and
                          b['mesh']==args.baseline_mesh and b['leaf']==args.baseline_leaf and
                          b['block']==args.baseline_block and b['kernel']=='analytic' and
-                         b['threads']==row['threads'] and b['policy']==row['policy']), None)
+                         b['threads']==row['threads'] and b['policy']==row['policy'] and
+                         b['asmth_cells']==row['asmth_cells'] and b['rcut_cells']==row['rcut_cells']), None)
         if baseline and row['status']=='measured':
             row['baseline'] = baseline['candidate']
             row['wall_speedup'] = baseline['wall_ms']/row['wall_ms']
@@ -271,12 +287,18 @@ def main():
     run.add_argument('--output', type=Path, required=True)
     run.add_argument('--particles', type=Path)
     run.add_argument('--target-ids', type=Path)
-    run.add_argument('--meshes', default='64,96,128,192')
-    run.add_argument('--leaves', default='4,8,16,32')
+    run.add_argument('--meshes', default='64')
+    run.add_argument('--leaves', default='16')
     run.add_argument('--blocks', default='64')
     run.add_argument('--threads', default='4')
-    run.add_argument('--policies', default='strict,adaptive')
-    run.add_argument('--kernels', default='analytic,lookup')
+    run.add_argument('--policies', default='strict')
+    run.add_argument('--kernels', default='analytic')
+    run.add_argument('--asmths', help='staged comma-separated smoothing-cell candidates')
+    run.add_argument('--rcuts', help='staged comma-separated cutoff-cell candidates')
+    run.add_argument('--maximum-angle', type=float, default=0.25)
+    run.add_argument('--reuse', choices=['off','on'], default='off')
+    run.add_argument('--refit', choices=['off','on'], default='off')
+    run.add_argument('--maximum-candidates', type=int, default=40, help='fail before launch if a staged experiment exceeds this bound')
     run.add_argument('--history', choices=['fallback', 'bootstrap'], default='fallback')
     run.add_argument('--accounting', choices=['full', 'fast'], default='full')
     for key, default in [('count',4096),('targets',4096),('repeats',5),('warmups',1),

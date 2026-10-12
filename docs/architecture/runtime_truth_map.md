@@ -1,5 +1,16 @@
 # Runtime truth map (Stage 0 freeze audit)
 
+20261012 additive interface clarification: drift owns position/velocity
+read/write through its typed view and reads migration ownership. Registry
+`descriptors()` exposes an immutable inspection span, invalidated by registry
+mutation/destruction, without granting resource access. TreePM bounds,
+coefficient tables and worker staging are derived coordinator-owned state;
+none become particle, scheduler or restart authority. Production serial memory
+estimation may evict optional acceleration caches before mandatory admission;
+the additive `trimOptionalAccelerationCaches` API must never overlap a solve.
+Tree generation/layout/frame checks and PM/source epochs remain authoritative.
+See the [source/lifetime contract](../repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+
 _Date: 2026-04-25 (UTC)_
 
 ## Scope and method

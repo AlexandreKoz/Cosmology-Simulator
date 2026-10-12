@@ -4,11 +4,13 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "cosmosim/cosmosim.hpp"
+#include "cosmosim/workflows/runtime_module_registry.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
 
@@ -105,6 +107,22 @@ int main() {
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
   cosmosim::workflows::ReferenceWorkflowOptions options;
   options.write_outputs = false;
+  options.register_runtime_modules = [&](cosmosim::workflows::RuntimeModuleRegistry& registry) {
+    using namespace cosmosim::workflows;
+    std::uint64_t grants=0U;
+    for (const auto& module : registry.descriptors()) for (const auto& task : module.stage_tasks) {
+      if (task.task_id != "time.drift_particles") continue;
+      for (const auto access : task.resources) {
+        if ((access.resource == RuntimeResourceKey::kParticlePosition || access.resource == RuntimeResourceKey::kParticleVelocity) &&
+            access.mode == RuntimeResourceAccessMode::kReadWrite) ++grants;
+        if (access.resource == RuntimeResourceKey::kMigrationOwnership && access.mode == RuntimeResourceAccessMode::kRead) ++grants;
+      }
+    }
+    std::uint64_t minimum=0U,maximum=0U;
+    MPI_Allreduce(&grants,&minimum,1,MPI_UINT64_T,MPI_MIN,MPI_COMM_WORLD);
+    MPI_Allreduce(&grants,&maximum,1,MPI_UINT64_T,MPI_MAX,MPI_COMM_WORLD);
+    if (minimum != 3U || maximum != 3U) throw std::runtime_error("reference drift grants differ across ranks");
+  };
   options.initial_particle_scheduler_identity_records = schedulerSeedForRank(world_rank);
   const cosmosim::workflows::ReferenceWorkflowReport report = runner.run(options);
 

@@ -75,6 +75,7 @@ option(COSMOSIM_ENABLE_TESTS "Build unit and integration tests" ON)
 option(COSMOSIM_ENABLE_BENCHMARKS "Build benchmark/profiling hooks" ON)
 option(COSMOSIM_ENABLE_PROFILING "Enable built-in profiling instrumentation" ON)
 option(COSMOSIM_ENABLE_LTO "Enable interprocedural optimization (LTO)" OFF)
+option(COSMOSIM_ENABLE_NATIVE_CPU "Tune C++ targets for this host only (nonportable experiment)" OFF)
 option(COSMOSIM_STRICT_IO_WARNINGS "Treat first-party cosmosim_io warnings as errors" OFF)
 option(COSMOSIM_REQUIRE_PARALLEL_HDF5
   "Fail configure unless the selected HDF5 installation links the MPIO APIs required by collective science snapshots" OFF)
@@ -201,6 +202,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "")
 endif()
 
 include(CheckCXXSourceCompiles)
+unset(COSMOSIM_HAVE_REQUIRED_CXX20_STDLIB CACHE)
 check_cxx_source_compiles(
   "#include <span>\n#include <vector>\nint main(){ std::vector<int> v{1,2}; std::span<int> s(v); return s.size() == 2 ? 0 : 1; }"
   COSMOSIM_HAVE_REQUIRED_CXX20_STDLIB)
@@ -211,6 +213,16 @@ if(NOT COSMOSIM_HAVE_REQUIRED_CXX20_STDLIB)
 endif()
 message(STATUS
   "CHUI toolchain: cxx=${CMAKE_CXX_COMPILER} id=${CMAKE_CXX_COMPILER_ID} version=${CMAKE_CXX_COMPILER_VERSION} cxx20_span=available")
+if(COSMOSIM_ENABLE_NATIVE_CPU)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(FATAL_ERROR "COSMOSIM_ENABLE_NATIVE_CPU requires a GCC/Clang host toolchain; portable builds remain supported")
+  endif()
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=native" COSMOSIM_HAVE_NATIVE_CPU_FLAG)
+  if(NOT COSMOSIM_HAVE_NATIVE_CPU_FLAG)
+    message(FATAL_ERROR "Selected compiler does not support the requested -march=native experiment")
+  endif()
+endif()
 
 # Dependencies gated by explicit feature options.
 set(COSMOSIM_HAVE_OPENMP OFF)
@@ -292,7 +304,7 @@ if(COSMOSIM_ENABLE_HDF5)
     unset(COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE CACHE)
     unset(COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE)
     check_cxx_source_compiles(
-      "#include <mpi.h>\n#include <hdf5.h>\nint main(){ hid_t f=H5Pcreate(H5P_FILE_ACCESS); hid_t x=H5Pcreate(H5P_DATASET_XFER); if(f<0||x<0) return 1; if(H5Pset_fapl_mpio(f,MPI_COMM_WORLD,MPI_INFO_NULL)<0) return 2; if(H5Pset_dxpl_mpio(x,H5FD_MPIO_COLLECTIVE)<0) return 3; H5Pclose(x); H5Pclose(f); return 0; }"
+      "#include <mpi.h>\n#include <hdf5.h>\n#ifndef H5_HAVE_PARALLEL\n#error Selected HDF5 headers are serial\n#endif\nint main(){ hid_t f=H5Pcreate(H5P_FILE_ACCESS); hid_t x=H5Pcreate(H5P_DATASET_XFER); if(f<0||x<0) return 1; if(H5Pset_fapl_mpio(f,MPI_COMM_WORLD,MPI_INFO_NULL)<0) return 2; if(H5Pset_dxpl_mpio(x,H5FD_MPIO_COLLECTIVE)<0) return 3; H5Pclose(x); H5Pclose(f); return 0; }"
       COSMOSIM_HDF5_MPIO_CAPABILITY_PROBE)
     set(CMAKE_REQUIRED_INCLUDES "${_cosmosim_saved_required_includes}")
     set(CMAKE_REQUIRED_LIBRARIES "${_cosmosim_saved_required_libraries}")
@@ -300,6 +312,38 @@ if(COSMOSIM_ENABLE_HDF5)
       set(COSMOSIM_HDF5_PARALLEL ON)
     endif()
   endif()
+
+  cosmosim_path_looks_conda("${HDF5_INCLUDE_DIRS}" _hdf5_headers_conda)
+  cosmosim_path_looks_conda("${HDF5_LIBRARIES}" _hdf5_libraries_conda)
+  if(HDF5_INCLUDE_DIRS AND HDF5_LIBRARIES AND NOT _hdf5_headers_conda STREQUAL _hdf5_libraries_conda)
+    message(FATAL_ERROR "HDF5 provider mismatch: headers=${HDF5_INCLUDE_DIRS}; libraries=${HDF5_LIBRARIES}. Select one coherent HDF5_ROOT/provider in a fresh build directory.")
+  endif()
+  # Compile/link checks cannot detect compatible symbols from different HDF5
+  # releases. Native configure also checks selected header/runtime versions.
+  set(_cosmosim_saved_required_includes "${CMAKE_REQUIRED_INCLUDES}")
+  set(_cosmosim_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+  set(CMAKE_REQUIRED_INCLUDES ${HDF5_INCLUDE_DIRS})
+  if(TARGET HDF5::HDF5)
+    set(CMAKE_REQUIRED_LIBRARIES HDF5::HDF5)
+  else()
+    set(CMAKE_REQUIRED_LIBRARIES ${HDF5_LIBRARIES})
+  endif()
+  if(COSMOSIM_ENABLE_MPI)
+    list(APPEND CMAKE_REQUIRED_LIBRARIES MPI::MPI_CXX)
+  endif()
+  if(NOT CMAKE_CROSSCOMPILING)
+    include(CheckCXXSourceRuns)
+    unset(COSMOSIM_HDF5_VERSION_COHERENT CACHE)
+    check_cxx_source_runs("#include <hdf5.h>\nint main(){ unsigned a,b,c; if(H5get_libversion(&a,&b,&c)<0) return 1; return a!=H5_VERS_MAJOR || b!=H5_VERS_MINOR || c!=H5_VERS_RELEASE; }"
+      COSMOSIM_HDF5_VERSION_COHERENT)
+    if(NOT COSMOSIM_HDF5_VERSION_COHERENT)
+      message(FATAL_ERROR "HDF5 header/runtime version probe failed: headers=${HDF5_INCLUDE_DIRS}; libraries=${HDF5_LIBRARIES}. Select one coherent provider; see CMakeFiles/CMakeConfigureLog.yaml or CMakeFiles/CMakeError.log.")
+    endif()
+  else()
+    message(STATUS "Cross build: HDF5 header/runtime version execution deferred to target qualification")
+  endif()
+  set(CMAKE_REQUIRED_INCLUDES "${_cosmosim_saved_required_includes}")
+  set(CMAKE_REQUIRED_LIBRARIES "${_cosmosim_saved_required_libraries}")
 
   set(_cosmosim_hdf5_primary_include "<target-provided>")
   if(HDF5_INCLUDE_DIRS)
@@ -338,6 +382,15 @@ if(COSMOSIM_ENABLE_FFTW)
   endif()
   if(COSMOSIM_ENABLE_MPI AND NOT "${COSMOSIM_FFTW_MPI_TARGET}" STREQUAL "")
     set(COSMOSIM_HAVE_FFTW_MPI ON)
+    set(_cosmosim_saved_required_libraries "${CMAKE_REQUIRED_LIBRARIES}")
+    set(CMAKE_REQUIRED_LIBRARIES ${COSMOSIM_FFTW_MPI_TARGET} ${COSMOSIM_FFTW_TARGET} MPI::MPI_CXX)
+    unset(COSMOSIM_FFTW_MPI_CAPABILITY CACHE)
+    check_cxx_source_compiles("#include <mpi.h>\n#include <fftw3-mpi.h>\nint main(){ ptrdiff_t n,s; fftw_mpi_init(); return fftw_mpi_local_size_3d(8,8,5,MPI_COMM_WORLD,&n,&s)<0; }"
+      COSMOSIM_FFTW_MPI_CAPABILITY)
+    set(CMAKE_REQUIRED_LIBRARIES "${_cosmosim_saved_required_libraries}")
+    if(NOT COSMOSIM_FFTW_MPI_CAPABILITY)
+      message(FATAL_ERROR "Selected FFTW-MPI headers/libraries cannot compile/link with selected MPI: ${COSMOSIM_FFTW_MPI_TARGET}")
+    endif()
   endif()
   message(STATUS
     "CHUI dependency: FFTW target=${COSMOSIM_FFTW_TARGET} version=${FFTW_VERSION} mpi_target=${COSMOSIM_FFTW_MPI_TARGET}")
@@ -385,6 +438,7 @@ if(COSMOSIM_ENABLE_PYTHON)
 endif()
 
 # Build metadata and generated configuration header.
+include(cmake/cosmosim_source_identity.cmake)
 set(COSMOSIM_SELECTED_PRESET "${COSMOSIM_PRESET_NAME}")
 if(COSMOSIM_SELECTED_PRESET STREQUAL "")
   if(DEFINED ENV{CMAKE_PRESET_NAME})
@@ -400,10 +454,16 @@ if(NOT COSMOSIM_BUILD_TYPE_UPPER STREQUAL "" AND DEFINED CMAKE_CXX_FLAGS_${COSMO
   string(APPEND COSMOSIM_EFFECTIVE_CXX_FLAGS " ${CMAKE_CXX_FLAGS_${COSMOSIM_BUILD_TYPE_UPPER}}")
 endif()
 string(STRIP "${COSMOSIM_EFFECTIVE_CXX_FLAGS}" COSMOSIM_EFFECTIVE_CXX_FLAGS)
+if(COSMOSIM_ENABLE_NATIVE_CPU)
+  string(APPEND COSMOSIM_EFFECTIVE_CXX_FLAGS " -march=native")
+endif()
 string(REPLACE "\\" "\\\\" COSMOSIM_EFFECTIVE_CXX_FLAGS_ESCAPED "${COSMOSIM_EFFECTIVE_CXX_FLAGS}")
 string(REPLACE "\"" "\\\"" COSMOSIM_EFFECTIVE_CXX_FLAGS_ESCAPED "${COSMOSIM_EFFECTIVE_CXX_FLAGS_ESCAPED}")
 
 set(COSMOSIM_GENERATED_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
+set(COSMOSIM_DEPENDENCY_PROVIDERS "mpi=${MPI_CXX_COMPILER}|${MPI_CXX_LIBRARIES};hdf5=${HDF5_VERSION}|${HDF5_INCLUDE_DIRS}|${HDF5_LIBRARIES};fftw=${FFTW_VERSION}|${COSMOSIM_FFTW_TARGET}|${COSMOSIM_FFTW_MPI_TARGET}")
+string(REPLACE "\\" "\\\\" COSMOSIM_DEPENDENCY_PROVIDERS_ESCAPED "${COSMOSIM_DEPENDENCY_PROVIDERS}")
+string(REPLACE "\"" "\\\"" COSMOSIM_DEPENDENCY_PROVIDERS_ESCAPED "${COSMOSIM_DEPENDENCY_PROVIDERS_ESCAPED}")
 file(MAKE_DIRECTORY "${COSMOSIM_GENERATED_INCLUDE_DIR}/cosmosim/core")
 
 configure_file(
@@ -433,6 +493,10 @@ add_library(cosmosim_core STATIC
   src/core/memory_accounting.cpp
   src/core/process_memory.cpp
   src/core/openmp_runtime.cpp)
+
+add_executable(cosmosim_treepm_experiment_configs tools/treepm_experiment_configs.cpp)
+target_link_libraries(cosmosim_treepm_experiment_configs PRIVATE cosmosim_core)
+cosmosim_require_cxx20(cosmosim_treepm_experiment_configs)
 
 target_include_directories(cosmosim_core
   PUBLIC
@@ -957,6 +1021,10 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_runtime_module_registry tests/unit/test_runtime_module_registry.cpp)
   target_link_libraries(test_unit_runtime_module_registry PRIVATE cosmosim_workflows)
   add_test(NAME unit_runtime_module_registry COMMAND test_unit_runtime_module_registry)
+  configure_file(tests/integration/test_treepm_experiment_configs.cmake.in
+    "${CMAKE_BINARY_DIR}/test_treepm_experiment_configs.cmake" @ONLY)
+  add_test(NAME integration_treepm_experiment_configs
+    COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/test_treepm_experiment_configs.cmake")
 
   add_executable(test_unit_module_registry tests/unit/test_module_registry.cpp)
   target_link_libraries(test_unit_module_registry PRIVATE cosmosim_core)
@@ -2520,6 +2588,22 @@ if(COSMOSIM_ENABLE_BENCHMARKS)
   endif()
 
 endif()
+
+# Apply the opt-in host target consistently to first-party libraries and
+# executables. Imported dependencies and installed interface flags are untouched.
+get_property(_cosmosim_host_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_cosmosim_host_target IN LISTS _cosmosim_host_targets)
+  get_target_property(_cosmosim_host_type ${_cosmosim_host_target} TYPE)
+  if(_cosmosim_host_type MATCHES "^(STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY|EXECUTABLE)$")
+    if(COSMOSIM_ENABLE_NATIVE_CPU)
+      target_compile_options(${_cosmosim_host_target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-march=native>")
+    endif()
+    # Reuse the already checked IPO mechanism for final executable links too.
+    if(COSMOSIM_ENABLE_LTO AND _cosmosim_host_type STREQUAL "EXECUTABLE")
+      set_property(TARGET ${_cosmosim_host_target} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    endif()
+  endif()
+endforeach()
 
 cosmosim_generate_feature_summary(
   OUTPUT_TEXT "${CMAKE_BINARY_DIR}/cosmosim_feature_summary.txt"

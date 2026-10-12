@@ -67,6 +67,8 @@ class GravityRuntime : public GravityAccelerationProvider,
   virtual void execute(GravityStageView& view) = 0;
   // Current retained-capacity-aware phase model. The owner continues to hold
   // its physical reservation; the dispatcher only performs a preflight.
+  // At the serial task boundary this may evict derived optional caches to make
+  // headroom for mandatory work; it never changes source/force/scheduler truth.
   [[nodiscard]] virtual RuntimeTaskMemoryEstimate estimateMemory(
       const core::SimulationState&) const {
     return {0U, false, "gravity owner does not publish a complete memory model"};

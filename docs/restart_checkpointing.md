@@ -473,6 +473,22 @@ checksums are numerical baselines rather than new bitwise replay expectations.
 
 ## Constrained normalized-configuration migration (20261010)
 
+20261012 extends this admission contract to `treepm_normalized_defaults_v2`.
+Active snapshot/restart/provenance schemas remain v6/v23/v7. A verified,
+closed global-KDK predecessor can omit the exact five new default lines
+(`treepm_full_residual_lookup_enabled=false`, `treepm_leaf_simd_enabled=false`,
+`treepm_radial_coefficients_enabled=false`, block size 64, leaf size 16), with or
+without the previous exact two-line default group. The prior two-line-only
+projection is retained. Arbitrary missing keys, changed scientific settings,
+nondefault accelerators, opaque hashes and unverified payloads do not migrate.
+Successful migrations write a v2 receipt; existing v1/v2 receipts survive
+subsequent exact resumes. The current normalized text must be reproduced by
+the authoritative loader before admission. Exact matching configurations keep
+their existing admission path. Derived acceleration caches are never restart
+truth. The v1 description below records the original predecessor group and its
+unchanged integrity/synchronization requirements. See the
+[20261012 handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+
 `io::restartConfigurationCompatibilityRecord` is an additive admission helper.
 Exact admission now checks normalized text as well as its hash. A mismatched
 configuration can use **treepm_normalized_defaults_v1** only when:

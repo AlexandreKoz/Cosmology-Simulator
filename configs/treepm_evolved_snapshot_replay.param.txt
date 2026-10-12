@@ -1,0 +1,86 @@
+# Evolved-state external IC replay, NOT an exact checkpoint restart.
+# Verify against the actual snap_1698 header/Units/manifest before use:
+# AREPO-format stored coordinates Mpc/h, masses Msun/h, velocities km/s/sqrt(a).
+# Assumed uniform Plummer epsilon=15 kpc comoving; historical forces and arbitrary
+# per-particle softening overrides are not imported by this bridge deck.
+# Four steps are a first-light gate; raise max_global_steps after qualification.
+schema_version = 1
+
+[units]
+length_unit = mpc
+mass_unit = msun
+velocity_unit = km_s
+coordinate_frame = comoving
+
+[mode]
+mode = cosmo_cube
+ic_file = ../ics/snap_1698.hdf5
+ic_convention = gadget_arepo_bridge_v1
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e22
+ic_bridge_source_mass_unit_to_si = 1.98847e30
+ic_bridge_source_velocity_unit_to_si = 1000
+ic_bridge_coordinate_frame = comoving
+ic_bridge_velocity_convention = gadget_arepo_stored_peculiar
+ic_bridge_length_hubble_exponent = -1
+ic_bridge_length_scale_factor_exponent = 0
+ic_bridge_mass_hubble_exponent = -1
+ic_bridge_mass_scale_factor_exponent = 0
+ic_bridge_velocity_hubble_exponent = 0
+ic_bridge_velocity_scale_factor_exponent = 0
+ic_chunk_particle_count = 65536
+ic_staging_particle_count = 65536
+
+[cosmology]
+omega_matter = 0.3099
+omega_lambda = 0.6901
+omega_baryon = 0.0488911
+hubble_param = 0.67742
+box_size = 14.761890702961235 mpc
+
+[numerics]
+a_begin = 0.76366757582395572
+z_begin = 0.30947028741013982
+a_end = 1
+integrator_time_variable = scale_factor
+max_global_steps = 4
+hierarchical_max_rung = 0
+gravity_solver = treepm
+gravity_softening = 15 kpc
+treepm_pm_grid = 64
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 6.25
+treepm_assignment_scheme = tsc
+treepm_enable_window_deconvolution = true
+treepm_tree_opening_criterion = com_distance
+treepm_tree_opening_theta = 0.7
+treepm_tree_relative_force_tolerance = 0.005
+treepm_adaptive_acceptance_enabled = false
+treepm_adaptive_maximum_opening_angle = 0.25
+treepm_full_mac_diagnostics = true
+treepm_gaussian_pair_lookup_enabled = false
+treepm_full_residual_lookup_enabled = false
+treepm_leaf_simd_enabled = false
+treepm_radial_coefficients_enabled = false
+treepm_identical_source_tree_reuse_enabled = false
+treepm_topology_refit_enabled = false
+treepm_residual_block_size = 64
+treepm_tree_max_leaf_size = 16
+
+[physics]
+enable_cooling = false
+enable_star_formation = false
+enable_feedback = false
+enable_stellar_evolution = false
+enable_black_hole_agn = false
+enable_tracers = false
+enable_metal_diffusion = false
+
+[parallel]
+mpi_ranks_expected = 1
+omp_threads = 4
+process_memory_budget_bytes = 51539607552
+
+[output]
+run_name = treepm_snapshot_replay_firstlight
+snapshot_interval_steps = 1
+write_restarts = true

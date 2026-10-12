@@ -185,6 +185,9 @@ class RuntimeModuleRegistry {
   void registerModule(RuntimeModuleDescriptor descriptor);
   [[nodiscard]] bool frozen() const noexcept;
   [[nodiscard]] std::size_t descriptorCount() const noexcept;
+  // Read-only composition inspection. Invalidated by registration or freeze;
+  // descriptors cannot be changed through this surface.
+  [[nodiscard]] std::span<const RuntimeModuleDescriptor> descriptors() const noexcept;
   [[nodiscard]] RuntimeExecutionPlan freezeAndInstantiate(
       const RuntimeModuleFactoryContext& context);
 

@@ -1,5 +1,7 @@
 #include "../support/test_require.hpp"
 #include <cmath>
+#include <cfenv>
+#include <memory>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -8,6 +10,7 @@
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
 #include "gravity/internal/tree_pm_transport_planner.hpp"
 #include "gravity/internal/tree_pm_geometry.hpp"
+#include "gravity/internal/tree_pm_leaf_kernel.hpp"
 #include "gravity/internal/tree_pm_acceptance.hpp"
 
 namespace {
@@ -359,9 +362,119 @@ void testSparseTreePmAggregateRoundPlanner() {
   CHUI_REQUIRE(threw);
 }
 
+// Independent Simpson integration of Gaussian derivatives with respect to x=r^2.
+long double gaussianDerivative(long double x, long double a, unsigned order) {
+  constexpr unsigned intervals = 8192U;
+  long double sum = 0;
+  for (unsigned i=0; i<=intervals; ++i) {
+    const long double v = static_cast<long double>(i)/intervals;
+    const long double f = std::pow(v,2U+2U*order)*std::exp(-x*v*v/(4*a*a));
+    sum += (i==0U || i==intervals ? 1 : (i%2U ? 4 : 2))*f;
+  }
+  const long double scale = 1/(2*std::sqrt(std::acos(-1.0L))*a*a*a);
+  return scale*sum/(3*intervals)*std::pow(-1/(4*a*a),order);
+}
+
+void testResidualRadialDerivativesAndFullTable() {
+  using namespace cosmosim::gravity;
+  for (const double ratio : {0.0001,0.01,0.2,1.0,3.0,10.0}) {
+    const double a=0.25, epsilon=a*ratio, cutoff=5*a;
+    CHUI_REQUIRE(TreePmResidualCoefficientTable::eligible(epsilon,a,cutoff));
+    const auto table = std::make_unique<TreePmResidualCoefficientTable>(epsilon,a,cutoff);
+    std::size_t accelerated=0;
+    for (const double r_ratio : {1e-6,0.001,0.01,0.1,0.249,0.25,0.251,0.5,1.0,2.0,4.0,5.0}) {
+      const double r=a*r_ratio, x=r*r;
+      const long double d=static_cast<long double>(x)+static_cast<long double>(epsilon)*epsilon;
+      const long double soft=std::pow(d,-1.5L);
+      const long double reference=soft-gaussianDerivative(x,a,0);
+      const long double first=-3*soft/d-2*gaussianDerivative(x,a,1);
+      const long double second=15*soft/(d*d)-4*gaussianDerivative(x,a,2);
+      const auto radial=treePmResidualRadialCoefficients(x,epsilon,a);
+      CHUI_REQUIRE(std::abs(radial.value-reference) < 2e-12L*std::max(soft,std::abs(reference)));
+      CHUI_REQUIRE(std::abs(radial.first_over_r-first) < 3e-10L*std::max(3*soft/d,std::abs(first)));
+      CHUI_REQUIRE(std::abs(radial.contracted_second-second) < 3e-9L*std::max(15*soft/(d*d),std::abs(second)));
+      double value;
+      if (table->evaluate(x,value)) {
+        ++accelerated;
+        CHUI_REQUIRE(std::abs(value-reference) <= 5.1e-11L*std::abs(reference));
+      }
+    }
+    // Large epsilon can make every sampled cell fail the deliberately strict
+    // interpolation envelope; eligibility promises a domain, not a hit rate.
+    if (ratio <= 3.0) CHUI_REQUIRE(accelerated > 0U);
+    double unused;
+    CHUI_REQUIRE(!table->evaluate(0.0,unused));
+    CHUI_REQUIRE(!table->evaluate(-1.0,unused));
+    CHUI_REQUIRE(!table->matches(epsilon*2,a,cutoff));
+  }
+  // Independent residual zero: interpolation must refuse ill-conditioned
+  // cancellation even though the cell and homogeneous softening are legal.
+  constexpr double a = 0.25, epsilon = 0.25;
+  long double left=0.0L,right=25.0L*a*a;
+  const auto residual = [](long double x) {
+    constexpr long double scale = 0.25L;
+    return std::pow(x+scale*scale,-1.5L)-referenceH(x/(4*scale*scale))/(8*scale*scale*scale);
+  };
+  CHUI_REQUIRE(residual(left)>0.0L && residual(right)<0.0L);
+  for (unsigned iteration=0;iteration<96U;++iteration) {
+    const long double middle=(left+right)/2;
+    if (residual(middle)>0) left=middle; else right=middle;
+  }
+  const double zero=static_cast<double>((left+right)/2);
+  const auto cancellation_table=std::make_unique<TreePmResidualCoefficientTable>(epsilon,a,5*a);
+  double interpolated;
+  CHUI_REQUIRE(std::abs(residual(zero))<1e-12L);
+  CHUI_REQUIRE(!cancellation_table->evaluate(zero,interpolated));
+  CHUI_REQUIRE(std::abs(treePmSoftenedShortRangeInvR3(zero,epsilon,a)-residual(zero))<1e-12L);
+  CHUI_REQUIRE(!TreePmResidualCoefficientTable::eligible(0.0,1.0,5.0));
+  CHUI_REQUIRE(!TreePmResidualCoefficientTable::eligible(1e-200,1.0,5.0));
+  CHUI_REQUIRE(!TreePmResidualCoefficientTable::eligible(1e-20,1.0,5.0));
+}
+
+void testLeafVectorArithmeticAgainstScalar() {
+  using namespace cosmosim::gravity;
+  using namespace cosmosim::gravity::internal;
+  TreePmLeafScratch scalar{},vector{};
+  for (std::size_t i=0;i<k_tree_pm_leaf_lanes;++i) {
+    scalar.dx[i]=.001*(i+1); scalar.dy[i]=-.003*i; scalar.dz[i]=.007*i;
+    scalar.epsilon2[i]=.01; scalar.mass[i]=i+1;
+    scalar.coefficient[i]=.25*(i+1);
+  }
+  scalar.dx[0]=scalar.dy[0]=scalar.dz[0]=scalar.epsilon2[0]=scalar.coefficient[0]=0.0;
+  vector=scalar;
+  treePmLeafGeometry(scalar,false);treePmLeafGeometry(vector,treePmLeafAvx2Available());
+  treePmLeafContributions(scalar,1.5,false);treePmLeafContributions(vector,1.5,treePmLeafAvx2Available());
+  for (std::size_t i=0;i<k_tree_pm_leaf_lanes;++i) {
+    CHUI_REQUIRE(std::abs(scalar.r2[i]-vector.r2[i]) < 1e-15);
+    CHUI_REQUIRE(std::abs(scalar.softened[i]-vector.softened[i]) < 1e-12);
+    CHUI_REQUIRE(std::abs(scalar.ax[i]-vector.ax[i]) < 1e-15);
+    CHUI_REQUIRE(std::abs(scalar.ay[i]-vector.ay[i]) < 1e-15);
+    CHUI_REQUIRE(std::abs(scalar.az[i]-vector.az[i]) < 1e-15);
+  }
+}
+
+void testBoundedPeriodicMetric() {
+  using namespace cosmosim::gravity::internal;
+  for (const double length : {1.0,2.0,3.0,4.0,0.7}) {
+    for (const double delta : {-4.5*length,-2.0*length,-length,-0.5*length,
+        std::nextafter(0.5*length,0.0),0.5*length,std::nextafter(0.5*length,length),length,2.5*length}) {
+      const auto metric=treePmPeriodicMetric(delta,delta,0.0,length);
+      const double reference=delta-length*std::nearbyint(delta/length);
+      CHUI_REQUIRE(metric(delta)==reference);
+    }
+    // An unwrapped node frame is certified independently from source positions.
+    CHUI_REQUIRE(!treePmPeriodicMetric(length,2*length,0.0,length).bounded);
+    CHUI_REQUIRE(treePmPeriodicMetric(length,2*length,length,length).bounded);
+    CHUI_REQUIRE(!treePmPeriodicMetric(0,length,0.0,length,false).bounded);
+  }
+}
+
 }  // namespace
 
 int main() {
+  testResidualRadialDerivativesAndFullTable();
+  testBoundedPeriodicMetric();
+  testLeafVectorArithmeticAgainstScalar();
   testStableZeroAndTinyRadius();
   testCoincidentResidualLookupConsistency();
   testGaussianLookupAcrossInterval();

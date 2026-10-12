@@ -1,5 +1,37 @@
 # Profiling and benchmark workflow
 
+## Attempt 1 staged experiments — 20261012
+
+The frozen-source driver now defaults to a single mesh/leaf/block/policy/kernel
+candidate. Mesh 64/96/128, leaves 4/8/16/32 and blocks 16/32/64/128/256 should
+be compared in stages; candidate count is checked before launch (default cap
+40). `--asmths` and `--rcuts` add bounded split studies. `--maximum-angle 0.25`
+and 0.5 are separate adaptive experiments. Kernels are `analytic`, `lookup`,
+`full_residual`, `simd`, `simd_full_residual` and `radial`. Reuse/refit are
+independently controlled with `--reuse on|off` and `--refit on|off`; unchanged
+frozen-state reuse does not represent moving production-source reuse.
+
+Production uses the same target block setting through
+`numerics.treepm_residual_block_size` (default64), with leaf size controlled by
+`treepm_tree_max_leaf_size`. The typed C++ experiment generator writes isolated
+normalized decks. Preserve runtime's emitted `normalized_config.param.txt`,
+hash, build/source identity and event logs for every comparison.
+
+Benchmark JSONL/CSV adds source preprocessing, explicit refit/rebuild and node
+geometry preparation timing, compiler/CPU/source/provider metadata and selected
+mode target counts. Production events expose requested flags, block/leaf and
+actual eligible target counters. `residual_lookup_targets` counts table-eligible
+targets with a table installed, not interpolation hits. `simd_leaf_targets`
+counts targets selecting AVX2 staging, not vector occupancy. `skipped_geometry`
+in benchmark output (`skipped_geometry_evaluations` in runtime) identifies
+unevaluated COM/envelope/softening guards. Existing exact interaction/node
+counts and worker imbalance remain; no new per-pair clocks/atomics were added.
+
+Each physical split needs its own short-force oracle. The existing independent
+total-reference manifest gate remains mandatory for external total comparisons;
+matching short forces or fewer interactions alone cannot certify PM+Tree.
+No new timing was collected. See the [exact staged commands and memory gates](repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+
 ## OpenMP concurrency contract
 
 `ProfilerSession` and `CounterRegistry` use per-thread shards. Worker threads

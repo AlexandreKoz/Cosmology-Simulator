@@ -19,6 +19,7 @@
 #include <utility>
 
 #include "cosmosim/core/config.hpp"
+#include "cosmosim/core/build_config.hpp"
 #include "cosmosim/core/memory_accounting.hpp"
 #include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/cuda_runtime.hpp"
@@ -261,6 +262,9 @@ namespace {
   record.normalized_config = frozen_config.normalized_text;
   record.derived_runtime_state =
       core::serializeDerivedRuntimeConfig(core::deriveRuntimeConfig(frozen_config));
+  record.derived_runtime_state += "source_identity=" + std::string(COSMOSIM_SOURCE_IDENTITY) + "\n";
+  record.derived_runtime_state += "source_manifest_sha256=" + std::string(COSMOSIM_SOURCE_MANIFEST_SHA256) + "\n";
+  record.derived_runtime_state += "dependency_providers=" + std::string(COSMOSIM_DEPENDENCY_PROVIDERS) + "\n";
   const core::OpenMpRuntimeInfo openmp = core::openMpRuntimeInfo();
   record.derived_runtime_state += "openmp_compiled=" + std::string(openmp.compiled ? "true" : "false") + "\n";
   record.derived_runtime_state += "openmp_requested_threads=" + std::to_string(openmp.requested_threads) + "\n";

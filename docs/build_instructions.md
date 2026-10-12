@@ -4,6 +4,10 @@ This page is the authoritative build and dependency workflow for CosmoSim.
 
 ## Supported toolchain baseline
 
+Attempt 1 recovery is source-only and unvalidated. The
+[20261012 handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md)
+contains the manual first-light, numerical, MPI and performance gates.
+
 - CMake >= 3.24
 - C++20 compiler **and standard library** with the facilities used by CHUÍ. Configure probes `#include <span>` / `std::span` instead of trusting `CMAKE_CXX_STANDARD` alone. GCC 9 / libstdc++ 9 is therefore unsupported for the current tree; newer toolchains are accepted by capability rather than by a hard-coded compiler brand/version.
 - Ninja (recommended generator)
@@ -129,6 +133,63 @@ FFT-PM, HDF5, restart-topology, or Parallel-HDF5 evidence.
 
 
 ## Toolchain and dependency provenance
+
+### GCC 13 with one system provider family on Linux Mint/Ubuntu
+
+Use a fresh build directory/preset variant when changing compilers or providers.
+These commands assume GCC 13, Ninja, system MPI, Parallel HDF5 C and
+FFTW/FFTW-MPI development packages are already installed. Inspect `command -v`
+results; select wrappers from the intended system/module stack.
+
+```bash
+command -v gcc-13 g++-13 mpicc mpicxx h5pcc
+env -u CONDA_PREFIX -u CMAKE_PREFIX_PATH -u CPATH -u CPLUS_INCLUDE_PATH -u LIBRARY_PATH -u LD_LIBRARY_PATH \
+  cmake --preset mpi-hdf5-fftw-release \
+  -DCMAKE_C_COMPILER=gcc-13 -DCMAKE_CXX_COMPILER=g++-13 \
+  -DMPI_C_COMPILER="$(command -v mpicc)" \
+  -DMPI_CXX_COMPILER="$(command -v mpicxx)" \
+  -DHDF5_C_COMPILER_EXECUTABLE="$(command -v h5pcc)"
+cmake --build --preset build-mpi-hdf5-fftw-release
+ctest --preset test-mpi-hdf5-fftw-release --output-on-failure
+```
+
+Run from a shell whose PATH resolves those wrappers to the intended provider;
+unsetting `CONDA_PREFIX` alone does not change PATH. Where the distro uses
+`h5pcc.openmpi` or `h5pcc.mpich`, substitute that selected wrapper. For a module
+stack, retain its required library paths instead of removing them. Check
+compiler path/version, MPI libraries, HDF5 wrapper/includes/libraries, MPIO
+capability and FFTW-MPI target in configure output and generated
+`cosmosim_build_metadata.json`. Replace a cache selecting GCC 9 with a fresh
+build directory. CMake never silently replaces the user's compiler or shell.
+
+The refreshed C++20 probe checks the standard library. Parallel-HDF5 admission
+requires parallel headers and linked MPIO APIs. Known Conda/system HDF5 header
+and library mixtures fail with selected paths; native configure also executes
+an exact header/runtime-version check. Cross builds explicitly defer that
+runtime check. FFTW-MPI is compile/link checked against selected MPI. Identical
+versions alone cannot prove arbitrary custom providers have compatible ABIs.
+
+### Portable and native experiments
+
+Portable `cpu-only-release` and `mpi-hdf5-fftw-release` remain unchanged.
+Each has optional `-native`, `-lto` and `-native-lto` configure/build/test variants,
+for example `mpi-hdf5-fftw-release-native-lto` and
+`build-mpi-hdf5-fftw-release-native-lto`. `COSMOSIM_ENABLE_NATIVE_CPU=ON` checks
+GCC/Clang support and applies `-march=native` to C++ targets only. These are
+host-specific experiments; use the portable variant for heterogeneous nodes.
+LTO uses existing `COSMOSIM_ENABLE_LTO`/IPO capability checks. No fast-math
+option is added. Compare builds with identical normalized scientific settings,
+inputs, target IDs, thread/rank placement and warmup policy.
+
+Metadata records actual Git HEAD when available and a separate sorted source
+manifest SHA-256. Archives label `source-archive-manifest-sha256:...`; their Git
+identity remains `unavailable`. `source_manifest.sha256` lists included source,
+documentation and config paths with hashes. Compiler/provider identity and run
+configuration remain separate from source identity. Reconfigure after applying
+an archive patch or changing Git HEAD before collecting provenance.
+
+The tracked `chui` launcher is executable. Archive extraction can lose mode
+bits; use `python3 ./chui run CONFIG --preset PRESET`, or `chmod +x chui`.
 
 Every configure reports the selected C++ compiler path/version and the resolved MPI, HDF5, FFTW, and FFTW-MPI providers that are relevant to the chosen preset. `cosmosim_build_metadata.json` also records `feature_hdf5_parallel`, so launcher/runtime diagnostics can distinguish a normal HDF5 build from a build capable of the one-file MPI science backend. If a Conda MPI wrapper is combined with a system compiler/HDF5 stack, CMake emits a mixed-prefix warning instead of silently overriding the user's selection. This is a risk diagnostic, not a blanket Conda prohibition.
 

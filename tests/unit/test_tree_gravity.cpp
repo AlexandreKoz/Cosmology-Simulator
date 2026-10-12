@@ -739,6 +739,24 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
       8U * distributed_estimate.report.distributed.local_owned_bytes);
 }
 
+void testProductionBlockMemoryEstimate() {
+  // Partial final blocks require ceil(targets/block), including non-power-of-two N.
+  for (const std::size_t block : {16U,32U,64U,128U,256U}) {
+    const auto estimate=cosmosim::gravity::estimateGravityMemory({
+        .local_source_count=513U, .local_target_count=513U,
+        .residual_block_size=block, .pm_shape={8U,8U,8U},
+    });
+    bool found=false;
+    for (const auto& entry : estimate.report.entries) {
+      if (entry.label=="gravity.estimate.treepm_residual_block_diagnostics") {
+        found=true;
+        assert(entry.estimated_next_step_bytes==((513U+block-1U)/block)*sizeof(double));
+      }
+    }
+    assert(found);
+  }
+}
+
 void testGasRefinementForceConvergesAtFixedMassAndCom() {
   constexpr double epsilon = 0.05;
   cosmosim::gravity::TreeGravityOptions options;
@@ -882,6 +900,7 @@ int main() {
   testEveryMacOpensTargetContainingNode();
   testPmPlanResourcesAndDmoProcessPreflight();
   testAdaptiveNodeReserveAndMemoryEstimate();
+  testProductionBlockMemoryEstimate();
   testAuthoritativeGasGeometryMatchesDirectSoftenedReference();
   testGasRefinementForceConvergesAtFixedMassAndCom();
   testTreeAndTreePmCommonAcceptanceConformanceCorpus();

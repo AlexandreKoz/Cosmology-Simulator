@@ -1,6 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <bit>
+#include <cstdint>
+#include <limits>
 #include <cmath>
 #include <stdexcept>
 
@@ -233,6 +237,130 @@ class TreePmGaussianCoefficientTable {
   return treePmSoftenedShortRangeInvR3Unchecked(
       squared_distance, epsilon_comoving, split_scale_comoving);
 }
+
+// Derivatives of f(x), x=r^2, for acceleration d*f(x). The contractions are
+// f'(r)/r=2 df/dx and (f''(r)-f'(r)/r)/r^2=4 d^2f/dx^2. One exponential and
+// one erf supply all three coefficients; the small-t series avoids cancellation.
+struct TreePmResidualRadialCoefficients {
+  double value;
+  double first_over_r;
+  double contracted_second;
+};
+
+[[nodiscard]] inline TreePmResidualRadialCoefficients treePmResidualRadialCoefficients(
+    double x, double epsilon, double a) noexcept {
+  const double d = x + epsilon*epsilon;
+  const double softened = 1.0/(d*std::sqrt(d));
+  const double t = (0.25*x/a)/a;
+  constexpr double c = 2.25675833419102514779231780624309034;
+  double h, dh, ddh;
+  if (t < 0.015625) {
+    // Simultaneous Horner derivatives of the established n<=7 series.
+    constexpr std::array<double, 8> coefficient{
+        1.0/3.0, -1.0/5.0, 1.0/14.0, -1.0/54.0,
+        1.0/264.0, -1.0/1560.0, 1.0/10800.0, -1.0/85680.0};
+    h = coefficient.back(); dh = 0.0; ddh = 0.0;
+    for (std::size_t i = 7U; i > 0U; --i) {
+      ddh = ddh*t + 2.0*dh;
+      dh = dh*t + h;
+      h = h*t + coefficient[i-1U];
+    }
+    h *= c; dh *= c; ddh *= c;
+  } else {
+    const double q = std::sqrt(t);
+    const double exponential = std::exp(-t);
+    h = (std::erf(q) - 0.5*c*q*exponential)/(t*q);
+    dh = (0.5*c*exponential - 1.5*h)/t;
+    ddh = (-0.5*c*exponential - 2.5*dh)/t;
+  }
+  const double scale = ((0.125/a)/a)/a;
+  const double dt_dx = (0.25/a)/a;
+  return {softened - scale*h,
+      -3.0*softened/d - 2.0*scale*dt_dx*dh,
+      15.0*softened/(d*d) - 4.0*scale*dt_dx*dt_dx*ddh};
+}
+
+// Optional homogeneous-pair accelerator. Geometric bins in s=r^2+eps^2,
+// indexed by exponent/mantissa bits, resolve the Plummer core without log or
+// sqrt in eligible pair evaluations. Each cell stores cubic Hermite data and
+// an absolute fourth-derivative error envelope. Ill-conditioned cancellation,
+// zero/underflow softening and unsupported dynamic ranges use the analytic law.
+// Fixed storage, independent of particle/node/thread count. No per-pair allocation.
+class TreePmResidualCoefficientTable {
+ public:
+  static constexpr std::size_t k_cells = 16384U;
+  static constexpr unsigned k_shift = 43U; // 512 mantissa bins per exponent
+  static constexpr double k_relative_error_limit = 5.0e-11;
+
+  [[nodiscard]] static bool eligible(double epsilon, double a, double cutoff) noexcept {
+    const double e2 = epsilon*epsilon;
+    const double end = cutoff*cutoff + e2;
+    if (!std::numeric_limits<double>::is_iec559 || sizeof(double) != sizeof(std::uint64_t) ||
+        !std::isnormal(e2) || !std::isnormal(end) || !std::isnormal(a*a) ||
+        !std::isnormal(((0.125/a)/a)/a) || end <= e2) return false;
+    const auto begin_code = std::bit_cast<std::uint64_t>(e2) >> k_shift;
+    const auto end_code = std::bit_cast<std::uint64_t>(end) >> k_shift;
+    return end_code >= begin_code && end_code - begin_code + 1U <= k_cells;
+  }
+  TreePmResidualCoefficientTable(double epsilon, double a, double cutoff) noexcept
+      : m_epsilon(epsilon), m_a(a), m_cutoff(cutoff), m_epsilon2(epsilon*epsilon) {
+    if (!eligible(epsilon, a, cutoff)) return;
+    // Start at the first knot >= eps^2; the tiny omitted core interval falls back.
+    const auto bits = std::bit_cast<std::uint64_t>(m_epsilon2);
+    m_begin = (bits >> k_shift) + ((bits & ((1ULL << k_shift)-1U)) != 0U);
+    const auto end = std::bit_cast<std::uint64_t>(cutoff*cutoff+m_epsilon2) >> k_shift;
+    m_count = end >= m_begin ? static_cast<std::size_t>(end-m_begin+1U) : 0U;
+    for (std::size_t i = 0; i < m_count; ++i) {
+      const double left = knot(m_begin+i), right = knot(m_begin+i+1U);
+      const double x = left-m_epsilon2, h = right-left;
+      const auto l = treePmResidualRadialCoefficients(x, epsilon, a);
+      const auto r = treePmResidualRadialCoefficients(right-m_epsilon2, epsilon, a);
+      auto& cell = m_cell[i];
+      cell = {l.value, r.value, 0.5*h*l.first_over_r, 0.5*h*r.first_over_r, 0.0};
+      // Hermite error <= h^4 max|f''''(x)|/384. Plummer derivative is
+      // (945/16)s^(-11/2). Gaussian integral gives a global bound and,
+      // for x>0, the tighter unscreened Newtonian derivative bound.
+      const double hs = h/left;
+      const double plummer = (945.0/16.0)/384.0/(left*std::sqrt(left))*hs*hs*hs*hs;
+      const double ha = (0.25*h/a)/a;
+      double gaussian = ((0.5*0.564189583547756286948079451560772586/a)/a)/a /
+          (11.0*384.0)*ha*ha*ha*ha;
+      if (x > 0.0) {
+        const double hx = h/x;
+        const double newton = (945.0/16.0)/384.0/(x*std::sqrt(x))*hx*hx*hx*hx;
+        gaussian = std::min(gaussian, newton);
+      }
+      cell.error = 2.0*(plummer+gaussian) + 128.0*std::numeric_limits<double>::epsilon()*
+          (std::abs(l.value)+std::abs(r.value)+1.0/(left*std::sqrt(left)));
+    }
+  }
+  [[nodiscard]] bool matches(double epsilon, double a, double cutoff) const noexcept {
+    return epsilon == m_epsilon && a == m_a && cutoff == m_cutoff;
+  }
+  // False means the caller must use its analytic reference, not another table.
+  [[nodiscard]] bool evaluate(double x, double& value) const noexcept {
+    if (!(x > 0.0) || !std::isfinite(x)) return false;
+    const double s = x+m_epsilon2;
+    const auto code = std::bit_cast<std::uint64_t>(s) >> k_shift;
+    if (code < m_begin || code-m_begin >= m_count) return false;
+    const auto& cell = m_cell[static_cast<std::size_t>(code-m_begin)];
+    const double left = knot(code), h = knot(code+1U)-left;
+    const double u = (s-left)/h, u2=u*u, u3=u2*u;
+    value = (2*u3-3*u2+1)*cell.left + (u3-2*u2+u)*cell.left_slope +
+        (-2*u3+3*u2)*cell.right + (u3-u2)*cell.right_slope;
+    return std::isfinite(value) && std::isfinite(cell.error) &&
+        cell.error <= k_relative_error_limit*std::abs(value);
+  }
+ private:
+  struct Cell { double left, right, left_slope, right_slope, error; };
+  [[nodiscard]] static double knot(std::uint64_t code) noexcept {
+    return std::bit_cast<double>(code << k_shift);
+  }
+  double m_epsilon, m_a, m_cutoff, m_epsilon2;
+  std::uint64_t m_begin = 0U;
+  std::size_t m_count = 0U;
+  std::array<Cell, k_cells> m_cell{};
+};
 
 [[nodiscard]] inline double treePmGaussianFourierLongRangeFilterUnchecked(
     double wave_number_comoving,

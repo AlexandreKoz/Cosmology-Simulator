@@ -325,7 +325,8 @@ ProvenanceRecord makeProvenanceRecord(
     int rank,
     std::string_view normalized_config_text) {
   ProvenanceRecord record;
-  record.git_sha = git_sha;
+  record.git_sha = (git_sha == "unknown" || git_sha == "unavailable" || git_sha.empty())
+      ? COSMOSIM_SOURCE_GIT : git_sha;
   record.compiler_id = collectCompilerId();
   record.compiler_version = collectCompilerVersion();
   record.build_preset = COSMOSIM_BUILD_PRESET;
@@ -334,7 +335,9 @@ ProvenanceRecord makeProvenanceRecord(
                             ",fftw=" + std::to_string(COSMOSIM_ENABLE_FFTW) +
                             ",cuda=" + std::to_string(COSMOSIM_ENABLE_CUDA) +
                             ",python=" + std::to_string(COSMOSIM_ENABLE_PYTHON) +
-                            ",openmp=" + std::to_string(COSMOSIM_HAVE_OPENMP);
+                            ",openmp=" + std::to_string(COSMOSIM_HAVE_OPENMP) +
+                            ",lto=" + std::to_string(COSMOSIM_ENABLE_LTO) +
+                            ",native_cpu=" + std::to_string(COSMOSIM_ENABLE_NATIVE_CPU);
   record.config_hash_hex = config_hash_hex;
   record.normalized_config_hash_hex = config_hash_hex;
   record.integrity_digest_algorithm = "sha256";
