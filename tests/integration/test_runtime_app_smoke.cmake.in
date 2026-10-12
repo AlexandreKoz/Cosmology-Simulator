@@ -177,6 +177,22 @@ if(NOT runtime_off_cadence_snapshot_count EQUAL 1 OR
     "off-cadence endpoint must publish exactly one snap_001.hdf5 and one completion marker")
 endif()
 
+# First-light regression must also pass real drift/gravity dispatch repeatedly.
+file(REMOVE_RECURSE "${runtime_smoke_run_root}")
+file(READ "${runtime_smoke_config}" runtime_multistep_text)
+string(REPLACE "max_global_steps = 1" "max_global_steps = 3" runtime_multistep_text "${runtime_multistep_text}")
+string(REPLACE "time_end_code = 0.0101" "time_end_code = 0.011" runtime_multistep_text "${runtime_multistep_text}")
+file(WRITE "${runtime_smoke_root}/multistep.param.txt" "${runtime_multistep_text}")
+execute_process(COMMAND "@CMAKE_BINARY_DIR@/cosmosim_harness" "${runtime_smoke_root}/multistep.param.txt"
+  RESULT_VARIABLE multistep_result OUTPUT_VARIABLE multistep_out ERROR_VARIABLE multistep_err TIMEOUT 60)
+if(NOT multistep_result EQUAL 0 OR NOT multistep_out MATCHES "completed_steps=3")
+  message(FATAL_ERROR "reference runtime did not complete three force/drift steps: ${multistep_out} ${multistep_err}")
+endif()
+file(READ "${runtime_smoke_run_dir}/operational_events.json" multistep_ops)
+if(NOT multistep_ops MATCHES "gravity.pm_long_range_field")
+  message(FATAL_ERROR "multistep smoke never recorded a gravity force refresh")
+endif()
+
 # The smoke proves artifact creation above, then removes its temporary run tree
 # so ordinary CTest execution does not leave runtime products in the source package.
 file(REMOVE_RECURSE "${runtime_smoke_root}")

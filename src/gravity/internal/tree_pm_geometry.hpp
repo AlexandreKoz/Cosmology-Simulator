@@ -6,6 +6,31 @@
 
 namespace cosmosim::gravity::internal {
 
+// Certify once per target/axis from actual source or node bounds. Tree centers
+// and COMs may live in an unwrapped frame; canonical particles do not certify
+// their deltas. No normalization or new coordinate lanes are needed.
+struct TreePmPeriodicMetric {
+  double length = 0.0;
+  bool bounded = false;
+  [[nodiscard]] double operator()(double delta) const noexcept {
+    if (!(length > 0.0)) return delta;
+    const double half = 0.5 * length;
+    // Division can round an adjacent representable ratio onto a half tie.
+    // Retain the established nearbyint result in this narrow boundary band.
+    if (!bounded || std::abs(std::abs(delta) - half) <=
+        4.0 * std::numeric_limits<double>::epsilon() * length)
+      return delta - length * std::nearbyint(delta / length);
+    return delta > half ? delta - length : (delta < -half ? delta + length : delta);
+  }
+};
+
+[[nodiscard]] inline TreePmPeriodicMetric treePmPeriodicMetric(
+    double minimum, double maximum, double target, double length,
+    bool round_to_nearest = true) noexcept {
+  return {length, round_to_nearest && std::isfinite(minimum) && std::isfinite(maximum) &&
+      minimum - target >= -length && maximum - target <= length};
+}
+
 // Deltas have already used each axis's general nearest-image operation.
 // The maximum remains the established conservative unwrapped-cube envelope.
 struct TreePmAabbDistances {

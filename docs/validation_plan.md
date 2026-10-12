@@ -1,5 +1,20 @@
 # Validation plan
 
+## Attempt 1 recovery gates — 20261012
+
+Source regressions now cover actual composed runtime admission/drift grants,
+multi-step CLI gravity progress, MPI grant agreement, periodic half ties and
+multi-wrap frame certificates, independent long-double radial derivatives,
+error-gated residual tables, scalar/AVX2 lanes, coincidence/self/tails,
+fast/full accepted-work equality, admitted/denied/evicted governed caches,
+reuse/refit generation/layout invalidation, evolved bridge unit factors and
+production hierarchical optional-kernel/restart comparisons. Existing force,
+Ewald, timestep-refinement and distributed assertions retain their thresholds.
+All are **NOT RUN — deferred by user**. Execute the
+[A–F manual sequence](repair/treepm_deep_hotpath_attempt1_closure_20261012.md)
+before accepting performance/numerical claims. Adaptive 0.5, snapshot replay,
+independent total periodic forces and 48 GiB fit each need separate evidence.
+
 CosmoSim uses a four-level validation ladder: unit, integration, regression, convergence.
 
 ## Validation structure in-repo

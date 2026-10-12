@@ -1,5 +1,18 @@
 # CHUÍ
 
+2026-10-12 TreePM recovery repairs the actual drift resource contract and adds
+bounded periodic arithmetic, early descent, optional homogeneous residual/SIMD
+kernels, production block/leaf tuning and explicit source/toolchain provenance.
+**Compilation, tests, MPI, benchmarks and convergence were not run, by request.**
+New arithmetic modes remain opt-in; global KDK and conservative numerical
+defaults remain. The [source handoff](docs/repair/treepm_deep_hotpath_attempt1_closure_20261012.md)
+contains the exact changes, memory contracts and manual qualification sequence.
+Generate separate normalized experiment decks with
+`cosmosim_treepm_experiment_configs BASE.param.txt NEW_DIRECTORY` after building.
+The evolved snapshot example is conditional external-IC replay, not checkpoint
+continuation. If extraction loses launcher permissions, use
+`python3 ./chui run CONFIG --preset PRESET`.
+
 P6 optional performance/integration architecture is **SOURCE-IMPLEMENTED /
 VALIDATION PENDING**. Conservative defaults remain in effect. Read the
 [implementation report](docs/repair/p6_preproduction_performance_architecture_implementation_20261006.md)

@@ -1,5 +1,40 @@
 # TreePM coupling
 
+## Attempt 1 recovery interfaces — 20261012
+
+The [implementation handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md)
+documents unvalidated source changes and exact manual gates. All new arithmetic
+switches default false. The original analytic multipole implementation remains
+available through `radial_coefficients_enabled=false`; the new analytic shared
+derivatives retain the raw second-moment trace and do not use a pair table.
+Nonfinite shared coefficients fall back to that original implementation.
+Adaptive MAC derivatives remain on the original analytic path in both modes.
+
+Periodic metric selection uses actual original-source and unwrapped-node
+center/COM bounds per axis and target. Certified deltas in [-L,L] use one
+correction; arbitrary multi-box inputs use nearbyint. Half-box rounding bands
+and non-nearest rounding retain the general helper. Canonical source bounds
+also bypass redundant floor normalization during unwrap/refit preparation.
+Imported targets are independently certified against the receiving local tree;
+remote top-domain/packet geometry keeps its existing general arithmetic.
+
+COM-center offsets are lazy and measured in the common unwrapped tree frame.
+They are omitted for leaves, independently mandatory fast descent and a selected
+MAC that does not use them. No per-node cache is retained. Full-forensic mode
+keeps overlapping rejection accounting. In fast mode geometry/MAC skip counters
+refer to unevaluated tests, never implicit passing guards.
+
+`TreePmResidualCoefficientTable` is a new immutable, homogeneous-pair-only
+optional API. Its domain and error envelope are described in the handoff;
+fallback remains the analytic residual. `TreePmLeafScratch` and the internal
+leaf kernel stage bounded blocks in existing tree order, dispatch AVX2 at
+runtime where supported and sum in the original source order. These additive
+public options/records require recompilation; existing callers retain defaults.
+`TreeGravityProfile` adds explicit refit attempted/accepted/rejected and geometry
+preparation time. Historical `reuse_accepted` includes exact reuse or refit;
+`rebuild_reason` and the new refit fields distinguish them. No wire, restart or
+particle storage format changes accompany these APIs.
+
 ## Scope
 
 `TreePmCoordinator` combines the periodic or isolated PM long-range field with
@@ -498,7 +533,7 @@ Timing split (all additive into existing profile totals):
 ## OpenMP residual execution (P3)
 
 Short-range residual evaluation parallelizes **between targets only**, in
-compile-time blocks of 64 (`k_residual_block_size`; not a config key). Three
+validated blocks selected by `numerics.treepm_residual_block_size` (default 64). Three
 regions use the same worker-safe evaluator:
 
 1. non-distributed local residual;
@@ -513,7 +548,7 @@ Contract:
   counter bundle per planned worker, plus separate optional spatial scratch;
   counters merge exactly after join. The deterministic floating diagnostic
   remains one `sum_sq` value per logical
-  64-target block and is reduced in fixed block order; no atomics appear in
+  configured target block and is reduced in fixed block order; no atomics appear in
   hot node/pair loops;
 - each worker owns one bounded DFS stack slot of `S = 1 + 7 * D` entries
   (`D = TreeGravitySolver::maxDepth()`), backed by one contiguous
@@ -809,16 +844,20 @@ rebuilding the table. Uniform and variable pair softenings share this table.
 `TreePmOptions::gaussian_pair_lookup_enabled=false` and
 `full_mac_diagnostics=true` preserve analytic/full accounting defaults. The
 additive `residual_block_size` direct-API option is bounded to `[1,4096]`, defaults
-to 64, and is intended for the serial diagnostic sweep. Production workflow
-block size remains 64; its memory preflight models that default. Nondefault
-embedded block sizes require the caller to model the corresponding diagnostic
-scratch capacity. No production configuration alias is introduced for it.
+to 64. Production exposes the narrower validated set 16/32/64/128/256 through
+the typed configuration path; memory preflight uses that actual block size.
+Nondefault embedded block sizes require the caller to pass the matching
+`GravityMemoryEstimateInput::residual_block_size`. Forces retain per-target
+source order; changing block size can change floating diagnostic reduction
+grouping and scheduling, so it belongs in normalized experiment provenance.
 
 In adaptive acceptance, the Newtonian operand of the residual-error `max` is
 checked before expensive derivatives. A proven rejection preserves its existing
 relative-MAC counter. Fast diagnostics additionally skip the entire selected MAC
-after independent rejection, count every cheap failed guard, and explicitly
-count skipped MACs. Full diagnostics retain overlapping failed-guard counts.
+after independent rejection and explicitly count skipped MACs. Before COM
+geometry, target-containing or cutoff-intersecting nodes can descend directly;
+`skipped_geometry_evaluations` distinguishes unevaluated softening/envelope/MAC
+tests. Full diagnostics retain overlapping failed-guard counts.
 No force-history floor is fabricated. Existing `alpha=0.005`, maximum angle
 `0.25`, strict envelope, softening, and cutoff containment remain enforced.
 Quadrupoles retain analytic derivative-consistent radial terms and the full

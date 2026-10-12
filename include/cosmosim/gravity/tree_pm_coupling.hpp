@@ -27,6 +27,14 @@ namespace cosmosim::gravity {
 inline constexpr std::size_t kTreePmShortRangeRequestWireBytes = 96U;
 inline constexpr std::size_t kTreePmShortRangeResponseWireBytes = 80U;
 inline constexpr std::size_t kTreePmResidualBlockSize = 64U;
+inline constexpr std::size_t k_tree_pm_leaf_lanes = 16U;
+// One bounded scratch block per worker, allocated before traversal. No source
+// duplication proportional to N. Contributions are summed in original order.
+struct alignas(64) TreePmLeafScratch {
+  std::array<double, k_tree_pm_leaf_lanes> dx, dy, dz, mass, epsilon2;
+  std::array<double, k_tree_pm_leaf_lanes> r2, softened, coefficient, ax, ay, az;
+  std::array<std::uint8_t, k_tree_pm_leaf_lanes> valid;
+};
 // One bundle per worker; no pair/node hot-path atomics or shared cache lines.
 struct alignas(64) TreePmTraversalCounters {
   std::uint64_t visited_nodes = 0;
@@ -40,6 +48,7 @@ struct alignas(64) TreePmTraversalCounters {
   std::uint64_t accepted_leaves = 0;
   std::uint64_t selected_mac_rejections = 0;
   std::uint64_t relative_mac_rejections = 0;
+  std::uint64_t skipped_geometry_evaluations = 0;  // COM/envelope/softening not tested
   std::uint64_t skipped_mac_evaluations = 0;  // fast accounting only; never a pass
   std::uint64_t maximum_angle_rejections = 0;
   std::uint64_t strict_envelope_rejections = 0;
@@ -48,6 +57,10 @@ struct alignas(64) TreePmTraversalCounters {
   std::uint64_t cutoff_containment_rejections = 0;
   std::uint64_t geometric_history_fallbacks = 0;
   std::uint64_t targets = 0;
+  // Eligible targets with an installed table, not per-pair interpolation hits.
+  std::uint64_t residual_lookup_targets = 0;
+  // Targets selecting AVX2 leaf staging, not a count of vectorized pairs.
+  std::uint64_t simd_leaf_targets = 0;
   // Summed logical-block work time; no per-target clock reads.
   double elapsed_work_ms = 0.0;
   double block_work_ms_max = 0.0;
@@ -137,10 +150,15 @@ struct TreePmOptions {
   double adaptive_maximum_opening_angle = 0.25;
   // Opt-in until force qualification; affects direct leaf pairs only.
   bool gaussian_pair_lookup_enabled = false;
+  bool full_residual_lookup_enabled = false;
+  bool leaf_simd_enabled = false;
+  // Shared analytic derivatives for accepted multipoles only. The adaptive
+  // MAC keeps its established analytic error proxy independently of this flag.
+  bool radial_coefficients_enabled = false;
   // True retains overlapping forensic rejection counters. False skips MAC work
   // after an independent failed guard and increments skipped_mac_evaluations.
   bool full_mac_diagnostics = true;
-  // Diagnostic API tuning only. Production workflow retains 64-target blocks.
+  // Production and diagnostic target scheduling. Default remains 64.
   std::size_t residual_block_size = kTreePmResidualBlockSize;
   bool spatial_work_history_enabled = false;
   // Exact snapshot reuse and certified motion refit are independent policies.
@@ -348,6 +366,10 @@ struct TreePmProfileEvent {
 // Thin coordinator that makes TreePM ownership explicit and auditable.
 class TreePmCoordinator {
  public:
+  // Call only between solves. Release optional governed acceleration storage
+  // when the next mandatory phase needs more headroom. Scientific state and
+  // installed tree/PM generations are unaffected.
+  void trimOptionalAccelerationCaches(std::uint64_t required_headroom_bytes);
   explicit TreePmCoordinator(PmGridShape pm_shape);
   TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout);
   TreePmCoordinator(
@@ -391,8 +413,13 @@ class TreePmCoordinator {
 
  private:
   core::MemoryGovernor* m_memory_governor = nullptr;
+  core::MemoryReservation m_residual_table_commitment;
+  std::unique_ptr<const TreePmResidualCoefficientTable> m_residual_table;
   core::MemoryReservation m_gaussian_table_commitment;
   std::unique_ptr<const TreePmGaussianCoefficientTable> m_gaussian_table;
+  core::MemoryReservation m_worker_leaf_commitment;
+  std::unique_ptr<TreePmLeafScratch[]> m_worker_leaf_storage;
+  std::size_t m_worker_leaf_capacity = 0U;
   // Per-target-family residual traversal bundle. The coordinator maintains
   // one instance for locally owned targets and one for incoming remote
   // targets so pair evaluations can be reported without double counting.
@@ -498,6 +525,8 @@ class TreePmCoordinator {
   std::uint64_t m_spatial_work_history_solves = 0;
   DecompositionEpoch m_tree_decomposition_epoch{};
   PmBoundaryCondition m_tree_boundary = PmBoundaryCondition::kPeriodic;
+  std::array<double, 6U> m_source_coordinate_bounds{};
+  std::array<double, 6U> m_node_coordinate_bounds{};
   std::array<double, 3U> m_tree_box_lengths{};
   std::array<double, 3U> m_tree_unwrap_anchor{};
   std::uint64_t m_tree_source_layout_generation = 0U;

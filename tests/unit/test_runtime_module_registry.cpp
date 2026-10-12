@@ -375,6 +375,24 @@ int main() {
   });
 
   cosmosim::workflows::RuntimeModuleRegistry bad_factory;
+  // Admission still rejects writes to drift's read-only ownership and access
+  // to resources outside the drift view. Exercise registerModule, not enums.
+  for (const auto access : {
+           cosmosim::workflows::RuntimeResourceAccess{cosmosim::workflows::RuntimeResourceKey::kMigrationOwnership,
+               cosmosim::workflows::RuntimeResourceAccessMode::kReadWrite},
+           cosmosim::workflows::RuntimeResourceAccess{cosmosim::workflows::RuntimeResourceKey::kSchedulerTruth,
+               cosmosim::workflows::RuntimeResourceAccessMode::kRead}}) {
+    cosmosim::workflows::RuntimeModuleRegistry invalid_drift;
+    auto descriptor = makeAnalysisModule("invalid_drift", 0, 0, {}, &trace);
+    descriptor.stage_tasks.front().stage = cosmosim::core::IntegrationStage::kDrift;
+    descriptor.stage_tasks.front().view_kind = cosmosim::workflows::RuntimeStageViewKind::kDriftParticles;
+    descriptor.stage_tasks.front().resources = {access};
+    expectInvalid([&] { invalid_drift.registerModule(std::move(descriptor)); });
+  }
+  auto invalid_read = makeAnalysisModule("invalid_read", 0, 0, {}, &trace);
+  invalid_read.stage_tasks.front().view_kind = cosmosim::workflows::RuntimeStageViewKind::kStageAudit;
+  invalid_read.stage_tasks.front().resources.front().mode = cosmosim::workflows::RuntimeResourceAccessMode::kRead;
+  expectInvalid([&] { bad_factory.registerModule(std::move(invalid_read)); });
   auto mismatch = makeAnalysisModule("mismatch", 0, 0, {}, &trace);
   mismatch.factory = [](const cosmosim::workflows::RuntimeModuleFactoryContext&) {
     cosmosim::workflows::RuntimeModuleInstance instance;

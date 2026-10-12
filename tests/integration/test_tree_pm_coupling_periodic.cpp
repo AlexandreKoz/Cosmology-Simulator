@@ -554,6 +554,19 @@ void testPeriodicTreeGeometryIsSeamSafeAndTranslationInvariant() {
     const ForceField lifted_force = solveTreePmActiveSubset(
         lifted_x, lifted_y, lifted_z, mass, active, pm_shape, options, &lifted_diagnostics);
     requireEquivalentForces(wrapped_force, lifted_force, 5.0e-11, test_case.label);
+    auto accelerated_options = options;
+    accelerated_options.radial_coefficients_enabled = true;
+    accelerated_options.full_mac_diagnostics = false;
+    cosmosim::gravity::TreePmDiagnostics accelerated_diagnostics;
+    const auto accelerated_force = solveTreePmActiveSubset(pos_x, pos_y, pos_z, mass, active,
+        pm_shape, accelerated_options, &accelerated_diagnostics);
+    requireEquivalentForces(accelerated_force, wrapped_force, 5.0e-11,
+        test_case.label + ": shared screened derivatives and fast descent");
+    requireOrThrow(accelerated_diagnostics.local_traversal.accepted_internal_multipoles ==
+            wrapped_diagnostics.local_traversal.accepted_internal_multipoles &&
+        accelerated_diagnostics.local_traversal.direct_pair_evaluations ==
+            wrapped_diagnostics.local_traversal.direct_pair_evaluations,
+        test_case.label + ": fast diagnostics changed accepted work");
 
     const double geometry_scale = std::max({1.0,
                                             wrapped_diagnostics.tree_root_half_size_comoving,
@@ -1347,6 +1360,8 @@ void testDistributedShortRangeExportImportMatchesSingleRankReference() {
       2.0, rcutCellsForAvailableBackend(4.0, 3.9), mesh_spacing);
   options.tree_exchange_batch_bytes = sizeof(double) * 3U * 3U;
 
+  options.full_residual_lookup_enabled=true; options.leaf_simd_enabled=true;
+  options.radial_coefficients_enabled=true; options.full_mac_diagnostics=false;
   const auto local_layout =
       cosmosim::parallel::makePmSlabLayout(pm_shape.nx, pm_shape.ny, pm_shape.nz, world_size, world_rank);
   cosmosim::gravity::TreePmCoordinator distributed(pm_shape, local_layout);
@@ -1370,7 +1385,10 @@ void testDistributedShortRangeExportImportMatchesSingleRankReference() {
   };
   cosmosim::gravity::TreePmCoordinator single_rank(pm_shape);
   cosmosim::gravity::TreePmDiagnostics reference_diag;
-  single_rank.solveActiveSet(global_x, global_y, global_z, global_mass, ref_accumulator, options, nullptr, &reference_diag);
+  auto reference_options=options; reference_options.full_residual_lookup_enabled=false;
+  reference_options.leaf_simd_enabled=false; reference_options.radial_coefficients_enabled=false;
+  reference_options.full_mac_diagnostics=true;
+  single_rank.solveActiveSet(global_x, global_y, global_z, global_mass, ref_accumulator, reference_options, nullptr, &reference_diag);
 
   double local_diff2 = 0.0;
   double local_ref2 = 0.0;
@@ -1793,6 +1811,101 @@ void testZoomFocusedPmCorrectionAndContaminationDiagnostics() {
   requireOrThrow(std::isfinite(with_zoom_diag.force_l2_total), "total force norm must be finite");
 }
 
+void testBoundedLeafAccelerationReuseAndFallback() {
+#if COSMOSIM_ENABLE_MPI
+  int world_size=1; MPI_Comm_size(MPI_COMM_WORLD,&world_size);
+  if (world_size != 1) return;
+#endif
+  using namespace cosmosim::gravity;
+  constexpr std::size_t n=35U; // two vector blocks and a partial tail
+  std::vector<double> x(n),y(n),z(n),mass(n,1.0);
+  std::vector<TreeLocalIndex> active(n);
+  for (std::size_t i=0;i<n;++i) {
+    active[i]=static_cast<TreeLocalIndex>(i);
+    x[i]=std::fmod(.173*i,1.0); y[i]=std::fmod(.257*i,2.0); z[i]=std::fmod(.317*i,3.0);
+  }
+  x[0]=-0.0; // canonical signed zero must not corrupt periodic radix ordering
+  x[1]=x[0];y[1]=y[0];z[1]=z[0]; // distinct identities, coincident geometry
+  TreePmOptions options;
+  options.pm_options.box_size_x_mpc_comoving=1.0;
+  options.pm_options.box_size_y_mpc_comoving=2.0;
+  options.pm_options.box_size_z_mpc_comoving=3.0;
+  options.tree_options.softening.epsilon_comoving=.01;
+  options.tree_options.max_leaf_size=64U;
+  options.tree_options.multipole_order=TreeMultipoleOrder::kMonopole;
+  options.split_policy=makeTreePmSplitPolicyFromMeshSpacing(1.25,3.0,.125);
+  options.short_range_only=true;
+  options.source_generation=GravitySourceGeneration{1U}; options.source_layout_generation=1U;
+  TreePmDiagnostics reference_d;
+  const auto reference=solveTreePm(x,y,z,mass,{8,8,8},options,&reference_d);
+  for (const bool table : {false,true}) {
+    for (const bool simd : {false,true}) {
+      options.full_residual_lookup_enabled=table; options.leaf_simd_enabled=simd;
+      TreePmDiagnostics d;
+      const auto value=solveTreePm(x,y,z,mass,{8,8,8},options,&d);
+      requireEquivalentForces(value,reference,1e-10,"bounded homogeneous leaf kernel");
+      requireOrThrow(d.local_traversal.direct_pair_evaluations == reference_d.local_traversal.direct_pair_evaluations,
+          "leaf masks changed cutoff/self interaction set");
+      if (table) requireOrThrow(d.local_traversal.residual_lookup_targets == n,"homogeneous table never reached production");
+    }
+  }
+  options.full_residual_lookup_enabled=true; options.leaf_simd_enabled=true;
+  cosmosim::core::MemoryGovernor limited({.hard_limit_bytes=128U*1024U});
+  {
+    TreePmCoordinator solver({8,8,8},cosmosim::parallel::makePmSlabLayout(8,8,8,1,0),
+        cosmosim::parallel::MpiContext(false,1,0),&limited);
+    ForceField value{std::vector<double>(n),std::vector<double>(n),std::vector<double>(n)};
+    TreePmForceAccumulatorView acc{active,value.ax,value.ay,value.az};
+    TreePmDiagnostics d;TreePmProfileEvent profile;
+    profile = {};
+    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    requireEquivalentForces(value,reference,1e-12,"governed table fallback");
+    requireOrThrow(d.local_traversal.residual_lookup_targets==0U,"denied table still reported active");
+    requireOrThrow(limited.snapshot().rejection_count>0U,"memory fallback was not exercised");
+    for (const auto& entry : solver.memoryReport().entries) {
+      if (entry.label=="treepm.worker_leaf_scratch") {
+        requireOrThrow(entry.governed_commitment,"leaf scratch physical commitment missing");
+        requireOrThrow(entry.owned_capacity_bytes%sizeof(TreePmLeafScratch)==0U,"leaf scratch capacity charge wrong");
+      }
+    }
+    options.identical_source_tree_reuse_enabled=true;
+    profile = {};
+    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    requireOrThrow(profile.tree_profile.rebuild_reason==5U && profile.tree_profile.build_count==0U,
+        "identical sources did not reuse installed tree");
+    options.identical_source_tree_reuse_enabled=false; options.topology_refit_enabled=true;
+    options.source_generation=GravitySourceGeneration{2U};
+    profile = {};
+    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    requireOrThrow(profile.tree_profile.refit_attempted==1U && profile.tree_profile.refit_accepted==1U,
+        "generation-advanced legal leaf membership did not refit");
+    requireEquivalentForces(value,reference,1e-12,"refit must refresh source geometry");
+    options.source_layout_generation=2U;
+    profile = {};
+    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    requireOrThrow(profile.tree_profile.build_count==1U && profile.tree_profile.rebuild_reason==8U,
+        "changed dense source layout did not invalidate tree reuse/refit");
+  }
+  requireOrThrow(limited.snapshot().committed_bytes==0U && limited.snapshot().reserved_bytes==0U,
+      "optional leaf/table ownership outlived coordinator");
+  cosmosim::core::MemoryGovernor roomy({.hard_limit_bytes=2U*1024U*1024U});
+  {
+    TreePmCoordinator solver({8,8,8},cosmosim::parallel::makePmSlabLayout(8,8,8,1,0),
+        cosmosim::parallel::MpiContext(false,1,0),&roomy);
+    ForceField value{std::vector<double>(n),std::vector<double>(n),std::vector<double>(n)};
+    TreePmForceAccumulatorView acc{active,value.ax,value.ay,value.az};
+    solver.solveActiveSet(x,y,z,mass,acc,options);
+    requireOrThrow(roomy.snapshot().committed_bytes>=sizeof(TreePmResidualCoefficientTable),
+        "table admission did not charge fixed physical storage");
+    solver.trimOptionalAccelerationCaches(2U*1024U*1024U);
+    for (const auto& entry : solver.memoryReport().entries)
+      requireOrThrow(entry.label!="treepm.full_residual_table" && entry.label!="treepm.worker_leaf_scratch",
+          "mandatory phase could not evict optional caches");
+    requireEquivalentForces(value,reference,1e-10,"governed admitted accelerator");
+  }
+  requireOrThrow(roomy.snapshot().committed_bytes==0U,"cache eviction retained a commitment");
+}
+
 }  // namespace
 
 int main() {
@@ -1800,6 +1913,7 @@ int main() {
   MPI_Init(nullptr, nullptr);
 #endif
   try {
+  testBoundedLeafAccelerationReuseAndFallback();
   testForceComparatorRejectsNonfiniteComponents();
   testCoincidentPairVectorIsZeroWithFiniteSoftening();
   testRecoveryDirectPairsCutoffThreadsAndMemory();

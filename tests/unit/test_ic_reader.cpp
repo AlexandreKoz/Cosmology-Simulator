@@ -235,7 +235,7 @@ void testGadgetArepoVelocityConventionMatchesSnapshotPath() {
   config.units.velocity_unit = "km_s";
   config.cosmology.hubble_param = 0.674;
 
-  for (const double scale_factor : {0.25, 0.5}) {
+  for (const double scale_factor : {0.25, 0.5, 0.76366757582395572}) {
     const auto snapshot_conversion = cosmosim::io::internal::makeSnapshotConversionContext(
         cosmosim::io::SnapshotDialect::kArepoFormat3, config, scale_factor);
     const double stored_velocity = 8.0;
@@ -254,6 +254,29 @@ void testGadgetArepoVelocityConventionMatchesSnapshotPath() {
                    scale_factor) -
                snapshot_conversion.velocityFromStored(1.0)) < 1.0e-12);
   }
+}
+
+// This verifies conversion arithmetic, not the unprovided snap_1698 headers.
+void testEvolvedSnapshotBridgeMassAndCoordinateUnits() {
+  auto manifest = makeValidManifest();
+  manifest.hubble_param = 0.67742;
+  manifest.scale_factor = 0.76366757582395572;
+  const auto units = cosmosim::core::makeUnitSystem("mpc","msun","km_s");
+  auto coordinate = manifest.fields.front();
+  coordinate.base_unit_to_si = units.length_si_per_code;
+  coordinate.hubble_exponent = -1.0;
+  auto mass = coordinate;
+  mass.dataset_path = "/PartType1/Masses";
+  mass.length_power = 0; mass.mass_power = 1;
+  mass.base_unit_to_si = units.mass_si_per_code;
+  const double mass_factor = cosmosim::io::icFieldConversionMultiplier(mass,manifest,units);
+  const double position_factor = cosmosim::io::icFieldConversionMultiplier(coordinate,manifest,units);
+  assert(std::abs(mass_factor-1.0/manifest.hubble_param)<1e-14);
+  assert(std::abs(position_factor-1.0/manifest.hubble_param)<1e-14);
+  // A monofonIC 10^10 Msun/h declaration is a physically different input.
+  mass.base_unit_to_si *= 1e10;
+  const double monofonic_factor = cosmosim::io::icFieldConversionMultiplier(mass,manifest,units);
+  assert(std::abs(monofonic_factor/mass_factor-1e10)<1e-5);
 }
 
 void testGeneratedIsolatedIcSpeciesAndOwnership() {
@@ -2164,6 +2187,7 @@ int main() {
   testCanonicalSingleFileCountLimit();
   testManifestValidationAndConversions();
   testGadgetArepoVelocityConventionMatchesSnapshotPath();
+  testEvolvedSnapshotBridgeMassAndCoordinateUnits();
   testGeneratedIsolatedIcSpeciesAndOwnership();
   testGeneratedConverterDefaultAudit();
   testHdf5GateBehavior();

@@ -3231,16 +3231,21 @@ std::string restartConfigurationCompatibilityRecord(
   };
   validateContinuationMetadata(restart.normalized_config_text,
       restart.normalized_config_hash_hex, restart.provenance, "restart configuration admission");
-  const std::string begin_marker = "restart_config_compatibility_begin=treepm_normalized_defaults_v1\n";
-  const std::string end_marker = "restart_config_compatibility_end=treepm_normalized_defaults_v1\n";
+  const std::string begin_marker = "restart_config_compatibility_begin=treepm_normalized_defaults_v2\n";
+  const std::string end_marker = "restart_config_compatibility_end=treepm_normalized_defaults_v2\n";
   if (restart.normalized_config_hash_hex == current.provenance.config_hash_hex) {
     if (restart.normalized_config_text != current.normalized_text) fail("hash agrees but normalized text differs");
     // Preserve a previous migration record across subsequent exact resumes.
-    const auto begin = restart.provenance.derived_runtime_state.find(begin_marker);
-    if (begin == std::string::npos) return {};
-    const auto end = restart.provenance.derived_runtime_state.find(end_marker, begin);
-    if (end == std::string::npos) fail("unterminated historical compatibility record");
-    return restart.provenance.derived_runtime_state.substr(begin, end + end_marker.size() - begin);
+    for (const std::string revision : {"treepm_normalized_defaults_v2", "treepm_normalized_defaults_v1"}) {
+      const std::string historical_begin = "restart_config_compatibility_begin="+revision+"\n";
+      const std::string historical_end = "restart_config_compatibility_end="+revision+"\n";
+      const auto begin = restart.provenance.derived_runtime_state.find(historical_begin);
+      if (begin == std::string::npos) continue;
+      const auto end = restart.provenance.derived_runtime_state.find(historical_end,begin);
+      if (end == std::string::npos) fail("unterminated historical compatibility record");
+      return restart.provenance.derived_runtime_state.substr(begin,end+historical_end.size()-begin);
+    }
+    return {};
   }
   if (!restart.payload_integrity_verified || restart.diagnostics.restart_schema_version != 23U ||
       restart.payload_integrity_algorithm != "sha256-canonical-le-v1" || restart.payload_integrity_sha256_hex.size() != 64U) {
@@ -3255,7 +3260,12 @@ std::string restartConfigurationCompatibilityRecord(
       original.normalized_config_sha256_hex != core::strongConfigHashSha256Hex(restart.normalized_config_text)) {
     fail("complete original normalized configuration and v7 provenance are required");
   }
-  if (current.config.numerics.treepm_gaussian_pair_lookup_enabled ||
+  if (current.config.numerics.treepm_radial_coefficients_enabled ||
+      current.config.numerics.treepm_full_residual_lookup_enabled ||
+      current.config.numerics.treepm_leaf_simd_enabled ||
+      current.config.numerics.treepm_residual_block_size != 64 ||
+      current.config.numerics.treepm_tree_max_leaf_size != 16 ||
+      current.config.numerics.treepm_gaussian_pair_lookup_enabled ||
       !current.config.numerics.treepm_full_mac_diagnostics || current.config.numerics.hierarchical_max_rung != 0 ||
       current.config.schema_version != 1 ||
       current.provenance.config_hash_hex != core::stableConfigHashHex(current.normalized_text)) {
@@ -3277,16 +3287,26 @@ std::string restartConfigurationCompatibilityRecord(
     fail("normalized configuration exceeds migration metadata budget");
   }
   std::string projected = current.normalized_text;
-  for (const std::string_view line : {"treepm_gaussian_pair_lookup_enabled = false\n",
-                                     "treepm_full_mac_diagnostics = true\n"}) {
-    const auto position = projected.find(line);
-    if (position == std::string::npos || projected.find(line, position + line.size()) != std::string::npos) {
-      fail("current normalized default representation is not the supported revision");
+  const auto removeDefaults = [&](std::initializer_list<std::string_view> lines) {
+    for (const auto line : lines) {
+      const auto position = projected.find(line);
+      if (position == std::string::npos || projected.find(line, position+line.size()) != std::string::npos)
+        fail("current normalized default representation is not the supported revision");
+      projected.erase(position, line.size());
     }
-    projected.erase(position, line.size());
+  };
+  // Support exact predecessor groups, not arbitrary missing keys.
+  removeDefaults({"treepm_radial_coefficients_enabled = false\n", "treepm_full_residual_lookup_enabled = false\n", "treepm_leaf_simd_enabled = false\n",
+      "treepm_residual_block_size = 64\n", "treepm_tree_max_leaf_size = 16\n"});
+  if (projected != restart.normalized_config_text) {
+    removeDefaults({"treepm_gaussian_pair_lookup_enabled = false\n", "treepm_full_mac_diagnostics = true\n"});
+  }
+  if (projected != restart.normalized_config_text) {
+    projected = current.normalized_text;
+    removeDefaults({"treepm_gaussian_pair_lookup_enabled = false\n", "treepm_full_mac_diagnostics = true\n"});
   }
   if (projected != restart.normalized_config_text) fail("scientific/settings equivalence not established by exact legacy projection");
-  if (core::loadFrozenConfigFromString(projected, "restart_treepm_normalized_defaults_v1").normalized_text != current.normalized_text) {
+  if (core::loadFrozenConfigFromString(projected, "restart_treepm_normalized_defaults_v2").normalized_text != current.normalized_text) {
     fail("legacy default normalization does not reproduce current configuration");
   }
   const auto hex = [](std::string_view text) {

@@ -5,6 +5,8 @@
 #include <string>
 
 #include "cosmosim/core/constants.hpp"
+#include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/version.hpp"
 #include "cosmosim/core/config.hpp"
 #include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/provenance.hpp"
@@ -225,6 +227,12 @@ void testInvalidUnitsCosmologyAndProvenanceFailClosed() {
       "deadbeef",
       0,
       normalized_config);
+  assert(record.git_sha=="deadbeef"); // explicit caller identity is preserved
+  const auto automatic=cosmosim::core::makeProvenanceRecord(record.config_hash_hex,"unavailable",0,normalized_config);
+  assert(automatic.git_sha==COSMOSIM_SOURCE_GIT);
+  const auto build_identity=cosmosim::core::buildProvenance();
+  assert(build_identity.find("source="+std::string(COSMOSIM_SOURCE_IDENTITY))!=std::string::npos);
+  assert(build_identity.find("source_manifest_sha256="+std::string(COSMOSIM_SOURCE_MANIFEST_SHA256))!=std::string::npos);
   record.raw_input_config = "  raw\\value\nline=two\tend  ";
   record.normalized_config = normalized_config;
   record.derived_runtime_state = "state=ok\r\nnext=yes";

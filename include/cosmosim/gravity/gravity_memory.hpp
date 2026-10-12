@@ -93,6 +93,7 @@ struct GravityMemoryEstimateInput {
   bool relative_force_mac_enabled = false;
   bool hierarchical_kdk_enabled = false;
   bool gaussian_pair_lookup_enabled = false;
+  std::size_t residual_block_size = 64U;
   std::size_t tree_leaf_size = 16U;
   TreeMultipoleOrder multipole_order = TreeMultipoleOrder::kQuadrupole;
   PmGridShape pm_shape{};

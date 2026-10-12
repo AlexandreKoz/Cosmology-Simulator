@@ -1,5 +1,45 @@
 # Runtime memory governance
 
+## TreePM bounded optional acceleration — 20261012
+
+`TreePmCoordinator` owns a fixed `TreePmResidualCoefficientTable` and an exact
+`TreePmLeafScratch[]` allocation of one 16-source block per planned worker.
+Both reserve `MemoryClass::kPersistentCache` before allocation and retain the
+committed reservation until physical destruction. `memoryReport()` charges
+`sizeof(TreePmResidualCoefficientTable)` (16384 cells of five doubles plus
+metadata) and `worker_capacity * sizeof(TreePmLeafScratch)` including alignment.
+The latter holds eleven double lanes and a validity lane; no extra O(N) source
+or O(node count) COM-offset array is introduced. Actual `sizeof` and capacity
+reports, rather than a logical element count, are authoritative.
+
+Table replacement destroys/releases the old table before reserving its
+replacement. Its exact key is effective pair epsilon, Gaussian split length
+and cutoff. Disabled/heterogeneous/unsupported inputs use the analytic law;
+near cancellation and uncovered cells fall back per pair. Worker growth
+likewise releases old storage first. Allocation denial selects original
+indexed scalar traversal, independently of table admission. Scratch contents
+are overwritten before every leaf block and retain no source-generation truth.
+The existing Gaussian table remains separately owned/reported.
+
+Optional storage is admitted only from remaining headroom, independently of
+the mandatory phase estimate. Before the next production task admission,
+`GravityRuntime::estimateMemory` may call the coordinator's additive
+`trimOptionalAccelerationCaches(required_headroom_bytes)` at the serial task
+boundary. It releases these two caches if mandatory headroom is insufficient;
+it never changes installed tree/PM state. Calls during a solve are forbidden.
+Standalone callers can use that same boundary API. No process-global table
+pool bypasses governor ownership. Per-rank replication and worker count must
+be included in node-wide projections.
+
+Two six-double inline bounds records add 96 bytes per coordinator, folded into
+fixed-feedback accounting. Source bounds refresh during existing preflight;
+node bounds refresh after build/refit and remain valid on exact reuse. Existing
+three periodic coordinate vectors still cost their actual retained capacities
+(24 bytes per particle if capacity equals size); no replacement ownership is
+introduced. Tree rebuild/refit, communication, FFTW and snapshot/restart peak
+overlap retain their existing owner-local contracts. A 512-cubed fit in 48 GiB
+is **unproven**. See the [live-set projection and qualification gates](repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
+
 Status: M1B foundation, 2026-08-29.
 
 This document defines the runtime memory-governance behavior implemented by

@@ -667,6 +667,28 @@ dump; their values participate in the normalized configuration hash.
 |---|---|---|
 | `treepm_gaussian_pair_lookup_enabled` | `false` | Experimental cubic-Hermite Gaussian long-range radial coefficient for direct leaf pairs. Plummer softening is evaluated independently. Accepted-node monopoles/quadrupoles and MAC derivatives remain analytic. Enable only for controlled qualification. |
 | `treepm_full_mac_diagnostics` | `true` | Preserve overlapping rejection accounting. `false` short-circuits the selected MAC when an independent guard already rejects, and reports `skipped_mac_evaluations`; a skipped MAC is neither passing nor failing evidence. Force acceptance policies are unchanged. |
+| `treepm_full_residual_lookup_enabled` | `false` | Experimental bounded Hermite table for the complete Plummer-minus-Gaussian direct coefficient. Requires proven uniform effective pair softening, supported scales and an error-gated cell; otherwise evaluates the analytic law. Governed allocation denial also falls back. |
+| `treepm_leaf_simd_enabled` | `false` | Experimental 16-source worker staging for uniform source softening; runtime-selected AVX2 distance/contribution arithmetic with portable scalar fallback. No particle-sized packed cache. |
+| `treepm_radial_coefficients_enabled` | `false` | Experimental shared analytic radial value/derivatives for accepted monopoles/quadrupoles, retaining the full second moment. Adaptive MAC remains on its established analytic proxy. |
+| `treepm_residual_block_size` | `64` | Production target scheduling block: exactly 16, 32, 64, 128 or 256. Memory estimates and all local/incoming traversal regions use this setting. |
+| `treepm_tree_max_leaf_size` | `16` | Production tree leaf limit, integer in [1,1024]. This changes tree partition/approximation, so qualify force errors as well as timing. |
+
+All five keys are under `[numerics]`, participate in typed validation and
+normalized dumps/hashes, and preserve conservative defaults. Fast diagnostics
+can skip COM geometry after independently mandatory descent;
+`skipped_geometry_evaluations` identifies those unevaluated guards. Installed
+lookup and AVX2 target counts describe eligible targets, not table hits or
+vectorized pair counts. Requested flags alone do not prove acceleration ran.
+
+`cosmosim_treepm_experiment_configs BASE.param.txt NEW_DIRECTORY` loads and
+revalidates canonical text with the C++ loader, then writes separately named,
+normalized experiments and hashes. It preserves the base physical split,
+softening, IC and cosmology. `reference` and `optimized_matched` have identical
+strict acceptance; the latter selects fast diagnostics. Separate `matched_*`
+files attribute each kernel/reuse/refit switch. `adaptive_025` uses alpha 0.005
+and angle 0.25; `adaptive_050_experimental` requires separate qualification.
+Every experiment uses global KDK. Neither angle nor any new kernel is certified
+by successful parsing. See the [source handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md).
 
 These additions change newly normalized text/hashes even when defaults are
 selected. Existing strict restart/config compatibility checks remain in force;

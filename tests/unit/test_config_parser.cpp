@@ -1570,6 +1570,30 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
 
 }  // namespace
 
+void testTreePmProductionTuningRoundTrip() {
+  using cosmosim::core::loadFrozenConfigFromString;
+  for (const int block : {16,32,64,128,256}) {
+    const auto frozen = loadFrozenConfigFromString("[numerics]\ntreepm_residual_block_size = "+
+        std::to_string(block)+"\ntreepm_tree_max_leaf_size = 8\ntreepm_full_residual_lookup_enabled = true\n"
+        "treepm_leaf_simd_enabled = true\ntreepm_radial_coefficients_enabled = true\n", "production_tuning");
+    const auto replay = loadFrozenConfigFromString(frozen.normalized_text,"production_tuning_replay");
+    CHUI_REQUIRE(replay.config.numerics.treepm_residual_block_size == block);
+    CHUI_REQUIRE(replay.config.numerics.treepm_tree_max_leaf_size == 8);
+    CHUI_REQUIRE(replay.config.numerics.treepm_full_residual_lookup_enabled);
+    CHUI_REQUIRE(replay.config.numerics.treepm_leaf_simd_enabled);
+    CHUI_REQUIRE(replay.config.numerics.treepm_radial_coefficients_enabled);
+    CHUI_REQUIRE(replay.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+  }
+  for (const auto key : {"treepm_residual_block_size", "treepm_tree_max_leaf_size"}) {
+    for (const auto value : {"0", "-1", "4097", "3.5", "nan"}) {
+      bool rejected = false;
+      try { (void)loadFrozenConfigFromString(std::string("[numerics]\n")+key+" = "+value+"\n", "bad_tuning"); }
+      catch (const cosmosim::core::ConfigError&) { rejected = true; }
+      CHUI_REQUIRE(rejected);
+    }
+  }
+}
+
 void testTreePmPerformanceFlagsRoundTrip() {
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(
       "[numerics]\ntreepm_gaussian_pair_lookup_enabled = true\ntreepm_full_mac_diagnostics = false\n",
@@ -1588,7 +1612,8 @@ void testTreePmPerformanceFlagsRoundTrip() {
         "[numerics]\ntreepm_gaussian_pair_lookup_enabled = maybe\n", "flags_invalid");
   } catch (const cosmosim::core::ConfigError&) { rejected = true; }
   CHUI_REQUIRE(rejected);
-  for (const std::string key : {"treepm_gaussian_pair_lookup_enabled", "treepm_full_mac_diagnostics"}) {
+  for (const std::string key : {"treepm_gaussian_pair_lookup_enabled", "treepm_full_mac_diagnostics", "treepm_full_residual_lookup_enabled",
+       "treepm_leaf_simd_enabled", "treepm_radial_coefficients_enabled"}) {
     for (const std::string value : {"maybe", "2", "nan"}) {
       rejected = false;
       try {
@@ -1602,6 +1627,7 @@ void testTreePmPerformanceFlagsRoundTrip() {
 }
 
 int main() {
+  testTreePmProductionTuningRoundTrip();
   testTreePmPerformanceFlagsRoundTrip();
   testCommentsWhitespaceSectionsAndUnits();
   testDuplicateKeyFails();

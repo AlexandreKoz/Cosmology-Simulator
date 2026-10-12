@@ -179,8 +179,35 @@ int main() {
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
   const std::filesystem::path output_dir =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_reference_workflow_test");
+  bool inspected_reference_drift = false;
+  cosmosim::workflows::ReferenceWorkflowOptions graph_options{.write_outputs = false};
+  graph_options.register_runtime_modules = [&](cosmosim::workflows::RuntimeModuleRegistry& registry) {
+    using namespace cosmosim::workflows;
+    for (const auto& module : registry.descriptors()) {
+      for (const auto& task : module.stage_tasks) {
+        if (task.task_id != "time.drift_particles") continue;
+        if (task.view_kind != RuntimeStageViewKind::kDriftParticles || task.resources.size() != 3U)
+          throw std::runtime_error("reference drift typed-view contract changed");
+        for (const auto& access : task.resources) {
+          const auto expected = access.resource == RuntimeResourceKey::kMigrationOwnership
+              ? RuntimeResourceAccessMode::kRead : RuntimeResourceAccessMode::kReadWrite;
+          if ((access.resource != RuntimeResourceKey::kParticlePosition &&
+               access.resource != RuntimeResourceKey::kParticleVelocity &&
+               access.resource != RuntimeResourceKey::kMigrationOwnership) || access.mode != expected)
+            throw std::runtime_error("reference drift resource grant changed");
+        }
+        inspected_reference_drift = true;
+      }
+    }
+    if (!inspected_reference_drift) throw std::runtime_error("reference drift task missing");
+  };
   const cosmosim::workflows::ReferenceWorkflowReport report =
-      runner.run(output_dir, cosmosim::workflows::ReferenceWorkflowOptions{.write_outputs = false});
+      runner.run(output_dir, graph_options);
+  // run() freezes/admit-checks the actual built-ins, then executes two complete
+  // KDK steps. This regression is registered even without HDF5/FFTW.
+  if (!inspected_reference_drift || report.completed_steps != 2U ||
+      report.treepm_long_range_refresh_count < 3U)
+    throw std::runtime_error("reference graph did not reach multi-step gravity execution");
 
   const std::filesystem::path expected_run_dir = output_dir / "reference_integration_test";
 

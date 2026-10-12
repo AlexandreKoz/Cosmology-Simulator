@@ -419,6 +419,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
         ? gravity::TreePmAcceptancePolicy::kAdaptiveRelative
         : gravity::TreePmAcceptancePolicy::kStrictReference;
     m_tree_pm_options.gaussian_pair_lookup_enabled = config.numerics.treepm_gaussian_pair_lookup_enabled;
+    m_tree_pm_options.full_residual_lookup_enabled = config.numerics.treepm_full_residual_lookup_enabled;
+    m_tree_pm_options.leaf_simd_enabled = config.numerics.treepm_leaf_simd_enabled;
+    m_tree_pm_options.radial_coefficients_enabled = config.numerics.treepm_radial_coefficients_enabled;
+    m_tree_pm_options.residual_block_size = static_cast<std::size_t>(config.numerics.treepm_residual_block_size);
+    m_tree_pm_options.tree_options.max_leaf_size = static_cast<std::size_t>(config.numerics.treepm_tree_max_leaf_size);
     m_tree_pm_options.full_mac_diagnostics = config.numerics.treepm_full_mac_diagnostics;
     m_tree_pm_options.adaptive_maximum_opening_angle =
         config.numerics.treepm_adaptive_maximum_opening_angle;
@@ -975,7 +980,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
 
   [[nodiscard]] RuntimeTaskMemoryEstimate estimateMemory(
       const core::SimulationState& state) const override {
-    return {estimateIncrementalMemory(state), true, {}};
+    const auto bytes = estimateIncrementalMemory(state);
+    // This estimate runs at the serial task boundary, before dispatcher and
+    // owner admission. Optional committed caches must not block mandatory RAM.
+    m_tree_pm_coordinator.trimOptionalAccelerationCaches(bytes);
+    return {bytes, true, {}};
   }
 
   [[nodiscard]] std::uint64_t estimateIncrementalMemory(
@@ -1016,6 +1025,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
                     gravity::TreeOpeningCriterion::kRelativeForceError),
                 .hierarchical_kdk_enabled = m_config.numerics.hierarchical_max_rung > 0,
                 .gaussian_pair_lookup_enabled = m_config.numerics.treepm_gaussian_pair_lookup_enabled,
+                .residual_block_size = m_tree_pm_options.residual_block_size,
                 .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
                 .multipole_order = m_tree_pm_options.tree_options.multipole_order,
                 .pm_shape = m_pm_grid_shape,
@@ -1409,6 +1419,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
                 gravity::TreeOpeningCriterion::kRelativeForceError),
             .hierarchical_kdk_enabled = m_config.numerics.hierarchical_max_rung > 0,
             .gaussian_pair_lookup_enabled = m_config.numerics.treepm_gaussian_pair_lookup_enabled,
+            .residual_block_size = m_tree_pm_options.residual_block_size,
             .tree_leaf_size = m_tree_pm_options.tree_options.max_leaf_size,
             .multipole_order = m_tree_pm_options.tree_options.multipole_order,
             .pm_shape = m_pm_grid_shape,
@@ -2182,6 +2193,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .message = "locality-driven TreePM short-range communication metrics",
           .payload = {
               {"tree_acceptance_policy", m_config.numerics.treepm_adaptive_acceptance_enabled ? "adaptive_relative" : "strict_reference"},
+              {"full_residual_lookup_requested", m_tree_pm_options.full_residual_lookup_enabled ? "true" : "false"},
+              {"radial_coefficients_enabled", m_tree_pm_options.radial_coefficients_enabled ? "true" : "false"},
+              {"leaf_simd_requested", m_tree_pm_options.leaf_simd_enabled ? "true" : "false"},
+              {"residual_lookup_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.residual_lookup_targets)},
+              {"simd_leaf_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.simd_leaf_targets)},
+              {"skipped_geometry_evaluations", std::to_string(m_last_tree_pm_diagnostics.local_traversal.skipped_geometry_evaluations)},
+              {"residual_block_size", std::to_string(m_tree_pm_options.residual_block_size)},
+              {"tree_max_leaf_size", std::to_string(m_tree_pm_options.tree_options.max_leaf_size)},
               {"gaussian_pair_kernel", m_tree_pm_options.gaussian_pair_lookup_enabled ? "lookup_experimental" : "analytic"},
               {"mac_accounting", m_tree_pm_options.full_mac_diagnostics ? "full_overlapping" : "fast_guard_short_circuit"},
               {"adaptive_maximum_opening_angle", formatRuntimeDouble(m_tree_pm_options.adaptive_maximum_opening_angle)},
@@ -2201,6 +2220,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"tree_reuse_accepted", std::to_string(tree_pm_profile.tree_profile.reuse_accepted)},
               {"tree_rebuild_reason", std::to_string(tree_pm_profile.tree_profile.rebuild_reason)},
               {"tree_topology_validity_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.topology_validity_ms)},
+              {"tree_refit_attempted", std::to_string(tree_pm_profile.tree_profile.refit_attempted)},
+              {"tree_refit_accepted", std::to_string(tree_pm_profile.tree_profile.refit_accepted)},
+              {"tree_refit_rejected", std::to_string(tree_pm_profile.tree_profile.refit_rejected)},
+              {"tree_geometry_preparation_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.geometry_preparation_ms)},
               {"tree_refit_ms", formatRuntimeDouble(tree_pm_profile.tree_profile.refit_ms)},
               {"spatial_work_history_solves", std::to_string(m_last_tree_pm_diagnostics.spatial_work_history_solves)},
               {"local_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.targets)},
@@ -3497,7 +3520,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
   double m_gravitational_constant_code = 0.0;
   std::string m_pm_assignment_scheme = "unknown";
   std::string m_pm_backend = "unknown";
-  gravity::TreePmCoordinator m_tree_pm_coordinator;
+  mutable gravity::TreePmCoordinator m_tree_pm_coordinator;
   gravity::TreePmOptions m_tree_pm_options;
   gravity::TreeSofteningSpeciesPolicy m_tree_pm_species_softening{};
   gravity::GravitySourceRepresentation m_source_representation =

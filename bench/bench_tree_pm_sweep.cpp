@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "cosmosim/core/build_config.hpp"
+#include "cosmosim/core/version.hpp"
+#include "cosmosim/core/provenance.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
 #include "core_benchmark_process_memory.hpp"
 #include "periodic_ewald_reference.hpp"
@@ -27,6 +29,9 @@ struct Arguments {
   double box_x = 1.0, box_y = 1.0, box_z = 1.0;
   double asmth = 1.25, rcut = 6.25, epsilon = 0.00035, g = 1.0, scale_factor = 1.0;
   bool adaptive = false, lookup = false, forensic = true, bootstrap = false;
+  double maximum_angle = 0.25;
+  bool full_residual=false, simd=false, radial=false, reuse=false, refit=false;
+  std::string kernel="analytic";
   int ewald_level = 0;
 };
 std::size_t parseSizeValue(const std::string& value) {
@@ -64,6 +69,9 @@ Arguments parseArguments(int argc, char** argv) {
     else if (key == "--box-z") a.box_z=parseRealValue(value);
     else if (key == "--asmth") a.asmth=parseRealValue(value);
     else if (key == "--rcut") a.rcut=parseRealValue(value);
+    else if (key == "--maximum-angle") a.maximum_angle=parseRealValue(value);
+    else if (key == "--reuse" && (value=="on" || value=="off")) a.reuse=value=="on";
+    else if (key == "--refit" && (value=="on" || value=="off")) a.refit=value=="on";
     else if (key == "--epsilon") a.epsilon=parseRealValue(value);
     else if (key == "--g") a.g=parseRealValue(value);
     else if (key == "--scale-factor") a.scale_factor=parseRealValue(value);
@@ -73,7 +81,12 @@ Arguments parseArguments(int argc, char** argv) {
       a.ewald_level=static_cast<int>(level);
     }
     else if (key == "--policy" && (value=="strict" || value=="adaptive")) a.adaptive=value=="adaptive";
-    else if (key == "--kernel" && (value=="analytic" || value=="lookup")) a.lookup=value=="lookup";
+    else if (key == "--kernel" && (value=="analytic" || value=="lookup" || value=="full_residual" ||
+        value=="simd" || value=="simd_full_residual" || value=="radial")) {
+      a.kernel=value; a.lookup=value=="lookup";
+      a.full_residual=value=="full_residual" || value=="simd_full_residual";
+      a.simd=value=="simd" || value=="simd_full_residual"; a.radial=value=="radial";
+    }
     else if (key == "--accounting" && (value=="full" || value=="fast")) a.forensic=value=="full";
     else if (key == "--history" && (value=="fallback" || value=="bootstrap")) a.bootstrap=value=="bootstrap";
     else throw std::invalid_argument("unknown option/value: "+key+" "+value);
@@ -81,6 +94,8 @@ Arguments parseArguments(int argc, char** argv) {
   for (const double x : {a.box_x,a.box_y,a.box_z,a.asmth,a.rcut,a.g,a.scale_factor}) {
     if (!std::isfinite(x) || x<=0.0) throw std::invalid_argument("lengths, split, G and scale must be positive finite");
   }
+  if (!std::isfinite(a.maximum_angle) || a.maximum_angle<=0.0 || a.maximum_angle>0.5)
+    throw std::invalid_argument("maximum angle must be in (0,0.5]");
   if (!std::isfinite(a.epsilon) || a.epsilon<0.0 || a.mesh==0 || a.leaf==0 ||
       a.repeats==0 || a.targets==0 || a.count==0 || a.block==0 || a.block>4096U ||
       a.warmups>std::numeric_limits<std::size_t>::max()-a.repeats) {
@@ -235,17 +250,23 @@ int run(const Arguments& a) {
   options.tree_options.gravitational_constant_code=a.g;options.tree_options.max_leaf_size=a.leaf;
   options.tree_options.multipole_order=cosmosim::gravity::TreeMultipoleOrder::kQuadrupole;
   options.tree_options.softening.epsilon_comoving=s.epsilon[0];
-  options.tree_options.relative_force_tolerance=0.005;options.adaptive_maximum_opening_angle=0.25;
+  options.tree_options.relative_force_tolerance=0.005;options.adaptive_maximum_opening_angle=a.maximum_angle;
   options.split_policy=cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(a.asmth,a.rcut,
       std::cbrt((a.box_x/a.mesh)*(a.box_y/a.mesh)*(a.box_z/a.mesh)));
   options.gaussian_pair_lookup_enabled=a.lookup;options.full_mac_diagnostics=a.forensic;
   options.residual_block_size=a.block;
+  options.full_residual_lookup_enabled=a.full_residual; options.leaf_simd_enabled=a.simd;
+  options.radial_coefficients_enabled=a.radial;
+  options.identical_source_tree_reuse_enabled=a.reuse; options.topology_refit_enabled=a.refit;
+  options.source_generation=cosmosim::gravity::GravitySourceGeneration{1U}; options.source_layout_generation=1U;
   cosmosim::gravity::TreePmForceAccumulatorView acc{active,ax,ay,az};
   if (accuracy) {acc.short_range_accel_x_comoving=tx;acc.short_range_accel_y_comoving=ty;acc.short_range_accel_z_comoving=tz;}
   cosmosim::gravity::TreePmCoordinator coordinator({a.mesh,a.mesh,a.mesh});
   if (a.adaptive && a.bootstrap) {
     // Controlled same-snapshot TOTAL history, explicitly not historical KDK.
     auto bootstrap_options=options;bootstrap_options.gaussian_pair_lookup_enabled=false;
+    bootstrap_options.full_residual_lookup_enabled=false; bootstrap_options.leaf_simd_enabled=false;
+    bootstrap_options.radial_coefficients_enabled=false;
     coordinator.solveActiveSet(s.x,s.y,s.z,s.mass,acc,bootstrap_options,nullptr,nullptr,soften);
     history.resize(n);
     for (std::size_t i=0;i<n;++i) history[i]=std::hypot(ax[i],ay[i],az[i]);
@@ -257,9 +278,13 @@ int run(const Arguments& a) {
   std::cout<<"{\"record\":\"configuration\",\"particles\":"<<n<<",\"mesh\":"<<a.mesh<<",\"leaf\":"<<a.leaf
     <<",\"block\":"<<a.block<<",\"split\":"<<options.split_policy.split_scale_comoving
     <<",\"cutoff\":"<<options.split_policy.cutoff_radius_comoving<<",\"scale_factor\":"<<a.scale_factor
-    <<",\"policy\":\""<<(a.adaptive?"adaptive":"strict")<<"\",\"kernel\":\""<<(a.lookup?"lookup":"analytic")
+    <<",\"policy\":\""<<(a.adaptive?"adaptive":"strict")<<"\",\"kernel\":\""<<a.kernel
     <<"\",\"accounting\":\""<<(a.forensic?"full":"fast")<<"\",\"history\":\""<<(a.bootstrap?"same_snapshot_strict_bootstrap":"unavailable_fallback")
-    <<"\",\"fftw\":"<<(COSMOSIM_ENABLE_FFTW?"true":"false")<<"}\n";
+    <<"\",\"maximum_angle\":"<<a.maximum_angle<<",\"softening\":"<<s.epsilon[0]
+    <<",\"reuse\":"<<(a.reuse?"true":"false")<<",\"refit\":"<<(a.refit?"true":"false")
+    <<",\"build\":"<<std::quoted(cosmosim::core::buildProvenance())
+    <<",\"cpu\":"<<std::quoted(cosmosim::core::collectCpuModel())
+    <<",\"fftw\":"<<(COSMOSIM_ENABLE_FFTW?"true":"false")<<"}\n";
   for (std::size_t iteration=0;iteration<a.warmups+a.repeats;++iteration) {
     cosmosim::gravity::TreePmProfileEvent profile;cosmosim::gravity::TreePmDiagnostics d;
     const auto begin=std::chrono::steady_clock::now();
@@ -271,6 +296,16 @@ int run(const Arguments& a) {
     const auto& c=d.local_traversal;
     std::cout<<"{\"record\":\"timing\",\"iteration\":"<<iteration-a.warmups<<",\"wall_ms\":"<<wall
       <<",\"pm_ms\":"<<p.assign_ms+p.fft_forward_ms+p.poisson_ms+p.gradient_ms+p.fft_inverse_ms+p.interpolate_ms
+      <<",\"source_preprocess_ms\":"<<profile.source_preprocess_ms
+      <<",\"refit_ms\":"<<profile.tree_profile.refit_ms
+      <<",\"reuse_accepted\":"<<profile.tree_profile.reuse_accepted
+      <<",\"refit_accepted\":"<<profile.tree_profile.refit_accepted
+      <<",\"rebuild_reason\":"<<profile.tree_profile.rebuild_reason
+      <<",\"full_rebuild_ms\":"<<profile.tree_profile.full_rebuild_ms
+      <<",\"geometry_preparation_ms\":"<<profile.tree_profile.geometry_preparation_ms
+      <<",\"residual_lookup_targets\":"<<c.residual_lookup_targets
+      <<",\"simd_leaf_targets\":"<<c.simd_leaf_targets
+      <<",\"skipped_geometry\":"<<c.skipped_geometry_evaluations
       <<",\"tree_build_ms\":"<<profile.tree_profile.build_ms<<",\"multipole_ms\":"<<profile.tree_profile.multipole_ms
       <<",\"traversal_ms\":"<<profile.tree_profile.traversal_ms<<",\"pairs\":"<<c.direct_pair_evaluations
       <<",\"nodes\":"<<c.visited_nodes<<",\"opened\":"<<c.opened_nodes<<",\"multipoles\":"<<c.accepted_internal_multipoles

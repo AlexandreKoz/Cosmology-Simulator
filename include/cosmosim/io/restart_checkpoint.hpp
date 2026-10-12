@@ -214,7 +214,8 @@ struct RestartReadResult {
   bool payload_integrity_verified = false;
 };
 
-// Exact admission or constrained treepm_normalized_defaults_v1 migration.
+// Exact admission or constrained treepm_normalized_defaults_v2 migration.
+// Existing v1 compatibility receipts survive subsequent exact resumes.
 // Returns a separately identified provenance record without mutating raw input.
 // Migration requires a verified v23/provenance_v7 checkpoint, a closed global
 // KDK boundary and the exact current normalized text minus the two new default

@@ -103,7 +103,12 @@ void assertSynchronized(const io::RestartReadResult& checkpoint,unsigned rung) {
 }
 std::string legacyTreePmDefaultsText(std::string text) {
   for (const std::string_view line : {"treepm_gaussian_pair_lookup_enabled = false\n",
-                                     "treepm_full_mac_diagnostics = true\n"}) {
+                                     "treepm_full_mac_diagnostics = true\n",
+                                     "treepm_full_residual_lookup_enabled = false\n",
+                                     "treepm_leaf_simd_enabled = false\n",
+                                     "treepm_radial_coefficients_enabled = false\n",
+                                     "treepm_residual_block_size = 64\n",
+                                     "treepm_tree_max_leaf_size = 16\n"}) {
     const auto position = text.find(line);
     require(position != std::string::npos);
     text.erase(position, line.size());
@@ -143,7 +148,7 @@ void testLegacyRestartConfigurationCompatibility(
   auto legacy = io::readRestartCheckpointHdf5(path);
   const auto original_serialized = core::serializeProvenanceRecord(legacy.provenance);
   const auto record = io::restartConfigurationCompatibilityRecord(legacy, frozen);
-  require(record.find("restart_config_compatibility_begin=treepm_normalized_defaults_v1") != std::string::npos);
+  require(record.find("restart_config_compatibility_begin=treepm_normalized_defaults_v2") != std::string::npos);
   require(record.find("derived_normalized_hash_hex="+frozen.provenance.config_hash_hex) != std::string::npos);
   require(legacy.normalized_config_hash_hex == payload.normalized_config_hash_hex);
   require(core::serializeProvenanceRecord(legacy.provenance) == original_serialized);
@@ -232,6 +237,21 @@ void run(int rank,int ranks,std::uint64_t token) {
   // 100 km/s. This gate checks trajectory refinement, not long-time P(k).
   require(std::sqrt(refined_error/64.0)<1e-3);
   require(refined_error<=coarse_error+1e-18);
+  auto optimized_text=hierarchical_config.normalized_text;
+  for (const std::string key : {"treepm_full_residual_lookup_enabled", "treepm_leaf_simd_enabled",
+                               "treepm_radial_coefficients_enabled", "treepm_identical_source_tree_reuse_enabled",
+                               "treepm_topology_refit_enabled"}) {
+    const auto position=optimized_text.find(key+" = false");
+    require(position != std::string::npos);
+    optimized_text.replace(position,(key+" = false").size(),key+" = true");
+  }
+  workflows::ReferenceWorkflowRunner optimized(core::loadFrozenConfigFromString(optimized_text,"optimized_hierarchical"));
+  auto optimized_full=execute(optimized,"optimized_hierarchical_full",2e-5);
+  assertSynchronized(optimized_full.second,2U);
+  require(mpi.allreduceSumDouble(phaseError(optimized_full.second.state,coarse.second.state))<1e-18);
+  auto optimized_first=execute(optimized,"optimized_hierarchical_first",2e-5,nullptr,1U);
+  auto optimized_resume=execute(optimized,"optimized_hierarchical_resume",2e-5,&optimized_first.second);
+  require(mpi.allreduceSumDouble(phaseError(optimized_resume.second.state,optimized_full.second.state))<1e-22);
   auto first=execute(hierarchical,"restart_first",2e-5,nullptr,1U);
   assertSynchronized(first.second,2U);
   auto resumed=execute(hierarchical,"restart_resumed",2e-5,&first.second);
@@ -244,7 +264,7 @@ void run(int rank,int ranks,std::uint64_t token) {
       scratch.root()/("legacy_rank_"+std::to_string(rank)+".hdf5"), [&](const io::RestartReadResult& legacy) {
         auto migrated = execute(global, "global_legacy_resumed", 2.5e-6, &legacy);
         require(!migrated.first.restart_config_compatibility_record.empty());
-        require(migrated.second.provenance.derived_runtime_state.find("treepm_normalized_defaults_v1") != std::string::npos);
+        require(migrated.second.provenance.derived_runtime_state.find("treepm_normalized_defaults_v2") != std::string::npos);
         require(migrated.second.normalized_config_hash_hex == global_config.provenance.config_hash_hex);
         require(mpi.allreduceSumDouble(phaseError(migrated.second.state, reference.second.state)) < 1e-22);
         require(io::restartConfigurationCompatibilityRecord(migrated.second, global_config) ==

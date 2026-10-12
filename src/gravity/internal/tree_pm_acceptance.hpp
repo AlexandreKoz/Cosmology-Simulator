@@ -50,9 +50,10 @@ namespace cosmosim::gravity::internal {
   return std::isfinite(proxy) && proxy >= 0.0 ? proxy : std::numeric_limits<double>::infinity();
 }
 
+template <class Offset>
 [[nodiscard]] inline bool acceptTreePmNode(
-    const TreeNodeAcceptanceInput& in, bool within_cutoff,
-    const TreePmOptions& options, TreePmTraversalCounters& counters) noexcept {
+    TreeNodeAcceptanceInput in, bool within_cutoff,
+    const TreePmOptions& options, TreePmTraversalCounters& counters, Offset&& offset) noexcept {
   if (in.is_leaf) return true;
   const double r = std::sqrt(std::max(in.r2, 1.0e-30));
   const bool softening_ok = passesSofteningEnvelopeGuard(
@@ -70,13 +71,21 @@ namespace cosmosim::gravity::internal {
   if (!softening_ok) ++counters.softening_rejections;
   if (in.target_inside_node) ++counters.near_node_rejections;
   if (!within_cutoff) ++counters.cutoff_containment_rejections;
-  // All cheap independent guards are counted in both modes. In fast mode a
-  // skipped selected MAC is neither a passing guard nor a rejection count.
+  // These guards are counted when this function is reached. The traversal
+  // may already have descended before COM geometry in fast mode; that is
+  // recorded separately. A skipped MAC is neither a pass nor a rejection.
   if (!options.full_mac_diagnostics && (!envelope_ok || !softening_ok ||
       in.target_inside_node || !within_cutoff || !std::isfinite(in.r2))) {
     ++counters.skipped_mac_evaluations;
     return false;
   }
+  // COM-center length is target invariant, but early guards remove most uses
+  // without retaining another node-sized vector. Geometric MAC needs none.
+  const bool needs_offset = !strict ||
+      options.tree_options.opening_criterion == TreeOpeningCriterion::kBarnesHutComDistance ||
+      (options.tree_options.opening_criterion == TreeOpeningCriterion::kRelativeForceError &&
+       !in.previous_acceleration_available);
+  if (needs_offset) in.com_center_offset = offset();
   bool mac_ok = false;
   if (strict) {
     mac_ok = acceptNodeByMac(false, in.target_inside_node, in.half_size,
@@ -118,6 +127,13 @@ namespace cosmosim::gravity::internal {
   }
   return mac_ok && envelope_ok && softening_ok && within_cutoff &&
       !in.target_inside_node && std::isfinite(in.r2);
+}
+
+[[nodiscard]] inline bool acceptTreePmNode(
+    const TreeNodeAcceptanceInput& in, bool within_cutoff,
+    const TreePmOptions& options, TreePmTraversalCounters& counters) noexcept {
+  return acceptTreePmNode(in, within_cutoff, options, counters,
+      [&] { return in.com_center_offset; });
 }
 
 }  // namespace cosmosim::gravity::internal
