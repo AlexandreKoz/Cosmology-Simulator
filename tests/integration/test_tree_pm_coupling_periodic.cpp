@@ -1,6 +1,8 @@
+// 20261012 regression repairs: NOT RUN — deferred to maintainer.
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -62,6 +64,34 @@ struct ForceField {
   std::vector<double> ay;
   std::vector<double> az;
 };
+
+enum class ForceEvaluation {
+  kFullTreePm,
+  kShortRangeOnly,
+};
+
+// Full forces refresh PM through the ordinary API. Split-only fixtures must
+// explicitly select the no-refresh surface; cache-lifetime tests below call
+// solveActiveSetWithPmCadence directly on their retained coordinator.
+void solveForEvaluation(
+    cosmosim::gravity::TreePmCoordinator& coordinator,
+    std::span<const double> pos_x, std::span<const double> pos_y,
+    std::span<const double> pos_z, std::span<const double> mass,
+    const cosmosim::gravity::TreePmForceAccumulatorView& accumulator,
+    const cosmosim::gravity::TreePmOptions& options, ForceEvaluation evaluation,
+    cosmosim::gravity::TreePmProfileEvent* profile = nullptr,
+    cosmosim::gravity::TreePmDiagnostics* diagnostics = nullptr,
+    const cosmosim::gravity::TreeSofteningView& softening = {}) {
+  requireOrThrow(options.short_range_only == (evaluation == ForceEvaluation::kShortRangeOnly),
+      "fixture force surface disagrees with short_range_only");
+  if (evaluation == ForceEvaluation::kShortRangeOnly) {
+    coordinator.solveActiveSetWithPmCadence(pos_x, pos_y, pos_z, mass,
+        accumulator, options, false, profile, diagnostics, softening);
+  } else {
+    coordinator.solveActiveSet(pos_x, pos_y, pos_z, mass,
+        accumulator, options, profile, diagnostics, softening);
+  }
+}
 
 struct AxisBoxLengths {
   double x = 1.0;
@@ -125,7 +155,8 @@ struct AxisBoxLengths {
     cosmosim::gravity::TreePmOptions options,
     cosmosim::gravity::TreePmDiagnostics* diagnostics,
     cosmosim::gravity::TreePmProfileEvent* profile = nullptr,
-    std::span<const double> previous_acceleration_magnitude_code = {}) {
+    std::span<const double> previous_acceleration_magnitude_code = {},
+    ForceEvaluation evaluation = ForceEvaluation::kFullTreePm) {
   std::vector<std::uint32_t> active(pos_x.size(), 0U);
   for (std::size_t i = 0; i < pos_x.size(); ++i) {
     active[i] = static_cast<std::uint32_t>(i);
@@ -146,7 +177,8 @@ struct AxisBoxLengths {
   };
 
   cosmosim::gravity::TreePmCoordinator coordinator(pm_shape);
-  coordinator.solveActiveSet(pos_x, pos_y, pos_z, mass, accumulator, options, profile, diagnostics);
+  solveForEvaluation(coordinator, pos_x, pos_y, pos_z, mass, accumulator,
+      options, evaluation, profile, diagnostics);
   return field;
 }
 
@@ -169,7 +201,8 @@ struct AxisBoxLengths {
   cosmosim::gravity::TreePmForceAccumulatorView accumulator{
       active, field.ax, field.ay, field.az, previous_acceleration_magnitude_code};
   cosmosim::gravity::TreePmCoordinator coordinator(pm_shape);
-  coordinator.solveActiveSet(pos_x, pos_y, pos_z, mass, accumulator, options, profile, diagnostics);
+  solveForEvaluation(coordinator, pos_x, pos_y, pos_z, mass, accumulator,
+      options, ForceEvaluation::kFullTreePm, profile, diagnostics);
   return field;
 }
 
@@ -214,6 +247,106 @@ void testForceComparatorRejectsNonfiniteComponents() {
   }
 }
 
+void testPmPlanRetainedStorageMatchesAllocation() {
+  int ranks = 1, rank = 0;
+#if COSMOSIM_ENABLE_MPI
+  MPI_Comm_size(MPI_COMM_WORLD, &ranks);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+#if !COSMOSIM_ENABLE_FFTW
+  if (ranks > 1) return; // Distributed FFT storage needs FFTW-MPI.
+#endif
+  using namespace cosmosim::gravity;
+  const PmGridShape shape{10, 7, 9};
+  const auto layout = cosmosim::parallel::makePmSlabLayout(10, 7, 9, ranks, rank);
+  for (const auto mode : {cosmosim::core::PmDecompositionMode::kSlab,
+                          cosmosim::core::PmDecompositionMode::kPencil}) {
+    PmGridStorage grid(shape, layout);
+    PmSolver solver(shape);
+    PmSolveOptions options;
+    options.decomposition_mode = mode;
+    solver.solvePoissonPeriodicForcesOnly(grid, options);
+    const auto estimate = estimatePmPlanResourcesMemory(shape, layout, mode);
+    requireOrThrow(estimate.used_backend_allocation_query == (ranks > 1),
+        "active distributed PM estimate did not query backend allocation geometry");
+    const auto allocated = estimate.allocated_local_complex_cells;
+    const auto real_elements = ranks == 1 ? 10U * 7U * 9U : 2U * allocated;
+    const auto arrays = real_elements * sizeof(double) + 2U * allocated * sizeof(std::complex<double>);
+    constexpr auto axes = 2U * (10U + 7U + 5U) * sizeof(double);
+    cosmosim::core::MemoryReportBuilder builder;
+    solver.appendMemoryReport(builder);
+    const auto report = std::move(builder).finish();
+    bool saw_arrays = false, saw_axes = false;
+    for (const auto& entry : report.entries) {
+      if (entry.label == "pm_solver.plan_cache_owned_arrays") {
+        requireOrThrow(entry.current_size_bytes == arrays, "PM retained FFT arrays disagree with allocation geometry");
+        saw_arrays = true;
+      } else if (entry.label == "pm_solver.plan_spectral_axis_metadata") {
+        requireOrThrow(entry.current_size_bytes == axes, "PM retained global spectral-axis metadata is miscounted");
+        saw_axes = true;
+      } else continue;
+      requireOrThrow(entry.owned_capacity_bytes >= entry.current_size_bytes &&
+          entry.high_water_bytes >= entry.owned_capacity_bytes && !entry.estimate_only,
+          "PM live report lost retained physical capacity");
+    }
+    requireOrThrow(saw_arrays && saw_axes && estimate.total_owned_bytes == arrays + axes &&
+        estimate.scalar_spectral_array_bytes == 0U, "PM plan owned-memory contract is incomplete");
+    solver.shutdownBackendResources();
+  }
+}
+
+void testShortRangeSurfaceRejectsPmRequests() {
+#if COSMOSIM_ENABLE_MPI
+  int world_size = 1; MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+  if (world_size != 1) return;
+#endif
+  using namespace cosmosim::gravity;
+  const std::vector<double> x{0.25, 0.30}, mass(2, 1.0);
+  const std::vector<std::uint32_t> active{0U, 1U};
+  ForceField force{std::vector<double>(2), std::vector<double>(2), std::vector<double>(2)};
+  TreePmForceAccumulatorView accumulator{active, force.ax, force.ay, force.az};
+  TreePmOptions options;
+  options.short_range_only = true;
+  options.tree_options.softening.epsilon_comoving = 0.01;
+  options.split_policy = makeTreePmSplitPolicyFromMeshSpacing(1.25, 3.0, 0.125);
+  TreePmCoordinator coordinator({8, 8, 8});
+  TreePmDiagnostics diagnostics;
+  solveForEvaluation(coordinator, x, x, x, mass, accumulator, options,
+      ForceEvaluation::kShortRangeOnly, nullptr, &diagnostics);
+  requireOrThrow(diagnostics.pm_solve_count == 0U && diagnostics.pm_reuse_count == 0U,
+      "valid short-range request touched PM");
+  requireOrThrow(std::isfinite(force.ax[0]) && force.ax[0] > 0.0,
+      "valid short-range request never evaluated the pair");
+  const auto rejected = [&](const auto& action) {
+    bool refused = false;
+    try { action(); }
+    catch (const std::invalid_argument& error) {
+      const std::string message = error.what();
+      refused = message.find("short-range split surface") != std::string::npos &&
+          message.find("PM refresh/capture or zoom correction") != std::string::npos;
+    }
+    requireOrThrow(refused, "contradictory short-range/PM request was not rejected by its guard");
+  };
+  rejected([&] { coordinator.solveActiveSet(x, x, x, mass, accumulator, options); });
+  rejected([&] { coordinator.solveActiveSetWithPmCadence(
+      x, x, x, mass, accumulator, options, true); });
+  const std::vector<std::uint8_t> high_res(2, 1U);
+  options.zoom_focused_pm_shape = {8, 8, 8};
+  options.source_is_high_res = high_res;
+  options.active_is_high_res = high_res;
+  options.zoom_region_radius_comoving = 0.1;
+  options.enable_zoom_long_range_correction = true;
+  rejected([&] { coordinator.solveActiveSetWithPmCadence(
+      x, x, x, mass, accumulator, options, false); });
+  options.enable_zoom_long_range_correction = false;
+  ForceField captured{std::vector<double>(2), std::vector<double>(2), std::vector<double>(2)};
+  accumulator.long_range_accel_x_comoving = captured.ax;
+  accumulator.long_range_accel_y_comoving = captured.ay;
+  accumulator.long_range_accel_z_comoving = captured.az;
+  rejected([&] { coordinator.solveActiveSetWithPmCadence(
+      x, x, x, mass, accumulator, options, false); });
+}
+
 void testCoincidentPairVectorIsZeroWithFiniteSoftening() {
 #if COSMOSIM_ENABLE_MPI
   int world_size = 1; MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -234,7 +367,10 @@ void testCoincidentPairVectorIsZeroWithFiniteSoftening() {
       options.gaussian_pair_lookup_enabled = lookup;
       TreePmDiagnostics diagnostics;
       TreePmProfileEvent profile;
-      const auto force = solveTreePm(x, x, x, mass, {8, 8, 8}, options, &diagnostics, &profile);
+      const auto force = solveTreePm(x, x, x, mass, {8, 8, 8}, options,
+          &diagnostics, &profile, {}, ForceEvaluation::kShortRangeOnly);
+      requireOrThrow(diagnostics.pm_solve_count == 0U && diagnostics.pm_reuse_count == 0U,
+          "short-range fixture refreshed or reused PM");
       requireOrThrow(profile.tree_profile.particle_particle_interactions == 2U,
           "coincident pairs must remain counted direct interactions");
       for (std::size_t i = 0; i < 2U; ++i) {
@@ -298,12 +434,12 @@ void testRecoveryDirectPairsCutoffThreadsAndMemory() {
         .source_particle_epsilon_override_mask=overrides};
     TreePmForceAccumulatorView acc{active,field.ax,field.ay,field.az};
     TreePmDiagnostics analytic,lookup;
-    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&analytic,soften);
+    solveForEvaluation(coordinator,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,nullptr,&analytic,soften);
     requireOrThrow(analytic.local_traversal.direct_pair_evaluations==expected_pairs,"cutoff/identity changed pair set");
     requireOrThrow(relativeL2Error(field,direct)<1e-13,"reverse-octant traversal changed physical interactions");
     const auto baseline=field;
     options.gaussian_pair_lookup_enabled=true;options.full_mac_diagnostics=false;
-    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&lookup,soften);
+    solveForEvaluation(coordinator,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,nullptr,&lookup,soften);
     requireOrThrow(lookup.local_traversal.direct_pair_evaluations==expected_pairs,"lookup changed pair set");
     requireOrThrow(lookup.local_traversal.visited_nodes==analytic.local_traversal.visited_nodes,"fast MAC changed traversal decisions");
     requireOrThrow(relativeL2Error(field,baseline)<5e-9,"lookup exceeded force regression budget");
@@ -316,16 +452,16 @@ void testRecoveryDirectPairsCutoffThreadsAndMemory() {
 #if defined(_OPENMP)
     const int old_threads=omp_get_max_threads();
     omp_set_num_threads(1);
-    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&lookup,soften);
+    solveForEvaluation(coordinator,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,nullptr,&lookup,soften);
     const auto one_thread=field;
     omp_set_num_threads(4);
-    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,&lookup,soften);
+    solveForEvaluation(coordinator,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,nullptr,&lookup,soften);
     requireOrThrow(field.ax==one_thread.ax && field.ay==one_thread.ay && field.az==one_thread.az,
         "target force accumulation changed with worker count");
     omp_set_num_threads(old_threads);
 #endif
     const auto retained=governor.snapshot().committed_bytes;
-    coordinator.solveActiveSet(x,y,z,mass,acc,options,nullptr,nullptr,soften);
+    solveForEvaluation(coordinator,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,nullptr,nullptr,soften);
     requireOrThrow(governor.snapshot().committed_bytes==retained,"lookup table retained another allocation across epochs");
     coordinator.shutdownMpiResources();
   }
@@ -1837,12 +1973,12 @@ void testBoundedLeafAccelerationReuseAndFallback() {
   options.short_range_only=true;
   options.source_generation=GravitySourceGeneration{1U}; options.source_layout_generation=1U;
   TreePmDiagnostics reference_d;
-  const auto reference=solveTreePm(x,y,z,mass,{8,8,8},options,&reference_d);
+  const auto reference=solveTreePm(x,y,z,mass,{8,8,8},options,&reference_d,nullptr,{},ForceEvaluation::kShortRangeOnly);
   for (const bool table : {false,true}) {
     for (const bool simd : {false,true}) {
       options.full_residual_lookup_enabled=table; options.leaf_simd_enabled=simd;
       TreePmDiagnostics d;
-      const auto value=solveTreePm(x,y,z,mass,{8,8,8},options,&d);
+      const auto value=solveTreePm(x,y,z,mass,{8,8,8},options,&d,nullptr,{},ForceEvaluation::kShortRangeOnly);
       requireEquivalentForces(value,reference,1e-10,"bounded homogeneous leaf kernel");
       requireOrThrow(d.local_traversal.direct_pair_evaluations == reference_d.local_traversal.direct_pair_evaluations,
           "leaf masks changed cutoff/self interaction set");
@@ -1858,7 +1994,7 @@ void testBoundedLeafAccelerationReuseAndFallback() {
     TreePmForceAccumulatorView acc{active,value.ax,value.ay,value.az};
     TreePmDiagnostics d;TreePmProfileEvent profile;
     profile = {};
-    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    solveForEvaluation(solver,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,&profile,&d);
     requireEquivalentForces(value,reference,1e-12,"governed table fallback");
     requireOrThrow(d.local_traversal.residual_lookup_targets==0U,"denied table still reported active");
     requireOrThrow(limited.snapshot().rejection_count>0U,"memory fallback was not exercised");
@@ -1870,19 +2006,19 @@ void testBoundedLeafAccelerationReuseAndFallback() {
     }
     options.identical_source_tree_reuse_enabled=true;
     profile = {};
-    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    solveForEvaluation(solver,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,&profile,&d);
     requireOrThrow(profile.tree_profile.rebuild_reason==5U && profile.tree_profile.build_count==0U,
         "identical sources did not reuse installed tree");
     options.identical_source_tree_reuse_enabled=false; options.topology_refit_enabled=true;
     options.source_generation=GravitySourceGeneration{2U};
     profile = {};
-    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    solveForEvaluation(solver,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,&profile,&d);
     requireOrThrow(profile.tree_profile.refit_attempted==1U && profile.tree_profile.refit_accepted==1U,
         "generation-advanced legal leaf membership did not refit");
     requireEquivalentForces(value,reference,1e-12,"refit must refresh source geometry");
     options.source_layout_generation=2U;
     profile = {};
-    solver.solveActiveSet(x,y,z,mass,acc,options,&profile,&d);
+    solveForEvaluation(solver,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly,&profile,&d);
     requireOrThrow(profile.tree_profile.build_count==1U && profile.tree_profile.rebuild_reason==8U,
         "changed dense source layout did not invalidate tree reuse/refit");
   }
@@ -1894,7 +2030,7 @@ void testBoundedLeafAccelerationReuseAndFallback() {
         cosmosim::parallel::MpiContext(false,1,0),&roomy);
     ForceField value{std::vector<double>(n),std::vector<double>(n),std::vector<double>(n)};
     TreePmForceAccumulatorView acc{active,value.ax,value.ay,value.az};
-    solver.solveActiveSet(x,y,z,mass,acc,options);
+    solveForEvaluation(solver,x,y,z,mass,acc,options,ForceEvaluation::kShortRangeOnly);
     requireOrThrow(roomy.snapshot().committed_bytes>=sizeof(TreePmResidualCoefficientTable),
         "table admission did not charge fixed physical storage");
     solver.trimOptionalAccelerationCaches(2U*1024U*1024U);
@@ -1913,6 +2049,8 @@ int main() {
   MPI_Init(nullptr, nullptr);
 #endif
   try {
+  testPmPlanRetainedStorageMatchesAllocation();
+  testShortRangeSurfaceRejectsPmRequests();
   testBoundedLeafAccelerationReuseAndFallback();
   testForceComparatorRejectsNonfiniteComponents();
   testCoincidentPairVectorIsZeroWithFiniteSoftening();

@@ -1,5 +1,14 @@
 # Repair open issues
 
+20261012 test regression closure: the source repairs in the
+[closure handoff](repair/treepm_deep_hotpath_test_regression_closure_20261012.md)
+await compilation and execution of every stated gate. In particular, active
+FFTW-MPI slab/transposed allocations, Release assertion effectiveness, Ewald,
+and hierarchical dispatcher/restart qualification have no new runtime evidence.
+The authoritative scheduler, gravity mathematics, config and memory estimators
+were not changed. Any additional failure needs its exact command and log before
+a numerical or backend conclusion can be drawn.
+
 20261012 Attempt 1 source repairs and optimizations await all execution gates:
 composed runtime first light, analytic/table/SIMD/shared-derivative accuracy,
 MPI collective failure/rank equivalence, restart migration, actual snapshot

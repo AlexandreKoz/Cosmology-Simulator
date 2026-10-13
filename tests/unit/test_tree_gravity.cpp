@@ -1,12 +1,15 @@
+// 20261012 regression repairs: NOT RUN — deferred to maintainer.
 #include <algorithm>
-#include <cassert>
+#include "../support/test_require.hpp"
 #include <cmath>
 #include <complex>
 #include <cstdint>
 #include <limits>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "cosmosim/gravity/gravity_memory.hpp"
@@ -87,13 +90,13 @@ struct OneTargetEvaluation {
 }
 
 void assertSameEvaluation(const OneTargetEvaluation& lhs, const OneTargetEvaluation& rhs) {
-  assert(lhs.ax == rhs.ax);
-  assert(lhs.ay == rhs.ay);
-  assert(lhs.az == rhs.az);
-  assert(lhs.profile.visited_nodes == rhs.profile.visited_nodes);
-  assert(lhs.profile.accepted_nodes == rhs.profile.accepted_nodes);
-  assert(lhs.profile.opened_nodes == rhs.profile.opened_nodes);
-  assert(lhs.profile.particle_particle_interactions == rhs.profile.particle_particle_interactions);
+  CHUI_REQUIRE(lhs.ax == rhs.ax);
+  CHUI_REQUIRE(lhs.ay == rhs.ay);
+  CHUI_REQUIRE(lhs.az == rhs.az);
+  CHUI_REQUIRE(lhs.profile.visited_nodes == rhs.profile.visited_nodes);
+  CHUI_REQUIRE(lhs.profile.accepted_nodes == rhs.profile.accepted_nodes);
+  CHUI_REQUIRE(lhs.profile.opened_nodes == rhs.profile.opened_nodes);
+  CHUI_REQUIRE(lhs.profile.particle_particle_interactions == rhs.profile.particle_particle_interactions);
 }
 
 void testTwoBodyForce() {
@@ -120,9 +123,9 @@ void testTwoBodyForce() {
 
   const double expected = options.gravitational_constant_code * mass[1] /
       std::pow(1.0 + options.softening.epsilon_comoving * options.softening.epsilon_comoving, 1.5);
-  assert(std::abs(ax[0] - expected) < k_tolerance);
-  assert(std::abs(ay[0]) < k_tolerance);
-  assert(std::abs(az[0]) < k_tolerance);
+  CHUI_REQUIRE(std::abs(ax[0] - expected) < k_tolerance);
+  CHUI_REQUIRE(std::abs(ay[0]) < k_tolerance);
+  CHUI_REQUIRE(std::abs(az[0]) < k_tolerance);
 }
 
 void testForceSymmetry() {
@@ -147,9 +150,9 @@ void testForceSymmetry() {
 
   solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, nullptr);
 
-  assert(std::abs(ax[0] + ax[1]) < k_tolerance);
-  assert(std::abs(ay[0] + ay[1]) < k_tolerance);
-  assert(std::abs(az[0] + az[1]) < k_tolerance);
+  CHUI_REQUIRE(std::abs(ax[0] + ax[1]) < k_tolerance);
+  CHUI_REQUIRE(std::abs(ay[0] + ay[1]) < k_tolerance);
+  CHUI_REQUIRE(std::abs(az[0] + az[1]) < k_tolerance);
 }
 
 void testOpeningCriterionBehavior() {
@@ -177,8 +180,8 @@ void testOpeningCriterionBehavior() {
   cosmosim::gravity::TreeGravityProfile relaxed_profile;
   solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, &relaxed_profile);
 
-  assert(strict_profile.visited_nodes >= relaxed_profile.visited_nodes);
-  assert(strict_profile.accepted_nodes >= relaxed_profile.accepted_nodes);
+  CHUI_REQUIRE(strict_profile.visited_nodes >= relaxed_profile.visited_nodes);
+  CHUI_REQUIRE(strict_profile.accepted_nodes >= relaxed_profile.accepted_nodes);
 }
 
 void testMultipoleAccumulation() {
@@ -194,14 +197,14 @@ void testMultipoleAccumulation() {
   solver.build(pos_x, pos_y, pos_z, mass, options, nullptr);
 
   const auto& nodes = solver.nodes();
-  assert(nodes.size() > 0);
+  CHUI_REQUIRE(nodes.size() > 0);
   const double total_mass = 1.0 + 2.0 + 3.0;
   const double expected_com_x = (1.0 * 0.0 + 2.0 * 2.0 + 3.0 * 4.0) / total_mass;
-  assert(std::abs(nodes.mass_code[0] - total_mass) < k_tolerance);
-  assert(std::abs(nodes.com_x_comoving[0] - expected_com_x) < k_tolerance);
+  CHUI_REQUIRE(std::abs(nodes.mass_code[0] - total_mass) < k_tolerance);
+  CHUI_REQUIRE(std::abs(nodes.com_x_comoving[0] - expected_com_x) < k_tolerance);
   const double trace = nodes.quad_xx[0] + nodes.quad_yy[0] + nodes.quad_zz[0];
-  assert(std::abs(trace) < 1.0e-8);
-  assert(std::abs(nodes.quad_xx[0]) > 0.0);
+  CHUI_REQUIRE(std::abs(trace) < 1.0e-8);
+  CHUI_REQUIRE(std::abs(nodes.quad_xx[0]) > 0.0);
 }
 
 void testMacCriteriaAreAvailable() {
@@ -228,8 +231,8 @@ void testMacCriteriaAreAvailable() {
   cosmosim::gravity::TreeGravityProfile com_distance_profile;
   solver.evaluateActiveSet(pos_x, pos_y, pos_z, mass, active, ax, ay, az, options, &com_distance_profile);
 
-  assert(geometric_profile.visited_nodes > 0);
-  assert(com_distance_profile.visited_nodes > 0);
+  CHUI_REQUIRE(geometric_profile.visited_nodes > 0);
+  CHUI_REQUIRE(com_distance_profile.visited_nodes > 0);
 }
 
 void testRelativeForceErrorMacFormulaAndWorkMonotonicity() {
@@ -268,7 +271,7 @@ void testRelativeForceErrorMacFormulaAndWorkMonotonicity() {
       break;
     }
   }
-  assert(source_node != std::numeric_limits<std::uint32_t>::max());
+  CHUI_REQUIRE(source_node != std::numeric_limits<std::uint32_t>::max());
 
   const double dx = nodes.com_x_comoving[source_node] - target_x;
   const double dy = nodes.com_y_comoving[source_node] - target_y;
@@ -278,8 +281,8 @@ void testRelativeForceErrorMacFormulaAndWorkMonotonicity() {
   const double acceptance_threshold_code =
       options.gravitational_constant_code * nodes.mass_code[source_node] * width * width /
       (options.relative_force_tolerance * r2 * r2);
-  assert(std::isfinite(acceptance_threshold_code));
-  assert(acceptance_threshold_code > options.relative_force_acceleration_floor_code);
+  CHUI_REQUIRE(std::isfinite(acceptance_threshold_code));
+  CHUI_REQUIRE(acceptance_threshold_code > options.relative_force_acceleration_floor_code);
 
   const std::vector<double> below_threshold{0.5 * acceptance_threshold_code};
   const std::vector<double> above_threshold{2.0 * acceptance_threshold_code};
@@ -287,8 +290,8 @@ void testRelativeForceErrorMacFormulaAndWorkMonotonicity() {
       evaluateOneTarget(solver, pos_x, pos_y, pos_z, mass, options, below_threshold);
   const OneTargetEvaluation relaxed =
       evaluateOneTarget(solver, pos_x, pos_y, pos_z, mass, options, above_threshold, true);
-  assert(strict.profile.visited_nodes > relaxed.profile.visited_nodes);
-  assert(strict.profile.particle_particle_interactions >= relaxed.profile.particle_particle_interactions);
+  CHUI_REQUIRE(strict.profile.visited_nodes > relaxed.profile.visited_nodes);
+  CHUI_REQUIRE(strict.profile.particle_particle_interactions >= relaxed.profile.particle_particle_interactions);
 }
 
 void testRelativeForceErrorMacHistoryFallbackAndFloor() {
@@ -350,11 +353,11 @@ void testRelativeForceErrorMacNeverAcceptsTargetContainingNode() {
   const std::vector<double> enormous_history{1.0e100};
   const OneTargetEvaluation result =
       evaluateOneTarget(solver, pos_x, pos_y, pos_z, mass, options, enormous_history);
-  assert(std::abs(result.ax - 3.0) < k_tolerance);
-  assert(std::abs(result.ay) < k_tolerance);
-  assert(std::abs(result.az) < k_tolerance);
-  assert(result.profile.visited_nodes > 1U);
-  assert(result.profile.particle_particle_interactions == 1U);
+  CHUI_REQUIRE(std::abs(result.ax - 3.0) < k_tolerance);
+  CHUI_REQUIRE(std::abs(result.ay) < k_tolerance);
+  CHUI_REQUIRE(std::abs(result.az) < k_tolerance);
+  CHUI_REQUIRE(result.profile.visited_nodes > 1U);
+  CHUI_REQUIRE(result.profile.particle_particle_interactions == 1U);
 }
 
 void testRelativeForceErrorMacValidatesOptionsAndHistoryShape() {
@@ -371,7 +374,7 @@ void testRelativeForceErrorMacValidatesOptionsAndHistoryShape() {
     } catch (const std::invalid_argument&) {
       threw = true;
     }
-    assert(threw);
+    CHUI_REQUIRE(threw);
   };
 
   cosmosim::gravity::TreeGravityOptions options;
@@ -412,7 +415,7 @@ void testRelativeForceErrorMacValidatesOptionsAndHistoryShape() {
   } catch (const std::invalid_argument&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testPairSofteningUsesMaxRule() {
@@ -447,8 +450,8 @@ void testPairSofteningUsesMaxRule() {
   const double eps_10 = cosmosim::gravity::combineSofteningPairEpsilon(0.04, 0.01);
   const double expected_a0 = mass[1] * cosmosim::gravity::softenedInvR3(1.0, eps_01);
   const double expected_a1 = -mass[0] * cosmosim::gravity::softenedInvR3(1.0, eps_10);
-  assert(std::abs(ax[0] - expected_a0) < k_tolerance);
-  assert(std::abs(ax[1] - expected_a1) < k_tolerance);
+  CHUI_REQUIRE(std::abs(ax[0] - expected_a0) < k_tolerance);
+  CHUI_REQUIRE(std::abs(ax[1] - expected_a1) < k_tolerance);
 }
 
 
@@ -478,7 +481,7 @@ void testTargetSpeciesSofteningFallback() {
 
   const double pair_eps = cosmosim::gravity::combineSofteningPairEpsilon(0.04, 0.15);
   const double expected = -mass[0] * cosmosim::gravity::softenedInvR3(1.0, pair_eps);
-  assert(std::abs(ax[0] - expected) < k_tolerance);
+  CHUI_REQUIRE(std::abs(ax[0] - expected) < k_tolerance);
 }
 
 
@@ -499,7 +502,7 @@ void testSourceGenerationRejectsStaleTree() {
   } catch (const std::logic_error&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testLegacyFingerprintRejectsSameSizeMutation() {
@@ -520,7 +523,7 @@ void testLegacyFingerprintRejectsSameSizeMutation() {
   } catch (const std::logic_error&) {
     threw = true;
   }
-  assert(threw);
+  CHUI_REQUIRE(threw);
 }
 
 void testEveryMacOpensTargetContainingNode() {
@@ -541,10 +544,102 @@ void testEveryMacOpensTargetContainingNode() {
     options.softening.epsilon_comoving = 0.0;
     solver.build(x, y, z, mass, options, nullptr);
     const auto got = evaluateOneTarget(solver, x, y, z, mass, options);
-    assert(std::abs(got.ax - 0.01) < 1.0e-12);
+    CHUI_REQUIRE(std::abs(got.ax - 0.01) < 1.0e-12);
   }
 }
 
+
+void testPmPlanRankLocalGeometryAndOverflow() {
+  using cosmosim::core::PmDecompositionMode;
+  using cosmosim::gravity::PmGridShape;
+  struct GeometryCase {
+    PmGridShape shape;
+    int ranks;
+    int rank;
+    PmDecompositionMode mode;
+    std::size_t begin_x;
+    std::size_t end_x;
+    std::uint64_t logical_complex;
+    std::uint64_t allocated_complex;
+  };
+  // Fixed ceil-block partition, final truncated slab, transposed output larger
+  // AND smaller than input, and an empty slab's one-element backend minimum.
+  // The current "pencil" seam is a transposed slab, not a 2-D pencil backend.
+  const GeometryCase cases[] = {
+      {{10, 7, 9}, 1, 0, PmDecompositionMode::kSlab, 0, 10, 350, 350},
+      {{10, 7, 9}, 3, 0, PmDecompositionMode::kSlab, 0, 4, 140, 140},
+      {{10, 7, 9}, 3, 2, PmDecompositionMode::kSlab, 8, 10, 70, 70},
+      {{10, 7, 9}, 3, 0, PmDecompositionMode::kPencil, 0, 4, 150, 150},
+      {{10, 7, 9}, 3, 2, PmDecompositionMode::kPencil, 8, 10, 50, 70},
+      {{5, 9, 7}, 8, 7, PmDecompositionMode::kSlab, 5, 5, 0, 1},
+      {{5, 9, 7}, 8, 3, PmDecompositionMode::kPencil, 3, 4, 40, 40},
+  };
+  // This unit executable intentionally does not initialize MPI: these are
+  // backend-independent preflight geometries, not an active MPI qualification.
+  for (const auto& item : cases) {
+    const auto layout = cosmosim::parallel::makePmSlabLayout(
+        item.shape.nx, item.shape.ny, item.shape.nz, item.ranks, item.rank);
+    CHUI_REQUIRE(layout.owned_x.begin_x == item.begin_x && layout.owned_x.end_x == item.end_x);
+    const auto estimate = cosmosim::gravity::estimatePmPlanResourcesMemory(item.shape, layout, item.mode);
+    const auto real_elements = item.ranks == 1
+        ? item.shape.nx * item.shape.ny * item.shape.nz : 2U * item.allocated_complex;
+    const auto axes = 2U * (item.shape.nx + item.shape.ny + item.shape.nz / 2U + 1U);
+    CHUI_REQUIRE(estimate.logical_local_complex_cells == item.logical_complex);
+    CHUI_REQUIRE(estimate.allocated_local_complex_cells == item.allocated_complex);
+    CHUI_REQUIRE(estimate.real_array_bytes == real_elements * sizeof(double));
+    CHUI_REQUIRE(estimate.complex_spectral_array_bytes == 2U * item.allocated_complex * sizeof(std::complex<double>));
+    CHUI_REQUIRE(estimate.scalar_spectral_array_bytes == 0U);
+    CHUI_REQUIRE(estimate.spectral_axis_metadata_bytes == axes * sizeof(double));
+    CHUI_REQUIRE(estimate.total_owned_bytes == real_elements * sizeof(double) +
+        2U * item.allocated_complex * sizeof(std::complex<double>) + axes * sizeof(double));
+    CHUI_REQUIRE(!estimate.used_backend_allocation_query);
+  }
+  const auto overflow_rejected = [](PmGridShape shape, int ranks, int rank, const char* context) {
+    const auto layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, ranks, rank);
+    bool rejected = false;
+    try { (void)cosmosim::gravity::estimatePmPlanResourcesMemory(shape, layout, PmDecompositionMode::kSlab); }
+    catch (const std::overflow_error& error) {
+      rejected = std::string(error.what()).find(context) != std::string::npos;
+    }
+    CHUI_REQUIRE(rejected);
+  };
+  const auto max_size = std::numeric_limits<std::size_t>::max();
+  overflow_rejected({max_size / sizeof(double) + 1U, 1, 1}, 1, 0, "real bytes");
+  overflow_rejected({max_size / (2U * sizeof(std::complex<double>)) + 1U, 1, 1}, 1, 0, "complex spectral bytes");
+  overflow_rejected({1, max_size / (2U * sizeof(double)) + 1U, 1}, 2, 1, "spectral axis metadata bytes");
+  overflow_rejected({1, 1, max_size}, 2, 0, "distributed real stride");
+  overflow_rejected({max_size / (3U * sizeof(double) + 2U * sizeof(std::complex<double>)) + 1U, 1, 1},
+      1, 0, "total byte sum");
+}
+
+void testPmPlanRetainedCapacityReport() {
+  // A tiny odd/non-cubic grid exercises actual retained storage on both FFTW
+  // and the diagnostic DFT backend; the 512^3 cases below are planning only.
+  const cosmosim::gravity::PmGridShape shape{4, 3, 5};
+  cosmosim::gravity::PmGridStorage grid(shape);
+  cosmosim::gravity::PmSolver solver(shape);
+  solver.solvePoissonPeriodic(grid, cosmosim::gravity::PmSolveOptions{});
+  constexpr std::uint64_t arrays = 4U * 3U * 5U * sizeof(double) +
+      2U * 4U * 3U * 3U * sizeof(std::complex<double>);
+  constexpr std::uint64_t axes = 2U * (4U + 3U + 3U) * sizeof(double);
+  bool saw_arrays = false, saw_axes = false;
+  cosmosim::core::MemoryReportBuilder builder;
+  solver.appendMemoryReport(builder);
+  const auto report = std::move(builder).finish();
+  for (const auto& entry : report.entries) {
+    if (entry.label == "pm_solver.plan_cache_owned_arrays") {
+      CHUI_REQUIRE(entry.current_size_bytes == arrays);
+      saw_arrays = true;
+    } else if (entry.label == "pm_solver.plan_spectral_axis_metadata") {
+      CHUI_REQUIRE(entry.current_size_bytes == axes);
+      saw_axes = true;
+    } else continue;
+    CHUI_REQUIRE(entry.owned_capacity_bytes >= entry.current_size_bytes);
+    CHUI_REQUIRE(entry.high_water_bytes >= entry.owned_capacity_bytes);
+    CHUI_REQUIRE(!entry.estimate_only);
+  }
+  CHUI_REQUIRE(saw_arrays && saw_axes);
+}
 
 void testPmPlanResourcesAndDmoProcessPreflight() {
   using cosmosim::core::MemoryEntry;
@@ -556,40 +651,60 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
   const auto serial_layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, 1, 0);
   const auto serial_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
       shape, serial_layout, cosmosim::core::PmDecompositionMode::kSlab);
+  // Derived from PlanResources allocation sites, not estimator output:
+  // serial real[nx*ny*nz], fourier + potential_k[nx*ny*(nz/2+1)],
+  // k and assignment-window metadata on each GLOBAL spectral axis.
   constexpr std::uint64_t serial_real_cells = 32ULL * 32ULL * 32ULL;
   constexpr std::uint64_t serial_complex_cells = 32ULL * 32ULL * 17ULL;
-  const std::uint64_t expected_serial =
-      serial_real_cells * sizeof(double) +
-      3ULL * serial_complex_cells * sizeof(std::complex<double>) +
-      4ULL * serial_complex_cells * sizeof(double);
-  assert(serial_plan.total_owned_bytes == expected_serial);
-  assert(serial_plan.logical_local_complex_cells == serial_complex_cells);
+  constexpr std::uint64_t axis_bytes = 2ULL * (32ULL + 32ULL + 17ULL) * sizeof(double);
+  const std::uint64_t expected_serial = serial_real_cells * sizeof(double) +
+      2ULL * serial_complex_cells * sizeof(std::complex<double>) + axis_bytes;
+  CHUI_REQUIRE(serial_plan.real_array_bytes == serial_real_cells * sizeof(double));
+  CHUI_REQUIRE(serial_plan.complex_spectral_array_bytes == 2ULL * serial_complex_cells * sizeof(std::complex<double>));
+  CHUI_REQUIRE(serial_plan.scalar_spectral_array_bytes == 0U);
+  CHUI_REQUIRE(serial_plan.spectral_axis_metadata_bytes == axis_bytes);
+  CHUI_REQUIRE(serial_plan.total_owned_bytes == expected_serial);
+  CHUI_REQUIRE(serial_plan.logical_local_complex_cells == serial_complex_cells);
+  CHUI_REQUIRE(serial_plan.allocated_local_complex_cells == serial_complex_cells);
+  CHUI_REQUIRE(!serial_plan.used_backend_allocation_query);
 
   const auto rank3_layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, 8, 3);
+  CHUI_REQUIRE(rank3_layout.owned_x.begin_x == 12U && rank3_layout.owned_x.end_x == 16U);
   const auto distributed_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
       shape, rank3_layout, cosmosim::core::PmDecompositionMode::kSlab);
   constexpr std::uint64_t distributed_complex_cells = 4ULL * 32ULL * 17ULL;
   const std::uint64_t expected_distributed =
       2ULL * distributed_complex_cells * sizeof(double) +
-      3ULL * distributed_complex_cells * sizeof(std::complex<double>) +
-      4ULL * distributed_complex_cells * sizeof(double);
-  assert(distributed_plan.total_owned_bytes == expected_distributed);
+      2ULL * distributed_complex_cells * sizeof(std::complex<double>) + axis_bytes;
+  CHUI_REQUIRE(distributed_plan.total_owned_bytes == expected_distributed);
+  CHUI_REQUIRE(distributed_plan.real_array_bytes == 2ULL * distributed_complex_cells * sizeof(double));
+  CHUI_REQUIRE(distributed_plan.complex_spectral_array_bytes == 2ULL * distributed_complex_cells * sizeof(std::complex<double>));
+  CHUI_REQUIRE(distributed_plan.spectral_axis_metadata_bytes == axis_bytes);
+  CHUI_REQUIRE(distributed_plan.scalar_spectral_array_bytes == 0U);
+  CHUI_REQUIRE(distributed_plan.logical_local_complex_cells == distributed_complex_cells);
+  CHUI_REQUIRE(distributed_plan.allocated_local_complex_cells == distributed_complex_cells);
+  CHUI_REQUIRE(!distributed_plan.used_backend_allocation_query);
 
-  // First-light target geometry: derive, do not hard-code, the known solver-owned
-  // PlanResources payload for one 64-plane slab of a 512^3 mesh.
+  // Planning only: no 512^3 buffers are allocated. One 64-plane MPI slab
+  // retains padded real[2*A] and TWO complex[A] arrays, plus global axis data.
   const cosmosim::gravity::PmGridShape first_light_shape{512U, 512U, 512U};
-  const auto first_light_layout = cosmosim::parallel::makePmSlabLayout(
-      first_light_shape.nx, first_light_shape.ny, first_light_shape.nz, 8, 0);
+  const auto first_light_layout = cosmosim::parallel::makePmSlabLayout(512, 512, 512, 8, 0);
   const auto first_light_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
       first_light_shape, first_light_layout, cosmosim::core::PmDecompositionMode::kSlab);
-  const std::uint64_t first_light_complex =
-      64ULL * 512ULL * (512ULL / 2ULL + 1ULL);
+  constexpr std::uint64_t first_light_complex = 64ULL * 512ULL * 257ULL;
+  constexpr std::uint64_t first_light_axes = 2ULL * (512ULL + 512ULL + 257ULL) * sizeof(double);
   const std::uint64_t first_light_expected =
       2ULL * first_light_complex * sizeof(double) +
-      3ULL * first_light_complex * sizeof(std::complex<double>) +
-      4ULL * first_light_complex * sizeof(double);
-  assert(first_light_plan.total_owned_bytes == first_light_expected);
-  assert(first_light_plan.total_owned_bytes > 3ULL * 256ULL * 1024ULL * 1024ULL);
+      2ULL * first_light_complex * sizeof(std::complex<double>) + first_light_axes;
+  CHUI_REQUIRE(first_light_plan.total_owned_bytes == first_light_expected);
+  CHUI_REQUIRE(first_light_plan.logical_local_complex_cells == first_light_complex);
+  CHUI_REQUIRE(first_light_plan.allocated_local_complex_cells == first_light_complex);
+  const auto first_light_serial = cosmosim::gravity::estimatePmPlanResourcesMemory(
+      first_light_shape, cosmosim::parallel::makePmSlabLayout(512, 512, 512, 1, 0),
+      cosmosim::core::PmDecompositionMode::kSlab);
+  CHUI_REQUIRE(first_light_serial.total_owned_bytes ==
+      512ULL * 512ULL * 512ULL * sizeof(double) +
+      2ULL * 512ULL * 512ULL * 257ULL * sizeof(std::complex<double>) + first_light_axes);
 
   const auto gravity_estimate = cosmosim::gravity::estimateGravityMemory({
       .local_source_count = 1024U,
@@ -602,7 +717,7 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
       .mpi_world_rank = 3,
       .backend_unknown_reserve_bytes = 4096U,
   });
-  assert(gravity_estimate.pm_plan_owned_bytes == expected_distributed);
+  CHUI_REQUIRE(gravity_estimate.pm_plan_owned_bytes == expected_distributed);
 
   MemoryReportBuilder canonical_builder;
   canonical_builder.addEntry(MemoryEntry{
@@ -635,26 +750,26 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
           .allocator_external_reserve_bytes = 17000U,
           .safety_margin_fraction = 0.25,
       });
-  assert(process_estimate.known_owned_peak_bytes ==
+  CHUI_REQUIRE(process_estimate.known_owned_peak_bytes ==
       gravity_estimate.known_peak_bytes + 1000U + 2000U + 3000U + 5000U);
-  assert(process_estimate.external_unknown_reserve_bytes ==
+  CHUI_REQUIRE(process_estimate.external_unknown_reserve_bytes ==
       gravity_estimate.external_backend_unknown_bytes + 7000U + 11000U + 13000U + 17000U);
-  assert(process_estimate.modeled_subtotal_bytes ==
+  CHUI_REQUIRE(process_estimate.modeled_subtotal_bytes ==
       process_estimate.known_owned_peak_bytes + process_estimate.external_unknown_reserve_bytes);
-  assert(process_estimate.budget_required_bytes >= process_estimate.modeled_subtotal_bytes);
-  assert(process_estimate.aggregate_required_bytes == 8U * process_estimate.budget_required_bytes);
+  CHUI_REQUIRE(process_estimate.budget_required_bytes >= process_estimate.modeled_subtotal_bytes);
+  CHUI_REQUIRE(process_estimate.aggregate_required_bytes == 8U * process_estimate.budget_required_bytes);
   bool found_scheduler_memory = false;
   for (const auto& entry : process_estimate.report.entries) {
     if (entry.label != "dmo_process.scheduler_owned_state") {
       continue;
     }
     found_scheduler_memory = true;
-    assert(entry.current_size_bytes == 2500U);
-    assert(entry.owned_capacity_bytes == 3000U);
-    assert(entry.high_water_bytes == 3500U);
-    assert(!entry.estimate_only);
+    CHUI_REQUIRE(entry.current_size_bytes == 2500U);
+    CHUI_REQUIRE(entry.owned_capacity_bytes == 3000U);
+    CHUI_REQUIRE(entry.high_water_bytes == 3500U);
+    CHUI_REQUIRE(!entry.estimate_only);
   }
-  assert(found_scheduler_memory);
+  CHUI_REQUIRE(found_scheduler_memory);
   bool rejected = false;
   try {
     cosmosim::gravity::enforceDmoProcessMemoryBudget(
@@ -662,7 +777,7 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
   } catch (const std::runtime_error&) {
     rejected = true;
   }
-  assert(rejected);
+  CHUI_REQUIRE(rejected);
   cosmosim::gravity::enforceDmoProcessMemoryBudget(
       process_estimate, process_estimate.budget_required_bytes);
 }
@@ -680,15 +795,15 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
   cosmosim::gravity::TreeGravitySolver solver;
   cosmosim::gravity::TreeGravityProfile profile;
   solver.build(x, y, z, mass, options, &profile);
-  assert(profile.estimated_node_reserve < 2U * n);
-  assert(profile.actual_node_count == solver.nodes().size());
-  assert(profile.node_capacity_high_water >= profile.actual_node_count);
+  CHUI_REQUIRE(profile.estimated_node_reserve < 2U * n);
+  CHUI_REQUIRE(profile.actual_node_count == solver.nodes().size());
+  CHUI_REQUIRE(profile.node_capacity_high_water >= profile.actual_node_count);
 
   const std::uint64_t stable_node_capacity = profile.node_capacity_high_water;
   for (int rebuild = 0; rebuild < 8; ++rebuild) {
     solver.build(x, y, z, mass, options, &profile);
-    assert(profile.actual_node_count == solver.nodes().size());
-    assert(profile.node_capacity_high_water == stable_node_capacity);
+    CHUI_REQUIRE(profile.actual_node_count == solver.nodes().size());
+    CHUI_REQUIRE(profile.node_capacity_high_water == stable_node_capacity);
   }
 
   const auto estimate = cosmosim::gravity::estimateGravityMemory({
@@ -701,15 +816,15 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
       .decomposition_mode = cosmosim::core::PmDecompositionMode::kSlab,
       .mpi_rank_count = 1U,
   });
-  assert(estimate.known_peak_bytes > 0U);
-  assert(estimate.budget_required_bytes >= estimate.known_peak_bytes);
+  CHUI_REQUIRE(estimate.known_peak_bytes > 0U);
+  CHUI_REQUIRE(estimate.budget_required_bytes >= estimate.known_peak_bytes);
   bool budget_rejected = false;
   try {
     cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.budget_required_bytes - 1U);
   } catch (const std::runtime_error&) {
     budget_rejected = true;
   }
-  assert(budget_rejected);
+  CHUI_REQUIRE(budget_rejected);
   cosmosim::gravity::enforceGravityMemoryBudget(estimate, estimate.budget_required_bytes);
 
   const auto distributed_estimate = cosmosim::gravity::estimateGravityMemory({
@@ -729,13 +844,13 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
     if (entry.label == "gravity.estimate.pm_routing_exchange") {
       saw_pm_routing = true;
       // Two reusable wire buffers, seven remote peers, 1024 bytes/peer.
-      assert(entry.estimated_next_step_bytes == 2U * 7U * 1024U);
+      CHUI_REQUIRE(entry.estimated_next_step_bytes == 2U * 7U * 1024U);
     }
   }
-  assert(saw_pm_routing);
-  assert(distributed_estimate.report.distributed.valid);
-  assert(distributed_estimate.report.distributed.rank_count == 8);
-  assert(distributed_estimate.report.distributed.global_sum_owned_bytes ==
+  CHUI_REQUIRE(saw_pm_routing);
+  CHUI_REQUIRE(distributed_estimate.report.distributed.valid);
+  CHUI_REQUIRE(distributed_estimate.report.distributed.rank_count == 8);
+  CHUI_REQUIRE(distributed_estimate.report.distributed.global_sum_owned_bytes ==
       8U * distributed_estimate.report.distributed.local_owned_bytes);
 }
 
@@ -750,10 +865,10 @@ void testProductionBlockMemoryEstimate() {
     for (const auto& entry : estimate.report.entries) {
       if (entry.label=="gravity.estimate.treepm_residual_block_diagnostics") {
         found=true;
-        assert(entry.estimated_next_step_bytes==((513U+block-1U)/block)*sizeof(double));
+        CHUI_REQUIRE(entry.estimated_next_step_bytes==((513U+block-1U)/block)*sizeof(double));
       }
     }
-    assert(found);
+    CHUI_REQUIRE(found);
   }
 }
 
@@ -792,8 +907,8 @@ void testGasRefinementForceConvergesAtFixedMassAndCom() {
       2U);
   const double relative_difference =
       std::abs(refined_ax - coarse_ax) / std::abs(coarse_ax);
-  assert(relative_difference > 0.0);
-  assert(relative_difference < 1.0e-3);
+  CHUI_REQUIRE(relative_difference > 0.0);
+  CHUI_REQUIRE(relative_difference < 1.0e-3);
 }
 
 void testAuthoritativeGasGeometryMatchesDirectSoftenedReference() {
@@ -825,9 +940,9 @@ void testAuthoritativeGasGeometryMatchesDirectSoftenedReference() {
     expected_ax += options.gravitational_constant_code * mass[source] * dx *
         cosmosim::gravity::softenedInvR3(r2, epsilon);
   }
-  assert(std::abs(ax[0] - expected_ax) < 1.0e-12);
-  assert(std::abs(ay[0]) < 1.0e-14);
-  assert(std::abs(az[0]) < 1.0e-14);
+  CHUI_REQUIRE(std::abs(ax[0] - expected_ax) < 1.0e-12);
+  CHUI_REQUIRE(std::abs(ay[0]) < 1.0e-14);
+  CHUI_REQUIRE(std::abs(az[0]) < 1.0e-14);
 }
 
 void testTreeAndTreePmCommonAcceptanceConformanceCorpus() {
@@ -866,17 +981,17 @@ void testTreeAndTreePmCommonAcceptanceConformanceCorpus() {
         };
         const bool standalone_common = acceptNodeByCommonTreePolicy(input, options);
         const bool treepm_common = acceptNodeByCommonTreePolicy(input, options);
-        assert(standalone_common == treepm_common);
+        CHUI_REQUIRE(standalone_common == treepm_common);
         if (inside) {
-          assert(!standalone_common);
+          CHUI_REQUIRE(!standalone_common);
         }
       }
     }
   }
 
-  assert(cosmosim::gravity::internal::targetInsideNodeAabbFromCenterDelta(
+  CHUI_REQUIRE(cosmosim::gravity::internal::targetInsideNodeAabbFromCenterDelta(
       0.1, -0.1, 0.0, 0.1));
-  assert(!cosmosim::gravity::internal::targetInsideNodeAabbFromCenterDelta(
+  CHUI_REQUIRE(!cosmosim::gravity::internal::targetInsideNodeAabbFromCenterDelta(
       0.10001, 0.0, 0.0, 0.1));
 }
 
@@ -898,6 +1013,8 @@ int main() {
   testSourceGenerationRejectsStaleTree();
   testLegacyFingerprintRejectsSameSizeMutation();
   testEveryMacOpensTargetContainingNode();
+  testPmPlanRankLocalGeometryAndOverflow();
+  testPmPlanRetainedCapacityReport();
   testPmPlanResourcesAndDmoProcessPreflight();
   testAdaptiveNodeReserveAndMemoryEstimate();
   testProductionBlockMemoryEstimate();

@@ -1,5 +1,12 @@
 # Validation plan
 
+The [20261012 test regression closure](repair/treepm_deep_hotpath_test_regression_closure_20261012.md)
+repairs invalid split-only/config fixtures and stale PM/rung expectations.
+New controls require field-specific rejection, ten stable experiment decks,
+actual PM retained-capacity reports, and always-active assertions under NDEBUG.
+**NOT RUN — deferred to maintainer.** Follow its focused-to-full command order;
+existing scientific references and tolerances retain their acceptance authority.
+
 ## Attempt 1 recovery gates — 20261012
 
 Source regressions now cover actual composed runtime admission/drift grants,
