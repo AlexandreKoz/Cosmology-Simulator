@@ -1,3 +1,4 @@
+// 20261012 regression repairs: NOT RUN — deferred to maintainer.
 #include "../support/test_require.hpp"
 #include <cmath>
 #include <string>
@@ -10,6 +11,38 @@
 #include "cosmosim/core/provenance.hpp"
 
 namespace {
+
+// Mutate one canonical numerics value after admitting the complete baseline.
+// Missing mode/IC fields must never masquerade as TreePM validation coverage.
+std::string withNumericsValue(
+    const std::string& normalized, const std::string& key, const std::string& value) {
+  auto text = normalized;
+  const std::string prefix = "\n" + key + " = ";
+  const auto position = text.find(prefix);
+  CHUI_REQUIRE(position != std::string::npos);
+  CHUI_REQUIRE(text.find(prefix, position + prefix.size()) == std::string::npos);
+  const auto begin = position + prefix.size();
+  const auto end = text.find('\n', begin);
+  CHUI_REQUIRE(end != std::string::npos);
+  text.replace(begin, end - begin, value);
+  return text;
+}
+
+void requireNumericsRejected(
+    const std::string& baseline, const std::string& key, const std::string& value,
+    const std::string& context = {}) {
+  const auto valid = cosmosim::core::loadFrozenConfigFromString(baseline, "treepm_valid_control");
+  CHUI_REQUIRE(valid.normalized_text == baseline);
+  bool rejected = false;
+  try {
+    (void)cosmosim::core::loadFrozenConfigFromString(
+        withNumericsValue(baseline, key, value), "treepm_invalid_field");
+  } catch (const cosmosim::core::ConfigError& error) {
+    const std::string message = error.what();
+    rejected = message.find(context.empty() ? "numerics." + key : context) != std::string::npos;
+  }
+  CHUI_REQUIRE(rejected);
+}
 
 static_assert(!std::is_default_constructible_v<cosmosim::core::SimulationConfig>,
               "SimulationConfig must not be publicly default-constructible; use FrozenConfig normalization");
@@ -876,116 +909,33 @@ treepm_pm_exchange_batch_bytes = 12582912
   CHUI_REQUIRE(parsed_geometric.normalized_text.find("treepm_tree_opening_criterion = geometric") !=
       std::string::npos);
 
-  const std::string bad_grid =
-      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_grid = 0\n";
-  bool threw = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(bad_grid, "treepm_bad_grid");
-  } catch (const cosmosim::core::ConfigError&) {
-    threw = true;
+  const auto& baseline = frozen.normalized_text;
+  // Every group has a typed legal control above (or below for pencil mode).
+  requireNumericsRejected(baseline, "treepm_pm_grid_nx", "0", "treepm_pm_grid_n{xyz}");
+  for (const auto key : {"treepm_tree_opening_theta", "treepm_tree_relative_force_tolerance",
+                        "treepm_tree_relative_force_acceleration_floor", "treepm_asmth_cells", "treepm_rcut_cells"}) {
+    for (const auto value : {"0", "-0.001", "nan", "inf", "-inf"})
+      requireNumericsRejected(baseline, key, value);
   }
-  CHUI_REQUIRE(threw);
-
-  const std::string bad_opening_criterion =
-      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_opening_criterion = magic\n";
-  threw = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(
-        bad_opening_criterion, "treepm_bad_opening_criterion");
-  } catch (const cosmosim::core::ConfigError&) {
-    threw = true;
+  for (const auto key : {"treepm_tree_opening_criterion", "treepm_assignment_scheme", "treepm_pm_decomposition_mode"})
+    requireNumericsRejected(baseline, key, "magic");
+  requireNumericsRejected(baseline, "treepm_update_cadence_steps", "3", "must be exactly 1 in production");
+  for (const auto key : {"treepm_tree_exchange_batch_bytes", "treepm_pm_exchange_batch_bytes"}) {
+    for (const auto value : {"0", "-1", "3.5", "nan", "inf", "18446744073709551616"})
+      requireNumericsRejected(baseline, key, value);
   }
-  CHUI_REQUIRE(threw);
-
-  for (const std::string invalid_opening_value : {
-           "treepm_tree_opening_theta = 0\n",
-           "treepm_tree_opening_theta = nan\n",
-           "treepm_tree_relative_force_tolerance = -0.001\n",
-           "treepm_tree_relative_force_acceleration_floor = 0\n"}) {
-    threw = false;
-    try {
-      (void)cosmosim::core::loadFrozenConfigFromString(
-          "[mode]\nmode = zoom_in\n[numerics]\n" + invalid_opening_value,
-          "treepm_bad_opening_value");
-    } catch (const cosmosim::core::ConfigError&) {
-      threw = true;
-    }
-    CHUI_REQUIRE(threw);
-  }
-
-  const std::string unsafe_pm_cadence =
-      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_update_cadence_steps = 3\n";
-  threw = false;
-  std::string cadence_error;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(
-        unsafe_pm_cadence, "treepm_unsafe_pm_cadence");
-  } catch (const cosmosim::core::ConfigError& error) {
-    threw = true;
-    cadence_error = error.what();
-  }
-  CHUI_REQUIRE(threw);
-  CHUI_REQUIRE(cadence_error.find("must be exactly 1 in production") != std::string::npos);
-  CHUI_REQUIRE(cadence_error.find("source, scale-factor, or decomposition epochs") !=
-      std::string::npos);
-
-  const std::string bad_scheme =
-      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_assignment_scheme = magic\n";
-  threw = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(bad_scheme, "treepm_bad_scheme");
-  } catch (const cosmosim::core::ConfigError&) {
-    threw = true;
-  }
-  CHUI_REQUIRE(threw);
-
-  const std::string pencil_decomposition =
-      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_decomposition_mode = pencil\n";
   const auto parsed_pencil = cosmosim::core::loadFrozenConfigFromString(
-      pencil_decomposition, "treepm_pencil_decomp");
+      withNumericsValue(baseline, "treepm_pm_decomposition_mode", "pencil"), "treepm_pencil_decomp");
   CHUI_REQUIRE(parsed_pencil.config.numerics.treepm_pm_decomposition_mode ==
       cosmosim::core::PmDecompositionMode::kPencil);
 
-  const std::string bad_batch_bytes =
-      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_tree_exchange_batch_bytes = 0\n";
-  threw = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(bad_batch_bytes, "treepm_bad_batch");
-  } catch (const cosmosim::core::ConfigError&) {
-    threw = true;
-  }
-  CHUI_REQUIRE(threw);
-
-  const std::string bad_pm_batch_bytes =
-      "[mode]\nmode = zoom_in\n[numerics]\ntreepm_pm_exchange_batch_bytes = 0\n";
-  threw = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(bad_pm_batch_bytes, "treepm_bad_pm_batch");
-  } catch (const cosmosim::core::ConfigError&) {
-    threw = true;
-  }
-  CHUI_REQUIRE(threw);
-
-  const std::string ambiguous_periodic_cutoff = R"(
-[mode]
-mode = zoom_in
-[cosmology]
-box_size = 1 mpc
-[numerics]
-treepm_pm_grid = 8
-treepm_rcut_cells = 4
-)";
-  threw = false;
-  std::string cutoff_error;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(
-        ambiguous_periodic_cutoff, "treepm_ambiguous_periodic_cutoff");
-  } catch (const cosmosim::core::ConfigError& error) {
-    threw = true;
-    cutoff_error = error.what();
-  }
-  CHUI_REQUIRE(threw);
-  CHUI_REQUIRE(cutoff_error.find("< half the shortest box axis") != std::string::npos);
+  const auto legal_cutoff = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = cosmo_cube\nic_file = generated\n"
+      "[cosmology]\nbox_size = 1 mpc\n"
+      "[numerics]\ngravity_solver = treepm\ntreepm_pm_grid = 8\ntreepm_rcut_cells = 3.9\n",
+      "treepm_cutoff_control");
+  requireNumericsRejected(legal_cutoff.normalized_text, "treepm_rcut_cells", "4",
+      "< half the shortest box axis");
 }
 
 void testAxisAwareBoxAndPmGridCanonicalizationCompatibility() {
@@ -1029,28 +979,11 @@ treepm_rcut_cells = 5.5
   CHUI_REQUIRE(axis_frozen.config.numerics.treepm_pm_grid_ny == 20);
   CHUI_REQUIRE(axis_frozen.config.numerics.treepm_pm_grid_nz == 12);
 
-  bool anisotropic_rejected = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(
-        R"(
-[mode]
-mode = zoom_in
-[cosmology]
-box_size_x = 80 mpc
-box_size_y = 20 mpc
-box_size_z = 20 mpc
-[numerics]
-treepm_pm_grid_nx = 20
-treepm_pm_grid_ny = 20
-treepm_pm_grid_nz = 20
-treepm_asmth_cells = 1.25
-)",
-        "axis_unsupported_anisotropy");
-  } catch (const cosmosim::core::ConfigError& error) {
-    anisotropic_rejected =
-        std::string(error.what()).find("coarsest PM cell spacing") != std::string::npos;
-  }
-  CHUI_REQUIRE(anisotropic_rejected);
+  const auto anisotropic_control = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[cosmology]\nbox_size_x = 80 mpc\nbox_size_y = 20 mpc\nbox_size_z = 20 mpc\n"
+      "[numerics]\ntreepm_pm_grid = 20\ntreepm_asmth_cells = 3\n", "anisotropic_control");
+  requireNumericsRejected(anisotropic_control.normalized_text, "treepm_asmth_cells", "1.25",
+      "coarsest PM cell spacing");
 
   const auto certified_softening = cosmosim::core::loadFrozenConfigFromString(
       R"(
@@ -1066,25 +999,8 @@ gravity_softening = 400 kpc
       "treepm_certified_softening_envelope");
   CHUI_REQUIRE(certified_softening.config.numerics.gravity_softening_kpc_comoving == 400.0);
 
-  bool excessive_softening_rejected = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(
-        R"(
-[mode]
-mode = zoom_in
-[cosmology]
-box_size = 64 mpc
-[numerics]
-treepm_pm_grid = 32
-treepm_asmth_cells = 1.25
-gravity_softening = 600 kpc
-)",
-        "treepm_excessive_softening");
-  } catch (const cosmosim::core::ConfigError& error) {
-    excessive_softening_rejected =
-        std::string(error.what()).find("epsilon/r_s <= 0.20") != std::string::npos;
-  }
-  CHUI_REQUIRE(excessive_softening_rejected);
+  requireNumericsRejected(certified_softening.normalized_text, "gravity_softening", "600 kpc",
+      "epsilon/r_s <= 0.20");
 }
 
 void testBlackHoleAgnConfigKeysAndValidation() {
@@ -1434,23 +1350,28 @@ void testEffectiveMultiphaseConfigurationContract() {
 }
 
 void testProductionHierarchicalRungsFailClosed() {
-  const auto production = cosmosim::core::loadFrozenConfigFromString(
+  using cosmosim::core::loadFrozenConfigFromString;
+  const auto production = loadFrozenConfigFromString(
       "[mode]\nmode = zoom_in\n", "production_single_rung_default");
   CHUI_REQUIRE(production.config.numerics.hierarchical_max_rung == 0);
-  CHUI_REQUIRE(production.normalized_text.find("hierarchical_max_rung = 0") !=
-         std::string::npos);
-
-  bool rejected = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(
-        "[mode]\nmode = zoom_in\n[numerics]\nhierarchical_max_rung = 1\n",
-        "production_multirung_rejected");
-  } catch (const cosmosim::core::ConfigError& error) {
-    rejected = std::string(error.what()).find(
-        "does not yet carry per-element kick/drift epochs") !=
-        std::string::npos;
+  CHUI_REQUIRE(production.normalized_text.find("hierarchical_max_rung = 0") != std::string::npos);
+  // Opt-in hierarchical KDK now exists, but only for source-free cosmo_cube DMO.
+  requireNumericsRejected(production.normalized_text, "hierarchical_max_rung", "1",
+      "requires cosmo_cube collisionless DMO with source physics disabled");
+  const auto dmo = loadFrozenConfigFromString(
+      "[mode]\nmode = cosmo_cube\nic_file = generated\n"
+      "[physics]\nenable_cooling = false\nenable_star_formation = false\nenable_feedback = false\n"
+      "enable_stellar_evolution = false\nenable_black_hole_agn = false\nenable_tracers = false\n"
+      "enable_metal_diffusion = false\n", "hierarchical_dmo_control");
+  CHUI_REQUIRE(dmo.config.numerics.hierarchical_max_rung == 0);
+  for (const auto rung : {"1", "12"}) {
+    const auto admitted = loadFrozenConfigFromString(
+        withNumericsValue(dmo.normalized_text, "hierarchical_max_rung", rung), "hierarchical_dmo_opt_in");
+    CHUI_REQUIRE(admitted.config.numerics.hierarchical_max_rung == std::stoi(rung));
+    CHUI_REQUIRE(loadFrozenConfigFromString(admitted.normalized_text, "hierarchical_replay").normalized_text == admitted.normalized_text);
   }
-  CHUI_REQUIRE(rejected);
+  for (const auto rung : {"-1", "13", "1.5", "nan"})
+    requireNumericsRejected(dmo.normalized_text, "hierarchical_max_rung", rung);
 }
 
 void testPowerSpectrumMeshMatchesCompiledFftBackend() {
@@ -1572,57 +1493,72 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
 
 void testTreePmProductionTuningRoundTrip() {
   using cosmosim::core::loadFrozenConfigFromString;
+  const auto baseline = loadFrozenConfigFromString(
+      "[mode]\nmode = cosmo_cube\nic_file = generated\n"
+      "[numerics]\ngravity_solver = treepm\ntreepm_pm_grid = 16\n", "tuning_baseline");
   for (const int block : {16,32,64,128,256}) {
-    const auto frozen = loadFrozenConfigFromString("[numerics]\ntreepm_residual_block_size = "+
-        std::to_string(block)+"\ntreepm_tree_max_leaf_size = 8\ntreepm_full_residual_lookup_enabled = true\n"
-        "treepm_leaf_simd_enabled = true\ntreepm_radial_coefficients_enabled = true\n", "production_tuning");
-    const auto replay = loadFrozenConfigFromString(frozen.normalized_text,"production_tuning_replay");
-    CHUI_REQUIRE(replay.config.numerics.treepm_residual_block_size == block);
-    CHUI_REQUIRE(replay.config.numerics.treepm_tree_max_leaf_size == 8);
-    CHUI_REQUIRE(replay.config.numerics.treepm_full_residual_lookup_enabled);
-    CHUI_REQUIRE(replay.config.numerics.treepm_leaf_simd_enabled);
-    CHUI_REQUIRE(replay.config.numerics.treepm_radial_coefficients_enabled);
-    CHUI_REQUIRE(replay.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
-  }
-  for (const auto key : {"treepm_residual_block_size", "treepm_tree_max_leaf_size"}) {
-    for (const auto value : {"0", "-1", "4097", "3.5", "nan"}) {
-      bool rejected = false;
-      try { (void)loadFrozenConfigFromString(std::string("[numerics]\n")+key+" = "+value+"\n", "bad_tuning"); }
-      catch (const cosmosim::core::ConfigError&) { rejected = true; }
-      CHUI_REQUIRE(rejected);
+    for (const int leaf : {1,8,1024}) {
+      auto text = withNumericsValue(baseline.normalized_text, "treepm_residual_block_size", std::to_string(block));
+      text = withNumericsValue(text, "treepm_tree_max_leaf_size", std::to_string(leaf));
+      for (const auto key : {"treepm_full_residual_lookup_enabled", "treepm_leaf_simd_enabled",
+                            "treepm_radial_coefficients_enabled"}) text = withNumericsValue(text, key, "true");
+      const auto frozen = loadFrozenConfigFromString(text, "production_tuning");
+      const auto replay = loadFrozenConfigFromString(frozen.normalized_text,"production_tuning_replay");
+      CHUI_REQUIRE(replay.config.numerics.treepm_residual_block_size == block);
+      CHUI_REQUIRE(replay.config.numerics.treepm_tree_max_leaf_size == leaf);
+      CHUI_REQUIRE(replay.config.numerics.treepm_full_residual_lookup_enabled);
+      CHUI_REQUIRE(replay.config.numerics.treepm_leaf_simd_enabled);
+      CHUI_REQUIRE(replay.config.numerics.treepm_radial_coefficients_enabled);
+      CHUI_REQUIRE(replay.normalized_text == frozen.normalized_text);
+      CHUI_REQUIRE(replay.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+      CHUI_REQUIRE(replay.provenance.normalized_config_sha256_hex == frozen.provenance.normalized_config_sha256_hex);
     }
   }
+  for (const auto key : {"treepm_residual_block_size", "treepm_tree_max_leaf_size"}) {
+    for (const auto value : {"0", "-1", "4097", "3.5", "nan", "inf", "-inf", "2147483648"})
+      requireNumericsRejected(baseline.normalized_text, key, value);
+  }
+  for (const auto value : {"8", "17", "512"})
+    requireNumericsRejected(baseline.normalized_text, "treepm_residual_block_size", value);
+  requireNumericsRejected(baseline.normalized_text, "treepm_tree_max_leaf_size", "1025");
+  for (const auto value : {"0.25", "0.5"}) {
+    const auto legal = loadFrozenConfigFromString(withNumericsValue(baseline.normalized_text,
+        "treepm_adaptive_maximum_opening_angle", value), "adaptive_boundary_control");
+    CHUI_REQUIRE(legal.config.numerics.treepm_adaptive_maximum_opening_angle == std::stod(value));
+    CHUI_REQUIRE(loadFrozenConfigFromString(legal.normalized_text, "adaptive_replay").normalized_text == legal.normalized_text);
+  }
+  for (const auto value : {"0", "-0.1", "0.5001", "nan", "inf", "-inf"})
+    requireNumericsRejected(baseline.normalized_text, "treepm_adaptive_maximum_opening_angle", value);
 }
 
 void testTreePmPerformanceFlagsRoundTrip() {
-  const auto frozen = cosmosim::core::loadFrozenConfigFromString(
-      "[numerics]\ntreepm_gaussian_pair_lookup_enabled = true\ntreepm_full_mac_diagnostics = false\n",
-      "treepm_performance_flags");
-  CHUI_REQUIRE(frozen.config.numerics.treepm_gaussian_pair_lookup_enabled);
-  CHUI_REQUIRE(!frozen.config.numerics.treepm_full_mac_diagnostics);
-  const auto replay = cosmosim::core::loadFrozenConfigFromString(frozen.normalized_text,"flags_replay");
-  CHUI_REQUIRE(replay.config.numerics.treepm_gaussian_pair_lookup_enabled);
-  CHUI_REQUIRE(!replay.config.numerics.treepm_full_mac_diagnostics);
-  const auto defaults = cosmosim::core::loadFrozenConfigFromString("","flags_defaults");
+  using cosmosim::core::loadFrozenConfigFromString;
+  const auto defaults = loadFrozenConfigFromString(
+      "[mode]\nmode = cosmo_cube\nic_file = generated\n"
+      "[numerics]\ngravity_solver = treepm\ntreepm_pm_grid = 16\n", "flags_defaults");
   CHUI_REQUIRE(!defaults.config.numerics.treepm_gaussian_pair_lookup_enabled);
   CHUI_REQUIRE(defaults.config.numerics.treepm_full_mac_diagnostics);
-  bool rejected = false;
-  try {
-    (void)cosmosim::core::loadFrozenConfigFromString(
-        "[numerics]\ntreepm_gaussian_pair_lookup_enabled = maybe\n", "flags_invalid");
-  } catch (const cosmosim::core::ConfigError&) { rejected = true; }
-  CHUI_REQUIRE(rejected);
-  for (const std::string key : {"treepm_gaussian_pair_lookup_enabled", "treepm_full_mac_diagnostics", "treepm_full_residual_lookup_enabled",
-       "treepm_leaf_simd_enabled", "treepm_radial_coefficients_enabled"}) {
-    for (const std::string value : {"maybe", "2", "nan"}) {
-      rejected = false;
-      try {
-        (void)cosmosim::core::loadFrozenConfigFromString("[numerics]\n"+key+" = "+value+"\n", "invalid_treepm_flag");
-      } catch (const cosmosim::core::ConfigError& error) {
-        rejected = std::string(error.what()).find(key) != std::string::npos;
-      }
-      CHUI_REQUIRE(rejected);
+  CHUI_REQUIRE(!defaults.config.numerics.treepm_full_residual_lookup_enabled);
+  CHUI_REQUIRE(!defaults.config.numerics.treepm_leaf_simd_enabled);
+  CHUI_REQUIRE(!defaults.config.numerics.treepm_radial_coefficients_enabled);
+  CHUI_REQUIRE(!defaults.config.numerics.treepm_adaptive_acceptance_enabled);
+  CHUI_REQUIRE(!defaults.config.numerics.treepm_identical_source_tree_reuse_enabled);
+  CHUI_REQUIRE(!defaults.config.numerics.treepm_topology_refit_enabled);
+  for (const std::string key : {"treepm_gaussian_pair_lookup_enabled", "treepm_full_mac_diagnostics",
+       "treepm_full_residual_lookup_enabled", "treepm_leaf_simd_enabled", "treepm_radial_coefficients_enabled",
+       "treepm_adaptive_acceptance_enabled", "treepm_identical_source_tree_reuse_enabled",
+       "treepm_topology_refit_enabled", "treepm_enable_window_deconvolution"}) {
+    for (const auto value : {"true", "false"}) {
+      const auto frozen = loadFrozenConfigFromString(
+          withNumericsValue(defaults.normalized_text, key, value), "treepm_performance_flags");
+      const auto replay = loadFrozenConfigFromString(frozen.normalized_text,"flags_replay");
+      CHUI_REQUIRE(frozen.normalized_text.find(key + " = " + value + "\n") != std::string::npos);
+      CHUI_REQUIRE(replay.normalized_text == frozen.normalized_text);
+      CHUI_REQUIRE(replay.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
+      CHUI_REQUIRE(replay.provenance.normalized_config_sha256_hex == frozen.provenance.normalized_config_sha256_hex);
     }
+    for (const auto value : {"maybe", "2", "nan", "inf", "yes", "on", "1", "0"})
+      requireNumericsRejected(defaults.normalized_text, key, value);
   }
 }
 

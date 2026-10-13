@@ -1,38 +1,195 @@
-set(root "@CMAKE_BINARY_DIR@/treepm_experiment_configs_test")
-file(REMOVE_RECURSE "${root}")
+# NOT RUN — deferred to maintainer (20261012 repair).
+cmake_minimum_required(VERSION 3.24)
+# Each invocation owns a fresh workspace, including concurrent CTest invocations.
+string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef token)
+set(root "@CMAKE_BINARY_DIR@/treepm_experiment_configs_test_${token}")
 file(MAKE_DIRECTORY "${root}")
-file(WRITE "${root}/base.param.txt" "[mode]\nic_file = generated\n[numerics]\ntreepm_pm_grid = 16\n")
-execute_process(COMMAND "@CMAKE_BINARY_DIR@/cosmosim_treepm_experiment_configs"
-  "${root}/base.param.txt" "${root}/decks" RESULT_VARIABLE result ERROR_VARIABLE error)
-if(NOT result EQUAL 0)
-  message(FATAL_ERROR "typed TreePM deck generation failed: ${error}")
+set(generator "@CMAKE_BINARY_DIR@/cosmosim_treepm_experiment_configs")
+set(base [=[
+[mode]
+mode = cosmo_cube
+ic_file = generated
+[cosmology]
+box_size = 1 mpc
+[numerics]
+gravity_solver = treepm
+treepm_pm_grid = 16
+gravity_softening = 1 kpc
+treepm_tree_opening_criterion = com_distance
+treepm_tree_opening_theta = 0.7
+treepm_tree_relative_force_tolerance = 0.005
+[physics]
+enable_cooling = false
+enable_star_formation = false
+enable_feedback = false
+enable_stellar_evolution = false
+enable_black_hole_agn = false
+enable_tracers = false
+enable_metal_diffusion = false
+]=])
+file(WRITE "${root}/base.param.txt" "${base}")
+execute_process(COMMAND "${generator}" "${root}/base.param.txt" "${root}/decks"
+  RESULT_VARIABLE result ERROR_VARIABLE error)
+if(NOT "${result}" STREQUAL "0")
+  message(FATAL_ERROR "typed TreePM deck generation failed: ${result}: ${error}; workspace=${root}")
 endif()
-foreach(name IN ITEMS reference optimized_matched matched_gaussian matched_full_residual matched_simd
-    matched_radial matched_reuse matched_refit adaptive_025 adaptive_050_experimental)
-  file(READ "${root}/decks/${name}.param.txt" text)
-  if(NOT text MATCHES "hierarchical_max_rung = 0" OR NOT text MATCHES "treepm_residual_block_size = 64")
-    message(FATAL_ERROR "experiment changed global KDK/block baseline: ${name}")
+
+function(valueOf text key result)
+  if(NOT "${text}" MATCHES "(^|\n)${key} = ([^\n]*)\n")
+    message(FATAL_ERROR "normalized key missing: ${key}")
   endif()
+  set(${result} "${CMAKE_MATCH_2}" PARENT_SCOPE)
+endfunction()
+function(requireValue text key expected)
+  valueOf("${text}" "${key}" actual)
+  if(NOT "${actual}" STREQUAL "${expected}")
+    message(FATAL_ERROR "${key}: expected ${expected}, got ${actual}")
+  endif()
+endfunction()
+function(requireNumber text key expected)
+  valueOf("${text}" "${key}" actual)
+  if(NOT actual EQUAL expected)
+    message(FATAL_ERROR "${key}: expected ${expected}, got ${actual}")
+  endif()
+endfunction()
+
+set(names reference optimized_matched matched_gaussian matched_full_residual matched_simd
+  matched_radial matched_reuse matched_refit adaptive_025 adaptive_050_experimental)
+set(flags treepm_gaussian_pair_lookup_enabled treepm_full_residual_lookup_enabled
+  treepm_leaf_simd_enabled treepm_radial_coefficients_enabled
+  treepm_identical_source_tree_reuse_enabled treepm_topology_refit_enabled
+  treepm_adaptive_acceptance_enabled treepm_full_mac_diagnostics)
+file(GLOB decks "${root}/decks/*.param.txt")
+list(LENGTH decks deck_count)
+if(NOT deck_count EQUAL 10)
+  message(FATAL_ERROR "expected exactly ten experiment decks, got ${deck_count}")
+endif()
+file(READ "${root}/decks/reference.param.txt" reference)
+file(READ "${root}/decks/experiments.txt" manifest)
+set(hashes)
+foreach(name IN LISTS names)
+  set(deck "${root}/decks/${name}.param.txt")
+  file(READ "${deck}" text)
+  requireValue("${text}" mode cosmo_cube)
+  requireValue("${text}" ic_file generated)
+  requireValue("${text}" gravity_solver treepm)
+  requireValue("${text}" hierarchical_max_rung 0)
+  requireValue("${text}" treepm_residual_block_size 64)
+  requireValue("${text}" treepm_tree_max_leaf_size 16)
+  requireValue("${text}" treepm_update_cadence_steps 1)
+  requireValue("${text}" treepm_tree_opening_criterion com_distance)
+  requireNumber("${text}" treepm_tree_opening_theta 0.7)
+  requireNumber("${text}" treepm_tree_relative_force_tolerance 0.005)
+  requireValue("${text}" run_name "treepm_${name}")
+  foreach(axis IN ITEMS x y z)
+    requireValue("${text}" treepm_pm_grid_n${axis} 16)
+    requireValue("${text}" box_size_${axis} "1 mpc")
+  endforeach()
+  requireValue("${text}" gravity_softening "1 kpc")
   if(name STREQUAL "adaptive_050_experimental")
-    if(NOT text MATCHES "treepm_adaptive_maximum_opening_angle = 0.5")
-      message(FATAL_ERROR "experimental angle missing")
+    requireNumber("${text}" treepm_adaptive_maximum_opening_angle 0.5)
+  else()
+    requireNumber("${text}" treepm_adaptive_maximum_opening_angle 0.25)
+  endif()
+  set(enabled_flag "")
+  if(name STREQUAL "matched_gaussian")
+    set(enabled_flag treepm_gaussian_pair_lookup_enabled)
+  elseif(name STREQUAL "matched_full_residual")
+    set(enabled_flag treepm_full_residual_lookup_enabled)
+  elseif(name STREQUAL "matched_simd")
+    set(enabled_flag treepm_leaf_simd_enabled)
+  elseif(name STREQUAL "matched_radial")
+    set(enabled_flag treepm_radial_coefficients_enabled)
+  elseif(name STREQUAL "matched_reuse")
+    set(enabled_flag treepm_identical_source_tree_reuse_enabled)
+  elseif(name STREQUAL "matched_refit")
+    set(enabled_flag treepm_topology_refit_enabled)
+  elseif(name MATCHES "^adaptive_")
+    set(enabled_flag treepm_adaptive_acceptance_enabled)
+  endif()
+  set(comparable "${text}")
+  foreach(flag IN LISTS flags)
+    set(expected false)
+    set(reference_value false)
+    if(flag STREQUAL "treepm_full_mac_diagnostics")
+      set(reference_value true)
+      if(NOT name STREQUAL "optimized_matched")
+        set(expected true)
+      endif()
+    elseif(flag STREQUAL enabled_flag)
+      set(expected true)
     endif()
-  elseif(NOT text MATCHES "treepm_adaptive_maximum_opening_angle = 0.25")
-    message(FATAL_ERROR "reference angle changed: ${name}")
+    requireValue("${text}" "${flag}" "${expected}")
+    string(REPLACE "${flag} = ${expected}\n" "${flag} = ${reference_value}\n" comparable "${comparable}")
+  endforeach()
+  string(REGEX REPLACE "treepm_adaptive_maximum_opening_angle = [^\n]*\n"
+    "treepm_adaptive_maximum_opening_angle = 0.25\n" comparable "${comparable}")
+  string(REPLACE "run_name = treepm_${name}\n" "run_name = treepm_reference\n" comparable "${comparable}")
+  # After only the named experimental changes, the ENTIRE effective deck must
+  # match: physical initial state, split, softening, mesh, seeds and MAC policy.
+  if(NOT "${comparable}" STREQUAL "${reference}")
+    message(FATAL_ERROR "unadvertised physical/acceptance change in ${name}")
   endif()
-  if(name MATCHES "^adaptive_" AND NOT text MATCHES "treepm_adaptive_acceptance_enabled = true")
-    message(FATAL_ERROR "adaptive experiment did not select adaptive acceptance")
+  if(NOT manifest MATCHES "${name} config_hash=[0-9a-f]+")
+    message(FATAL_ERROR "experiment provenance missing: ${name}")
   endif()
-  if(name STREQUAL "reference" AND NOT text MATCHES "treepm_full_mac_diagnostics = true")
-    message(FATAL_ERROR "reference lost forensic diagnostics")
+  file(SHA256 "${deck}" hash)
+  if(hash IN_LIST hashes)
+    message(FATAL_ERROR "experiment identifiers/configurations collided: ${name}")
   endif()
-  if(name STREQUAL "optimized_matched" AND NOT text MATCHES "treepm_full_mac_diagnostics = false")
-    message(FATAL_ERROR "matched experiment did not select fast diagnostics")
+  list(APPEND hashes "${hash}")
+  # Re-admit each emitted deck through the actual typed loader and regenerate
+  # its own variant; canonical normalization must be byte-identical.
+  execute_process(COMMAND "${generator}" "${deck}" "${root}/reload_${name}"
+    RESULT_VARIABLE reload_result ERROR_VARIABLE reload_error)
+  if(NOT "${reload_result}" STREQUAL "0")
+    message(FATAL_ERROR "typed reload failed for ${name}: ${reload_result}: ${reload_error}")
+  endif()
+  file(READ "${root}/reload_${name}/${name}.param.txt" reloaded)
+  if(NOT "${reloaded}" STREQUAL "${text}")
+    message(FATAL_ERROR "normalized reload changed ${name}")
   endif()
 endforeach()
-execute_process(COMMAND "@CMAKE_BINARY_DIR@/cosmosim_treepm_experiment_configs"
-  "${root}/base.param.txt" "${root}/decks" RESULT_VARIABLE duplicate_result)
-if(duplicate_result EQUAL 0)
-  message(FATAL_ERROR "generator overwrote an existing experiment")
+
+file(WRITE "${root}/decks/do_not_overwrite.txt" "preserved\n")
+execute_process(COMMAND "${generator}" "${root}/base.param.txt" "${root}/decks"
+  RESULT_VARIABLE duplicate_result ERROR_VARIABLE duplicate_error)
+if(NOT "${duplicate_result}" STREQUAL "1" OR NOT duplicate_error MATCHES "output directory must be new")
+  message(FATAL_ERROR "existing-directory rejection failed: ${duplicate_result}: ${duplicate_error}")
 endif()
+file(READ "${root}/decks/do_not_overwrite.txt" sentinel)
+file(READ "${root}/decks/experiments.txt" after_manifest)
+if(NOT sentinel STREQUAL "preserved\n" OR NOT after_manifest STREQUAL manifest)
+  message(FATAL_ERROR "existing output directory was modified")
+endif()
+set(index 0)
+foreach(name IN LISTS names)
+  file(SHA256 "${root}/decks/${name}.param.txt" after_hash)
+  list(GET hashes ${index} before_hash)
+  if(NOT after_hash STREQUAL before_hash)
+    message(FATAL_ERROR "existing deck overwritten: ${name}")
+  endif()
+  math(EXPR index "${index}+1")
+endforeach()
+
+# The positive base above reaches generation. Each invalid base changes one
+# field and must fail with its own typed validation context before publication.
+foreach(bad_case IN ITEMS missing_mode invalid_tuning)
+  if(bad_case STREQUAL "missing_mode")
+    string(REPLACE "mode = cosmo_cube\n" "" invalid "${base}")
+    set(context "missing required field 'mode.mode'")
+  else()
+    string(REPLACE "treepm_pm_grid = 16\n" "treepm_pm_grid = 16\ntreepm_residual_block_size = 0\n" invalid "${base}")
+    set(context "numerics.treepm_residual_block_size")
+  endif()
+  file(WRITE "${root}/${bad_case}.param.txt" "${invalid}")
+  execute_process(COMMAND "${generator}" "${root}/${bad_case}.param.txt" "${root}/bad_${bad_case}"
+    RESULT_VARIABLE bad_result ERROR_VARIABLE bad_error)
+  if(NOT "${bad_result}" STREQUAL "1" OR NOT bad_error MATCHES "${context}")
+    message(FATAL_ERROR "invalid base failed for wrong reason (${bad_case}): ${bad_result}: ${bad_error}")
+  endif()
+  if(EXISTS "${root}/bad_${bad_case}")
+    message(FATAL_ERROR "invalid base published an output directory")
+  endif()
+endforeach()
 file(REMOVE_RECURSE "${root}")

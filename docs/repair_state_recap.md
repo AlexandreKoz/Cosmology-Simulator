@@ -1,5 +1,13 @@
 # Repair state recap (post-repair audit snapshot)
 
+20261012 regression closure: short-range fixture dispatch, valid typed config
+controls, field-specific negative checks, experiment deck invariants, PM owned
+allocation expectations and the stale hierarchical admission diagnostic are
+repaired in source. Always-active gravity assertions and an NDEBUG probe are
+included. **FIXED IN SOURCE — NOT YET TESTED.** Production code is unchanged;
+compilation, CPU/MPI tests, Ewald and benchmarks are deferred to the maintainer.
+See the [defect table and manual sequence](repair/treepm_deep_hotpath_test_regression_closure_20261012.md).
+
 20261012 Attempt 1 recovery: confirmed drift velocity access repaired, composed
 runtime coverage added, bounded geometry and optional governed arithmetic/SIMD
 paths implemented, production block/leaf controls and staged experiments wired,
