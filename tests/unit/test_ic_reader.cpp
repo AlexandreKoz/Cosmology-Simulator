@@ -1310,9 +1310,11 @@ void testHdf5StarSidecarAndMultifileSchema() {
         duplicate_paths.front(), config,
         cosmosim::io::IcImportOptions{.chunk_particle_count = 1U});
   } catch (const std::runtime_error& error) {
-    duplicate_rejected =
-        std::string(error.what()).find("duplicate particle IDs") !=
-        std::string::npos;
+    // Serial: "duplicate or zero persistent particle IDs";
+    // distributed: "duplicate particle IDs across ...".
+    const std::string message = error.what();
+    duplicate_rejected = message.find("duplicate") != std::string::npos &&
+                         message.find("particle IDs") != std::string::npos;
   }
   assert(duplicate_rejected);
   removePaths(duplicate_paths);
@@ -1738,9 +1740,11 @@ void testHdf5BlackHoleAndValidationFailures() {
   try {
     (void)cosmosim::io::readGadgetArepoHdf5Ic(duplicate_path, config);
   } catch (const std::runtime_error& error) {
-    duplicate_rejected =
-        std::string(error.what()).find("duplicate particle IDs") !=
-        std::string::npos;
+    // Serial: "duplicate or zero persistent particle IDs";
+    // distributed: "duplicate particle IDs across ...".
+    const std::string message = error.what();
+    duplicate_rejected = message.find("duplicate") != std::string::npos &&
+                         message.find("particle IDs") != std::string::npos;
   }
   assert(duplicate_rejected);
   std::filesystem::remove(duplicate_path);

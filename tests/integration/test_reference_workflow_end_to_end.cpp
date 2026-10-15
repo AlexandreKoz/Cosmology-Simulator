@@ -736,7 +736,9 @@ int main() {
   assert(std::filesystem::exists(restart_diagnostics_report.restart_path));
   const std::string restart_diag_events_text = readFile(restart_diagnostics_report.operational_report_json_path);
   assert(restart_diag_events_text.find("\"event_kind\": \"restart.write.complete\"") != std::string::npos);
-  assert(restart_diag_events_text.find("\"event_kind\": \"restart.read.complete\"") != std::string::npos);
+  // Streaming verification replaced the full readback (restart.read.complete
+  // was renamed restart.verify.complete in the streaming-verification change).
+  assert(restart_diag_events_text.find("\"event_kind\": \"restart.verify.complete\"") != std::string::npos);
   assert(restart_diag_events_text.find("\"payload_hash_hex\"") != std::string::npos);
   assert(restart_diag_events_text.find("\"scheduler_pending_transition_count\"") != std::string::npos);
 

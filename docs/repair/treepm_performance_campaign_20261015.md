@@ -155,3 +155,19 @@ encounter criterion (e.g. softened two-body dynamical time of the nearest
 direct-pair neighbour, or a signal-velocity criterion). Every particle pays
 for it, so it is a design decision left to the project owner; the existing
 gate is unchanged.
+
+### Round 3 — HDF5/FFTW suite repairs (code-level, owner-run validation)
+
+A `pm-hdf5-fftw-debug` build of the pre-campaign base (`c5ccc87`) fails the
+same 16 tests as this branch, so all of them predate the campaign. Root causes
+and fixes (validation of these is left to the project owner):
+
+| Test(s) | Root cause | Fix |
+|---|---|---|
+| `integration_restart_checkpoint_roundtrip` | Did not compile: `particle_sidecar.particle_id` is an `AlignedVector`, the force-cache lane a `std::vector` | Explicit range `assign` |
+| `integration_restart_equivalence_{dm_only,treepm,multirate_bins,output_enabled}` | Harness compared raw `species_tag`/`owning_rank`/`time_bin` lanes, which are absent (empty) in the compact homogeneous-DMO representation | Compares the logical accessors `particleSpeciesTag`/`particleOwningRank`/`particleTimeBin` per row |
+| `integration_restart_equivalence_{hydro_toy,stochastic_sources,amr_*}` | Restart writer requires the authoritative gas-cell scheduler when cells exist; the harness never supplied one | Harness passes a gas-cell scheduler that shares the particle scheduler's tick (a copy when the toy cell bins advance in lockstep, else built from the cell mirror) |
+| `integration_transform_fuzz_invariants`, `validation_transform_fuzz_invariants_long` | Same missing gas-cell scheduler | Builds one from the synced cell mirror at the particle scheduler's tick |
+| `integration_reference_workflow` | `restart.read.complete` was deliberately renamed `restart.verify.complete` by the streaming-verification change (`36967e9`), which also dropped `scheduler_pending_transition_count` from the event | Test expects the new name; the diagnostic is restored in `restart.verify.complete` |
+| `unit_ic_reader` | Serial duplicate-ID message changed to "duplicate or zero persistent particle IDs" (`a5620b2`) | Test accepts the serial and distributed wordings (both still contain "duplicate" and "particle IDs") |
+| `integration_hierarchical_treepm_workflow` | D1 above (1.62e-3 vs gate 1e-3) | Open — design decision |

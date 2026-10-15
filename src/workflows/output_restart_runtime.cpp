@@ -888,6 +888,7 @@ bool maybeWriteOutputs(
                     {"scheduler_current_tick", std::to_string(restart_verification.diagnostics.scheduler_current_tick)},
                     {"scheduler_max_bin", std::to_string(restart_verification.diagnostics.scheduler_max_bin)},
                     {"scheduler_element_count", std::to_string(restart_verification.diagnostics.scheduler_element_count)},
+                    {"scheduler_pending_transition_count", std::to_string(restart_verification.diagnostics.scheduler_pending_transition_count)},
                     {"pm_field_version", std::to_string(restart_verification.diagnostics.pm_field_version)},
                     {"payload_hash_hex", restart_verification.payload_sha256_hex},
                     {"verification_workspace_high_water_bytes", std::to_string(restart_verification.workspace_high_water_bytes)},

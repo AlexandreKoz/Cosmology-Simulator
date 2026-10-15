@@ -433,7 +433,8 @@ void testRestartRoundtrip() {
 
   cosmosim::io::GravityForceCachePersistentState force_cache;
   force_cache.valid = true;
-  force_cache.particle_id = state.particle_sidecar.particle_id;
+  force_cache.particle_id.assign(
+      state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
   force_cache.gas_cell_id = gasCellIdsByDenseRow(state);
   force_cache.particle_accel_x_comoving.resize(state.particles.size());
   force_cache.particle_accel_y_comoving.resize(state.particles.size());
