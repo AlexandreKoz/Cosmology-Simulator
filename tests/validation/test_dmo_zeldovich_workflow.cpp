@@ -1345,11 +1345,13 @@ void runHierarchicalGrowthQualification(const ParallelRuntime& runtime) {
   const auto initial=makeZeldovichState();
   const auto initial_mode=directFourierMetrics(initial,runtime.world_rank==0);
   const auto gathered_initial=gatherParticlesByStableId(initial,runtime,runtime.world_rank==0);
-  const auto run_case=[&](const char* label,unsigned rung,double dt,std::uint64_t steps) {
+  const auto run_case=[&](const char* label,unsigned rung,double dt,std::uint64_t steps,bool rms_limiter=false) {
     auto text=configText(runtime.world_size,label);
     if (rung>0U) {
       const std::string old="hierarchical_max_rung = 0";
-      text.replace(text.find(old),old.size(),"hierarchical_max_rung = "+std::to_string(rung));
+      std::string replacement="hierarchical_max_rung = "+std::to_string(rung);
+      if (rms_limiter) replacement+="\nhierarchical_coarse_displacement_criterion = rms_split_scale";
+      text.replace(text.find(old),old.size(),replacement);
     }
     const auto frozen=cosmosim::core::loadFrozenConfigFromString(text,label);
     const cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
@@ -1362,9 +1364,20 @@ void runHierarchicalGrowthQualification(const ParallelRuntime& runtime) {
   const auto reference=run_case("global_fine",0U,k_step_dt_code/4.0,8U);
   const auto coarse=run_case("hierarchical_coarse",2U,k_step_dt_code,2U);
   const auto refined=run_case("hierarchical_refined",2U,k_step_dt_code/2.0,4U);
+  // Same schedule with the RMS split-scale coarse criterion: it may only
+  // shorten coarse intervals, so it must meet the refined-case accuracy.
+  const auto rms=run_case("hierarchical_refined_rms",2U,k_step_dt_code/2.0,4U,true);
   requireOrThrow(std::abs(reference.integrator_state.current_time_code-coarse.integrator_state.current_time_code)<1e-15 &&
-      std::abs(reference.integrator_state.current_time_code-refined.integrator_state.current_time_code)<1e-15,
+      std::abs(reference.integrator_state.current_time_code-refined.integrator_state.current_time_code)<1e-15 &&
+      std::abs(reference.integrator_state.current_time_code-rms.integrator_state.current_time_code)<1e-15,
       "hierarchical growth comparison has mismatched time endpoints");
+  {
+    const auto rms_mode=directFourierMetrics(rms.state,true);
+    const auto ref_rms_mode=directFourierMetrics(reference.state,true);
+    const double rms_error=std::abs(rms_mode.fundamental_amplitude/ref_rms_mode.fundamental_amplitude-1.0);
+    requireOrThrow(rms_error<=1e-4,
+        "hierarchical rms_split_scale coarse criterion failed global-reference growing-mode accuracy");
+  }
   const auto ref_mode=directFourierMetrics(reference.state,true);
   const auto coarse_mode=directFourierMetrics(coarse.state,true);
   const auto fine_mode=directFourierMetrics(refined.state,true);
