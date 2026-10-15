@@ -91,3 +91,41 @@ section of this file.
 - Trajectory, growth and power-spectrum qualification of the fast deck and of
   `rms_split_scale` with `hierarchical_max_rung >= 4` on the real snapshot.
 - Pre-existing failures unrelated to this campaign (see closing section).
+
+## Closing results (executed in this session)
+
+`cpu-only-debug` full CTest: 146/152 pass. The 6 failures are identical, with
+the same assertion and line, on unmodified `main` (c5ccc87), which in addition
+failed to compile three tests and failed `integration_tree_pm_coupling_periodic`:
+
+| Test | Failure on main and here |
+|---|---|
+| `unit_simulation_state` | `test_simulation_state.cpp:441` duplicate-ID assertion |
+| `unit_runtime_capabilities` | `production_hierarchical_local_timestep` status expectation |
+| `unit_tree_gravity` | `test_tree_gravity.cpp:853` `saw_pm_routing` (estimate folded into the communication arena) |
+| `unit_restart_checkpoint_schema` | `test_restart_checkpoint_schema.cpp:134` `integrity_rejected` |
+| `integration_source_package_completeness` | `rsync` not installed |
+| `integration_runtime_truth_ctest_labels` | `require_backend_label_absent_when_disabled` |
+
+`pm-hdf5-fftw-debug` gravity/hierarchical gates (same targets built from
+`main` for comparison):
+
+| Test | main | this campaign |
+|---|---|---|
+| `validation_tree_pm_ewald_accuracy` | pass | pass |
+| `validation_tree_pm_ewald_accuracy_first_light_softening` | pass | pass |
+| `validation_tree_pm_recovery_ewald_accuracy` | fail: strict qualification exercises no direct pairs | same |
+| `integration_tree_pm_coupling_periodic` | fail: zero PM box (stale test) | fail later: split consistency `split_rel=0.576`; identical numbers when the repaired test runs against `main` solver code, so pre-existing |
+| `integration_hierarchical_treepm_workflow` | fail: B-10 stale governor baseline | all four runs complete with restart round-trip and deterministic replay digest; fails the global checkpoint boundary-kind expectation (`kCheckpointPoint`) and, past that, the hierarchical-vs-global trajectory gate `sqrt(e2/64) < 1e-3` (line 238); `main` plus only the B-10 reconcile fails line 238 identically |
+| `validation_dmo_zeldovich_workflow_single_rank` | segfault (stale test reads absent compact-DMO lanes) | fail: uninterrupted/resumed digest mismatch; identical on `main` with the repaired test |
+| `validation_hierarchical_dmo_growth_single_rank` | fail: B-10 stale governor baseline | **pass**, including the new `rms_split_scale` case |
+
+Benchmark evidence: tree-ordered traversal forces bitwise identical to the
+previous traversal on 4096 targets; accuracy/timing matrix in
+`docs/tree_pm_coupling.md`.
+
+Newly exposed pre-existing defects for the next campaign (not caused here):
+hierarchical-vs-global trajectory refinement (line 238 gate), global
+checkpoint boundary kind, global resumed-run digest determinism, TreePM
+split consistency in the FFTW periodic regression, and the recovery Ewald
+profile that exercises no direct pairs.

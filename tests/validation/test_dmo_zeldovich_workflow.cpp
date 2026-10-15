@@ -247,6 +247,11 @@ void requireOrThrow(bool condition, const std::string& message) {
     gathered_time_bin.assign(
         local_state.particles.time_bin.begin(),
         local_state.particles.time_bin.end());
+    // Global-KDK compact states keep no time-bin mirror; rung zero, as the
+    // distributed gather path already assumes.
+    if (gathered_time_bin.size() != local_state.particles.size()) {
+      gathered_time_bin.assign(local_state.particles.size(), 0U);
+    }
     gathered_id.assign(
         local_state.particle_sidecar.particle_id.begin(),
         local_state.particle_sidecar.particle_id.end());
@@ -535,8 +540,9 @@ struct StateSummary {
           std::isfinite(state.particles.position_y_comoving[row]) &&
           std::isfinite(state.particles.position_z_comoving[row]) && std::isfinite(mass) &&
           std::isfinite(vx) && std::isfinite(vy) && std::isfinite(vz) && mass > 0.0;
+      // Accessor: compact homogeneous-DMO states keep no materialized lane.
       local.dm_only = local.dm_only &&
-          state.particle_sidecar.species_tag[row] ==
+          state.particleSpeciesTag(row) ==
               static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
       local.mass_code += mass;
       local.momentum_code[0] += mass * vx;
