@@ -496,6 +496,15 @@ ceiling remains: a coarse block can never exceed `2^max_rung` times the
 smallest particle interval, so useful savings require a larger
 `hierarchical_max_rung` once the coarse limiter no longer binds.
 
+Timestep growth limiter: a particle's hierarchical interval may at most
+double from one synchronization point to the next (refinement is
+unrestricted). The acceleration-only criterion is blind when a softened pair
+passes through coincidence (|a| -> 0); without the limit such a pair jumped to
+the coarsest rung for a whole block. The previous interval is reconstructed
+from restart-persisted state only (previous quantum `integrator.dt_time_code`
+times the committed rung period), so resumed and uninterrupted runs apply the
+same limit; there is no limit before the first completed step.
+
 The synchronized bootstrap can grow gravity-owned retained capacity; the
 workflow now reconciles the MemoryGovernor baseline collectively immediately
 after it and before the rung-membership `RetainedCapacityTransaction` (repair

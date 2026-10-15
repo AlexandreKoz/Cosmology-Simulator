@@ -895,6 +895,12 @@ void testPmOnlyAndTreePmConsistency() {
     pos_z[i] = std::fmod((23.0 * static_cast<double>(i) + 3.0) * 0.017, box_size_comoving);
     mass[i] = 0.9 + 0.05 * static_cast<double>(i % 5U);
   }
+  // Guarantee one source inside r_cut on every backend: the FFTW 32^3 mesh
+  // gives r_cut = 4.5/32 = 0.14, below every separation of the quasi-random
+  // lattice above, so the residual path otherwise evaluates no direct pair.
+  pos_x[1] = std::fmod(pos_x[0] + 0.03, box_size_comoving);
+  pos_y[1] = std::fmod(pos_y[0] + 0.02, box_size_comoving);
+  pos_z[1] = std::fmod(pos_z[0] + 0.01, box_size_comoving);
 
   const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(32, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);

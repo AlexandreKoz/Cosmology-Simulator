@@ -1511,10 +1511,28 @@ void TimeCoordinator::runHierarchicalSegment(
     const auto az = m_gravity.particleAccelZ();
     const auto softening = speciesSofteningByTag(config);
     const double eps = softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)];
+    // Timestep growth limiter: a particle's interval may at most double from
+    // one synchronization point to the next (refinement is unrestricted).
+    // The acceleration-only criterion sqrt(2 eta eps/|a|) is blind to the
+    // instant a softened pair passes through coincidence, where |a| -> 0;
+    // without this limit such a pair jumped to the coarsest rung for a whole
+    // block and crossed its encounter in one step. The previous interval is
+    // reconstructed from restart-persisted state only (the previous quantum,
+    // integrator.dt_time_code, times the committed rung period), so resumed
+    // and uninterrupted runs apply the same limit. No history before the
+    // first completed step.
+    const double previous_quantum = integrator.dt_time_code;
+    const bool growth_limited = integrator.step_index > 0U &&
+        std::isfinite(previous_quantum) && previous_quantum > 0.0;
     const auto criterion = [&](std::uint32_t row) {
-      return core::computeComovingGravityTimeStep({.softening_length_comoving_code = std::max(eps, 1.0e-12),
+      double dt = core::computeComovingGravityTimeStep({.softening_length_comoving_code = std::max(eps, 1.0e-12),
           .scale_free_acceleration_magnitude_code = std::sqrt(ax[row] * ax[row] + ay[row] * ay[row] + az[row] * az[row]),
           .scale_factor = integrator.current_scale_factor}, 0.2);
+      if (growth_limited) {
+        dt = std::min(dt, 2.0 * previous_quantum *
+            static_cast<double>(particles.binPeriodTicks(particles.binIndex(row))));
+      }
+      return dt;
     };
     double local_min = std::numeric_limits<double>::infinity();
     double local_speed_max = 0.0;

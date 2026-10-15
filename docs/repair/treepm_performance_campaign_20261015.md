@@ -129,3 +129,29 @@ hierarchical-vs-global trajectory refinement (line 238 gate), global
 checkpoint boundary kind, global resumed-run digest determinism, TreePM
 split consistency in the FFTW periodic regression, and the recovery Ewald
 profile that exercises no direct pairs.
+
+## Round 2 — defect repairs (2026-10-15, later session)
+
+Root causes and dispositions for the defects listed above:
+
+| Defect | Root cause | Fix | Evidence |
+|---|---|---|---|
+| Hierarchical trajectory gate (D1) | Acceleration-only rung criterion `sqrt(2 eta eps/|a|)` sees |a| -> 0 while a softened pair passes through coincidence; the pair jumped from the finest to the coarsest rung for a whole block (rung histogram `0,0,64`), with refined error 1.36e-2 > coarse 5.9e-4 | Timestep growth limiter in `TimeCoordinator::runHierarchicalSegment`: an interval may at most double between synchronization points, reconstructed from restart-persisted state only (previous quantum x committed rung period) | refined error 1.36e-2 -> 1.62e-3 (8x); gate is 1e-3, so **partially fixed** — see open item below |
+| Global checkpoint boundary kind (D2) | Global KDK tags completed steps by output purpose (`kCheckpointPoint`), a restart-safe synchronized kind by design | Test accepts `isRestartSafeBoundary` for rung 0; hierarchical blocks still require `kGlobalSynchronizationPoint` | `integration_hierarchical_treepm_workflow` passes that check |
+| Global resumed-run digest (D3) | `ReferenceWorkflowOptions::dt_time_code` is a process-local cap on the adaptive step (since adaptive cosmological stepping), not restart state; the test resumed without the cap and took a 1.69e-5 step instead of 5e-6 | Test applies the same cap to the resumed segment | `validation_dmo_zeldovich_workflow_single_rank` passes (digest, phases, P(k)) |
+| FFTW periodic split consistency (D4) | With the FFTW 32^3 mesh r_cut = 0.14 is below every separation of the 32-point fixture, so the residual path evaluated zero pairs | Fixture places one source within r_cut on every backend | test passes with FFTW and naive DFT |
+| Recovery Ewald profile (D5) | Same coverage issue on the 24-point quasi-uniform fixture (r_cut = 6.25/32) | Coverage gate moved to `two_cluster_cubic`; added the production fast profile (adaptive relative_monopole + com_distance, alpha 0.0025, angle 1.0) to the qualification | all three Ewald gates pass; fast profile meets unchanged Ewald targets on all five fixtures |
+| `unit_simulation_state` | In-place ID rewrite reused a cached identity-validation certificate | New `SimulationState::notifyParticleIdentityMutation()`; production writers resize first (already invalidating) | passes |
+| `unit_runtime_capabilities` | Expected hierarchical KDK `kUnsupported`; it is `kProvisional` and runtime-available | Test updated | passes |
+| `unit_tree_gravity` | PM routing estimate folded into the communication arena | Asserts arena owner = max logical contributor and PM density routing >= 2x7x1024 B | passes |
+| `unit_restart_checkpoint_schema` | Integrity hashing became allocation-free; parentless gas payload lacked the now-required gas-cell scheduler | Test asserts success with zero governed bytes; adds scheduler | passes |
+| `integration_runtime_truth_ctest_labels` | `python_*` tier label collided with the Python-binding backend label | Tier label `python_offline` when bindings are off; offline h5py test relabelled | passes |
+| `integration_source_package_completeness` | `rsync` missing in the environment | none (environmental) | passes with rsync |
+
+`cpu-only-debug` full CTest after these repairs: **152/152 pass**.
+
+Open: closing the last factor of D1 needs a velocity- or neighbour-aware
+encounter criterion (e.g. softened two-body dynamical time of the nearest
+direct-pair neighbour, or a signal-velocity criterion). Every particle pays
+for it, so it is a design decision left to the project owner; the existing
+gate is unchanged.

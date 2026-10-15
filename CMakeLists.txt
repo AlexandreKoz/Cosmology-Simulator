@@ -129,7 +129,13 @@ function(cosmosim_apply_test_defaults)
     elseif(cosmosim_test_name MATCHES "^validation_")
       list(APPEND cosmosim_existing_labels validation)
     elseif(cosmosim_test_name MATCHES "^python_")
-      list(APPEND cosmosim_existing_labels python)
+      # "python" is also the Python-binding backend label; offline Python
+      # tools registered without that backend get a distinct tier label.
+      if(COSMOSIM_ENABLE_PYTHON)
+        list(APPEND cosmosim_existing_labels python)
+      else()
+        list(APPEND cosmosim_existing_labels python_offline)
+      endif()
     endif()
 
     if(COSMOSIM_ENABLE_MPI AND cosmosim_test_name MATCHES "two_rank|three_rank|four_rank|eight_rank|[2348]_rank|_np[0-9]+$")
@@ -1022,8 +1028,10 @@ if(COSMOSIM_ENABLE_TESTS)
   if(Python3_Interpreter_FOUND AND Python3_VERSION VERSION_GREATER_EQUAL "3.8")
     add_test(NAME python_treepm_snapshot_tools
       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/python/test_treepm_snapshot_tools.py)
+    # Offline h5py tooling: it needs neither the C++ HDF5 nor the Python-binding
+    # backend, so it must not carry those backend labels (label audit).
     set_tests_properties(python_treepm_snapshot_tools PROPERTIES
-      SKIP_RETURN_CODE 77 LABELS "python;hdf5;treepm;snapshot;integrity;qualification")
+      SKIP_RETURN_CODE 77 LABELS "offline_tools;h5py;treepm;snapshot;integrity;qualification")
   else()
     message(STATUS "Offline TreePM snapshot tests unavailable: Python >=3.8 interpreter required")
   endif()

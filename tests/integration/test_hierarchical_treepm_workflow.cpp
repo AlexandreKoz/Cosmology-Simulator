@@ -91,7 +91,11 @@ double phaseError(const core::SimulationState& value,const core::SimulationState
 void assertSynchronized(const io::RestartReadResult& checkpoint,unsigned rung) {
   const auto& time=checkpoint.integrator_state;
   require(!time.inside_kdk_step && time.last_completed_restart_safe);
-  require(time.last_completed_boundary_kind==core::StepBoundaryKind::kGlobalSynchronizationPoint);
+  // Global KDK tags each completed step by its output purpose
+  // (kCheckpointPoint/kSnapshotPoint), all of which are synchronized and
+  // restart-safe; a hierarchical block must close at its synchronization point.
+  require(rung==0U ? core::isRestartSafeBoundary(time.last_completed_boundary_kind)
+                   : time.last_completed_boundary_kind==core::StepBoundaryKind::kGlobalSynchronizationPoint);
   require(checkpoint.scheduler_state.current_tick%(1U<<rung)==0U);
   require(checkpoint.scheduler_state.current_tick==checkpoint.gas_cell_scheduler_state.current_tick);
   for (std::size_t i=0;i<checkpoint.state.particles.size();++i) {

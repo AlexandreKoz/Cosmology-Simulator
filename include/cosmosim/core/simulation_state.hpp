@@ -948,6 +948,10 @@ class SimulationState {
     return m_particle_identity_validation_certificate.validFor(
         m_particle_identity_generation, particles.size(), false);
   }
+  // Callers that rewrite particle_sidecar.particle_id in place, without a
+  // resize/reorder/migration commit, must call this so cached identity
+  // validation certificates are not reused for the mutated lane.
+  void notifyParticleIdentityMutation() noexcept { bumpParticleIdentityGeneration(); }
   [[nodiscard]] bool hasCertifiedPersistentParticleIds() const noexcept {
     return m_particle_identity_validation_certificate.validFor(
         m_particle_identity_generation, particles.size(), true);

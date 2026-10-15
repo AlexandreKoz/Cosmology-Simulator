@@ -122,16 +122,11 @@ int main() {
   payload.distributed_gravity_state.pm_slab_end_x_by_rank = {4};
 
   const std::uint64_t hash_before = cosmosim::io::restartPayloadIntegrityHash(payload);
-  // Even an empty temporal index has a bounded arena; admission must fail
-  // before hashing publishes any result, and a retry must be byte-identical.
+  // Integrity traversal is allocation-free in the production payload path, so
+  // even a tiny budget admits it: the result is byte-identical and nothing is
+  // reserved or committed through the governor.
   cosmosim::core::MemoryGovernor tight_integrity({.hard_limit_bytes = 255U});
-  bool integrity_rejected = false;
-  try {
-    (void)cosmosim::io::restartPayloadIntegrityHash(payload, &tight_integrity);
-  } catch (const cosmosim::core::MemoryAdmissionError&) {
-    integrity_rejected = true;
-  }
-  assert(integrity_rejected);
+  assert(cosmosim::io::restartPayloadIntegrityHash(payload, &tight_integrity) == hash_before);
   assert(tight_integrity.snapshot().committed_bytes == 0U);
   assert(tight_integrity.snapshot().reserved_bytes == 0U);
   cosmosim::core::MemoryGovernor integrity_governor({.hard_limit_bytes = 1024U * 1024U});
@@ -365,9 +360,14 @@ int main() {
 
     cosmosim::core::HierarchicalTimeBinScheduler parentless_scheduler(0);
     parentless_scheduler.reset(0, 0, 0);
+    // Payloads with gas cells must carry the authoritative gas-cell scheduler.
+    cosmosim::core::HierarchicalTimeBinScheduler parentless_gas_scheduler(0);
+    parentless_gas_scheduler.reset(1, 0, 0);
+    cosmosim::core::syncGasCellTimeBinMirrorsFromGasCellScheduler(parentless_gas_scheduler, parentless_state);
     cosmosim::io::RestartWritePayload parentless_payload = payload;
     parentless_payload.persistent_state.simulation_state = &parentless_state;
     parentless_payload.scheduler = &parentless_scheduler;
+    parentless_payload.gas_cell_scheduler = &parentless_gas_scheduler;
     parentless_payload.distributed_gravity_state.owning_rank_by_item.clear();
     assert(cosmosim::io::restartPayloadIntegrityHash(parentless_payload) != 0);
 

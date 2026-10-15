@@ -1491,11 +1491,14 @@ void runScientificValidation(const ParallelRuntime& runtime, const std::filesyst
   const cosmosim::io::RestartReadResult first_restart =
       cosmosim::io::readRestartCheckpointHdf5(first_report.restart_path);
 
+  // ReferenceWorkflowOptions::dt_time_code caps the adaptive step and is a
+  // process-local run option, not restart state; an equivalent continuation
+  // must therefore apply the same cap as the uninterrupted run.
   const auto resumed_report = runner.run(
       root / "resumed",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .step_index = 0U,
-          .dt_time_code = 0.0,
+          .dt_time_code = k_step_dt_code,
           .write_outputs = true,
           .initial_state_override = nullptr,
           .restart_state_override = &first_restart,
