@@ -427,6 +427,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_tree_pm_options.full_mac_diagnostics = config.numerics.treepm_full_mac_diagnostics;
     m_tree_pm_options.adaptive_maximum_opening_angle =
         config.numerics.treepm_adaptive_maximum_opening_angle;
+    m_tree_pm_options.adaptive_error_estimator =
+        config.numerics.treepm_adaptive_error_estimator == core::TreePmAdaptiveErrorEstimator::kRelativeMonopole
+        ? gravity::TreePmAdaptiveErrorEstimator::kRelativeMonopole
+        : gravity::TreePmAdaptiveErrorEstimator::kResidualDerivative;
+    m_tree_pm_options.cutoff_node_policy =
+        config.numerics.treepm_cutoff_node_policy == core::TreePmCutoffNodePolicy::kComDistance
+        ? gravity::TreePmCutoffNodePolicy::kComDistance
+        : gravity::TreePmCutoffNodePolicy::kContainNode;
     m_tree_pm_options.tree_options.gravitational_constant_code =
         m_gravitational_constant_code;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
@@ -2193,6 +2201,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
           .message = "locality-driven TreePM short-range communication metrics",
           .payload = {
               {"tree_acceptance_policy", m_config.numerics.treepm_adaptive_acceptance_enabled ? "adaptive_relative" : "strict_reference"},
+              {"tree_adaptive_error_estimator",
+               m_config.numerics.treepm_adaptive_error_estimator == core::TreePmAdaptiveErrorEstimator::kRelativeMonopole
+                   ? "relative_monopole" : "residual_derivative"},
+              {"tree_cutoff_node_policy",
+               m_config.numerics.treepm_cutoff_node_policy == core::TreePmCutoffNodePolicy::kComDistance
+                   ? "com_distance" : "contain"},
               {"full_residual_lookup_requested", m_tree_pm_options.full_residual_lookup_enabled ? "true" : "false"},
               {"radial_coefficients_enabled", m_tree_pm_options.radial_coefficients_enabled ? "true" : "false"},
               {"leaf_simd_requested", m_tree_pm_options.leaf_simd_enabled ? "true" : "false"},

@@ -178,6 +178,54 @@ def main() -> int:
         require(str(preset_exe) in inferred_args and str(config) in inferred_args,
                 "inferred MPI command should retain executable and config")
 
+        fake_openmpi = root / "fake_openmpi_mpiexec"
+        make_executable(
+            fake_openmpi,
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"--version\" ]; then echo 'mpiexec (Open MPI) 4.1.2'; exit 0; fi\n"
+            "printf '%s\\n' \"$@\"\n",
+        )
+        cache_path.write_text(
+            f"COSMOSIM_ENABLE_MPI:BOOL=ON\nMPIEXEC_EXECUTABLE:FILEPATH={fake_openmpi}\nMPIEXEC_NUMPROC_FLAG:STRING=-n\n",
+            encoding="utf-8",
+        )
+        hybrid_env = rank2_env.copy()
+        hybrid_env["OMP_NUM_THREADS"] = "2"
+        hybrid = run(
+            str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2",
+            cwd=root, env=hybrid_env,
+        )
+        require(hybrid.returncode == 0, "Open MPI hybrid launch should execute")
+        hybrid_args = [line for line in hybrid.stdout.splitlines() if not line.startswith("[CHUI]")]
+        require(hybrid_args[:6] == ["--map-by", "slot:PE=2", "--bind-to", "core", "-n", "2"],
+                "Open MPI multi-rank launch should give each rank OMP_NUM_THREADS cores")
+        require('auto_binding="--map-by slot:PE=2 --bind-to core"' in hybrid.stdout,
+                "launch provenance should record the automatic placement")
+        unthreaded_env = rank2_env.copy()
+        unthreaded_env.pop("OMP_NUM_THREADS", None)
+        unthreaded = run(
+            str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2", "--quiet",
+            cwd=root, env=unthreaded_env,
+        )
+        require(unthreaded.stdout.splitlines()[:4] == ["--bind-to", "none", "-n", "2"],
+                "without a thread count Open MPI ranks should be left unbound")
+        user_binding = run(
+            str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2", "--quiet",
+            "--", "--bind-to", "core", cwd=root, env=hybrid_env,
+        )
+        require(user_binding.stdout.splitlines()[:4] == ["--bind-to", "core", "-n", "2"],
+                "user placement flags must replace the automatic policy")
+        opted_out = run(
+            str(launcher), "run", str(config), "--preset", "alpha", "--mpi", "2", "--quiet",
+            "--no-auto-binding", cwd=root, env=hybrid_env,
+        )
+        require(opted_out.stdout.splitlines()[:2] == ["-n", "2"],
+                "--no-auto-binding should leave the launcher command unchanged")
+        cache_path.write_text(
+            f"COSMOSIM_ENABLE_MPI:BOOL=ON\nMPIEXEC_EXECUTABLE:FILEPATH={fake_mpi}\nMPIEXEC_NUMPROC_FLAG:STRING=-n\n",
+            encoding="utf-8",
+        )
+
         rank3_env = os.environ.copy()
         rank3_env["FAKE_EXPECTED_RANKS"] = "3"
         contradictory_mpi = run(

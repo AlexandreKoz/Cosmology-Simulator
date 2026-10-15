@@ -30,6 +30,8 @@ struct Arguments {
   double asmth = 1.25, rcut = 6.25, epsilon = 0.00035, g = 1.0, scale_factor = 1.0;
   bool adaptive = false, lookup = false, forensic = true, bootstrap = false;
   double maximum_angle = 0.25;
+  double alpha = 0.005;
+  bool relative_monopole = false, com_distance_cutoff = false;
   bool full_residual=false, simd=false, radial=false, reuse=false, refit=false;
   std::string kernel="analytic";
   int ewald_level = 0;
@@ -70,6 +72,11 @@ Arguments parseArguments(int argc, char** argv) {
     else if (key == "--asmth") a.asmth=parseRealValue(value);
     else if (key == "--rcut") a.rcut=parseRealValue(value);
     else if (key == "--maximum-angle") a.maximum_angle=parseRealValue(value);
+    else if (key == "--alpha") a.alpha=parseRealValue(value);
+    else if (key == "--estimator" && (value=="residual_derivative" || value=="relative_monopole"))
+      a.relative_monopole=value=="relative_monopole";
+    else if (key == "--cutoff-node-policy" && (value=="contain" || value=="com_distance"))
+      a.com_distance_cutoff=value=="com_distance";
     else if (key == "--reuse" && (value=="on" || value=="off")) a.reuse=value=="on";
     else if (key == "--refit" && (value=="on" || value=="off")) a.refit=value=="on";
     else if (key == "--epsilon") a.epsilon=parseRealValue(value);
@@ -91,11 +98,11 @@ Arguments parseArguments(int argc, char** argv) {
     else if (key == "--history" && (value=="fallback" || value=="bootstrap")) a.bootstrap=value=="bootstrap";
     else throw std::invalid_argument("unknown option/value: "+key+" "+value);
   }
-  for (const double x : {a.box_x,a.box_y,a.box_z,a.asmth,a.rcut,a.g,a.scale_factor}) {
+  for (const double x : {a.box_x,a.box_y,a.box_z,a.asmth,a.rcut,a.g,a.scale_factor,a.alpha}) {
     if (!std::isfinite(x) || x<=0.0) throw std::invalid_argument("lengths, split, G and scale must be positive finite");
   }
-  if (!std::isfinite(a.maximum_angle) || a.maximum_angle<=0.0 || a.maximum_angle>0.5)
-    throw std::invalid_argument("maximum angle must be in (0,0.5]");
+  if (!std::isfinite(a.maximum_angle) || a.maximum_angle<=0.0 || a.maximum_angle>1.0)
+    throw std::invalid_argument("maximum angle must be in (0,1]");
   if (!std::isfinite(a.epsilon) || a.epsilon<0.0 || a.mesh==0 || a.leaf==0 ||
       a.repeats==0 || a.targets==0 || a.count==0 || a.block==0 || a.block>4096U ||
       a.warmups>std::numeric_limits<std::size_t>::max()-a.repeats) {
@@ -250,7 +257,13 @@ int run(const Arguments& a) {
   options.tree_options.gravitational_constant_code=a.g;options.tree_options.max_leaf_size=a.leaf;
   options.tree_options.multipole_order=cosmosim::gravity::TreeMultipoleOrder::kQuadrupole;
   options.tree_options.softening.epsilon_comoving=s.epsilon[0];
-  options.tree_options.relative_force_tolerance=0.005;options.adaptive_maximum_opening_angle=a.maximum_angle;
+  options.tree_options.relative_force_tolerance=a.alpha;options.adaptive_maximum_opening_angle=a.maximum_angle;
+  options.adaptive_error_estimator=a.relative_monopole ?
+      cosmosim::gravity::TreePmAdaptiveErrorEstimator::kRelativeMonopole :
+      cosmosim::gravity::TreePmAdaptiveErrorEstimator::kResidualDerivative;
+  options.cutoff_node_policy=a.com_distance_cutoff ?
+      cosmosim::gravity::TreePmCutoffNodePolicy::kComDistance :
+      cosmosim::gravity::TreePmCutoffNodePolicy::kContainNode;
   options.split_policy=cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(a.asmth,a.rcut,
       std::cbrt((a.box_x/a.mesh)*(a.box_y/a.mesh)*(a.box_z/a.mesh)));
   options.gaussian_pair_lookup_enabled=a.lookup;options.full_mac_diagnostics=a.forensic;
@@ -280,10 +293,10 @@ int run(const Arguments& a) {
     <<",\"cutoff\":"<<options.split_policy.cutoff_radius_comoving<<",\"scale_factor\":"<<a.scale_factor
     <<",\"policy\":\""<<(a.adaptive?"adaptive":"strict")<<"\",\"kernel\":\""<<a.kernel
     <<"\",\"accounting\":\""<<(a.forensic?"full":"fast")<<"\",\"history\":\""<<(a.bootstrap?"same_snapshot_strict_bootstrap":"unavailable_fallback")
-    <<"\",\"maximum_angle\":"<<a.maximum_angle<<",\"softening\":"<<s.epsilon[0]
+    <<"\",\"maximum_angle\":"<<a.maximum_angle<<",\"alpha\":"<<a.alpha<<",\"estimator\":\""<<(a.relative_monopole?"relative_monopole":"residual_derivative")<<"\",\"cutoff_node_policy\":\""<<(a.com_distance_cutoff?"com_distance":"contain")<<"\""<<",\"softening\":"<<s.epsilon[0]
     <<",\"reuse\":"<<(a.reuse?"true":"false")<<",\"refit\":"<<(a.refit?"true":"false")
     <<",\"build\":"<<std::quoted(cosmosim::core::buildProvenance())
-    <<",\"cpu\":"<<std::quoted(cosmosim::core::collectCpuModel())
+    <<",\"cpu\":"<<std::quoted(cosmosim::core::collectHardwareSummary())
     <<",\"fftw\":"<<(COSMOSIM_ENABLE_FFTW?"true":"false")<<"}\n";
   for (std::size_t iteration=0;iteration<a.warmups+a.repeats;++iteration) {
     cosmosim::gravity::TreePmProfileEvent profile;cosmosim::gravity::TreePmDiagnostics d;

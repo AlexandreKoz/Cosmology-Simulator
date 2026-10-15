@@ -264,7 +264,9 @@ void testPmPlanRetainedStorageMatchesAllocation() {
     PmGridStorage grid(shape, layout);
     PmSolver solver(shape);
     PmSolveOptions options;
+    options.box_size_mpc_comoving = 1.0;
     options.decomposition_mode = mode;
+    grid.ensureDensityStorage();
     solver.solvePoissonPeriodicForcesOnly(grid, options);
     const auto estimate = estimatePmPlanResourcesMemory(shape, layout, mode);
     requireOrThrow(estimate.used_backend_allocation_query == (ranks > 1),
@@ -306,6 +308,7 @@ void testShortRangeSurfaceRejectsPmRequests() {
   ForceField force{std::vector<double>(2), std::vector<double>(2), std::vector<double>(2)};
   TreePmForceAccumulatorView accumulator{active, force.ax, force.ay, force.az};
   TreePmOptions options;
+  options.pm_options.box_size_mpc_comoving = 1.0;
   options.short_range_only = true;
   options.tree_options.softening.epsilon_comoving = 0.01;
   options.split_policy = makeTreePmSplitPolicyFromMeshSpacing(1.25, 3.0, 0.125);

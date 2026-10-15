@@ -38,6 +38,25 @@ enum class TreePmOpeningCriterion {
   kRelativeForceError,
 };
 
+// Displacement limit on the hierarchical coarse (PM) interval
+// (see docs/time_integration.md).
+enum class HierarchicalCoarseDisplacementCriterion {
+  kMaxSpeedMesh,
+  kRmsSplitScale,
+};
+
+// Adaptive TreePM error estimate (see docs/tree_pm_coupling.md).
+enum class TreePmAdaptiveErrorEstimator {
+  kResidualDerivative,
+  kRelativeMonopole,
+};
+
+// Adaptive TreePM treatment of nodes straddling the short-range cutoff.
+enum class TreePmCutoffNodePolicy {
+  kContain,
+  kComDistance,
+};
+
 enum class PmDecompositionMode {
   kSlab,
   kPencil,
@@ -224,6 +243,9 @@ struct NumericsConfig {
   // Zero retains the safe global KDK default. Nonzero selects the provisional
   // synchronized collisionless DMO hierarchy; scientific qualification pending.
   int hierarchical_max_rung = 0;
+  HierarchicalCoarseDisplacementCriterion hierarchical_coarse_displacement_criterion =
+      HierarchicalCoarseDisplacementCriterion::kMaxSpeedMesh;
+  double hierarchical_coarse_rms_displacement_factor = 0.25;
   int amr_max_level = 10;
   double gravity_softening_kpc_comoving = 1.0;
   double gravity_softening_gas_kpc_comoving = -1.0;
@@ -254,6 +276,9 @@ struct NumericsConfig {
   bool treepm_full_mac_diagnostics = true;
   bool treepm_adaptive_acceptance_enabled = false;
   double treepm_adaptive_maximum_opening_angle = 0.25;
+  TreePmAdaptiveErrorEstimator treepm_adaptive_error_estimator =
+      TreePmAdaptiveErrorEstimator::kResidualDerivative;
+  TreePmCutoffNodePolicy treepm_cutoff_node_policy = TreePmCutoffNodePolicy::kContain;
   bool treepm_identical_source_tree_reuse_enabled = false;
   bool treepm_topology_refit_enabled = false;
   TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kTsc;

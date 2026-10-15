@@ -68,6 +68,29 @@ For a known CMake build, `./chui run CONFIG` asks the C++ harness preflight to p
 ./chui run CONFIG --preset mpi-hdf5-fftw-debug --mpi 2 -- --bind-to core
 ```
 
+### MPI/OpenMP placement
+
+Open MPI binds each rank to one core by default. For a hybrid MPI+OpenMP
+rank that silently confines all OpenMP threads of the rank to a single
+physical core (the October 2026 TreePM investigation measured ~199% CPU for
+four threads, i.e. half the expected throughput). When the selected launcher
+reports `Open MPI` from `--version`, `./chui run` therefore adds an explicit
+placement before any passthrough arguments:
+
+| Launch | Added arguments |
+|---|---|
+| one rank | `--bind-to none` |
+| N > 1 ranks with `OMP_NUM_THREADS=T` | `--map-by slot:PE=T --bind-to core` |
+| N > 1 ranks without `OMP_NUM_THREADS` | `--bind-to none` |
+
+Any placement flag after `--` (`--bind-to`, `--map-by`, `--cpu-set`,
+`--rankfile`, ...) replaces this policy, and `--no-auto-binding` disables it.
+The chosen arguments are printed as `auto_binding=` in the `[CHUI][LAUNCH]`
+record. Other MPI implementations (for example MPICH/Hydra, which does not
+bind by default) are launched unchanged. Verify placement with
+`-- --report-bindings` or by checking that the process CPU usage approaches
+`100% x OMP_NUM_THREADS` per rank.
+
 Native progress reporting is owned by the C++ runtime, not the launcher. The default direct harness and launcher paths emit bounded rank-0 status. Under MPI, `run_directory` is the shared/logical run location while `rank_directory` identifies rank 0's rank-local artifacts. With the normal Parallel-HDF5 science layout a committed snapshot record names the one ordinary `snap_###.hdf5` analysis product plus its transactional `.complete` marker. Explicit legacy `sharded` mode instead reports the logical member count and labels rank 0's member as a member, never as the complete science state. Presentation controls are:
 
 ```text

@@ -448,7 +448,9 @@ coarse blocks. Explicit redshift/scale-factor target lists are not added.
 
 `operational_report.json` advances `schema_version` from 1 to 2. Its summary
 `event_count`, warning/error/fatal counts are lifetime totals; recent event detail
-is limited to 256. Added summary fields are `retained_event_count`,
+is limited to `recent_event_limit` (4096 since the October 2026 TreePM campaign;
+previously 256, which evicted early hierarchical blocks from ten-block runs).
+The array layout and schema version are unchanged. Added summary fields are `retained_event_count`,
 `evicted_event_count`, and `recent_event_limit`. Consumers must not infer lifetime
 counts from the event array. Existing event records remain readable; ordinary
 profiler JSON stays version 1. These source changes require consumer/fixture

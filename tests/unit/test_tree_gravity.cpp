@@ -618,7 +618,10 @@ void testPmPlanRetainedCapacityReport() {
   const cosmosim::gravity::PmGridShape shape{4, 3, 5};
   cosmosim::gravity::PmGridStorage grid(shape);
   cosmosim::gravity::PmSolver solver(shape);
-  solver.solvePoissonPeriodic(grid, cosmosim::gravity::PmSolveOptions{});
+  cosmosim::gravity::PmSolveOptions unit_box_options;
+  unit_box_options.box_size_mpc_comoving = 1.0;
+  grid.ensureDensityStorage();
+  solver.solvePoissonPeriodic(grid, unit_box_options);
   constexpr std::uint64_t arrays = 4U * 3U * 5U * sizeof(double) +
       2U * 4U * 3U * 3U * sizeof(std::complex<double>);
   constexpr std::uint64_t axes = 2U * (4U + 3U + 3U) * sizeof(double);

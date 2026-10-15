@@ -81,7 +81,14 @@ template <class Offset>
   }
   // COM-center length is target invariant, but early guards remove most uses
   // without retaining another node-sized vector. Geometric MAC needs none.
-  const bool needs_offset = !strict ||
+  // The monopole estimator with valid history needs no COM-center offset.
+  const bool adaptive_offset_free = !strict &&
+      options.adaptive_error_estimator == TreePmAdaptiveErrorEstimator::kRelativeMonopole &&
+      in.previous_acceleration_available &&
+      std::isfinite(in.previous_acceleration_magnitude_code) &&
+      in.previous_acceleration_magnitude_code >
+          options.tree_options.relative_force_acceleration_floor_code;
+  const bool needs_offset = (!strict && !adaptive_offset_free) ||
       options.tree_options.opening_criterion == TreeOpeningCriterion::kBarnesHutComDistance ||
       (options.tree_options.opening_criterion == TreeOpeningCriterion::kRelativeForceError &&
        !in.previous_acceleration_available);
@@ -111,6 +118,8 @@ template <class Offset>
           in.node_mass_code * (width * width * inv_r4);
       if (std::isfinite(allowance) && std::isfinite(lower_proxy) && lower_proxy > allowance) {
         mac_ok = false;
+      } else if (options.adaptive_error_estimator == TreePmAdaptiveErrorEstimator::kRelativeMonopole) {
+        mac_ok = std::isfinite(allowance) && std::isfinite(lower_proxy);
       } else {
         const double estimate = residualAccuracyProxy(in,
             options.split_policy.split_scale_comoving,

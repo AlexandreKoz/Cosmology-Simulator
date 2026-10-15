@@ -5,6 +5,10 @@ Place standalone command-line tools here. Keep ownership explicit; avoid mixing 
 - `convert_ic_manifest.py`: emit JSON manifest describing supported GADGET/AREPO IC aliases and required header fields.
 
 - `treepm_sweep.py`: frozen-source TreePM export and split-aware diagnostic sweeps.
+- `generate_clustered_dmo_box.py`: synthetic clustered DMO box (NFW-like halos
+  plus uniform background) written as the `bench_tree_pm_sweep --particles`
+  CSV. `--order random|morton` selects row memory order. Workload fixture for
+  interaction-count/timing comparisons only; not a cosmological IC.
 - `hierarchical_dmo_qualification.py`: matched global/hierarchical/refined DMO
   trajectory and low-k growth/power comparison.
 - `chui_snapshot.py`: shared, offline, Python 3.8-compatible complete logical

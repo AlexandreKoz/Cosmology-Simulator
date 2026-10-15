@@ -701,6 +701,65 @@ parseInitialConditionMissingFieldPolicy(
   throw ConfigError("unhandled TreePmOpeningCriterion enum value during serialization");
 }
 
+[[nodiscard]] HierarchicalCoarseDisplacementCriterion parseHierarchicalCoarseDisplacementCriterion(
+    const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "max_speed_mesh") return HierarchicalCoarseDisplacementCriterion::kMaxSpeedMesh;
+  if (lower == "rms_split_scale") return HierarchicalCoarseDisplacementCriterion::kRmsSplitScale;
+  throw ConfigError(
+      "key 'numerics.hierarchical_coarse_displacement_criterion': invalid value '" + value +
+      "' (supported: max_speed_mesh, rms_split_scale)");
+}
+
+[[nodiscard]] std::string hierarchicalCoarseDisplacementCriterionToString(
+    HierarchicalCoarseDisplacementCriterion criterion) {
+  switch (criterion) {
+    case HierarchicalCoarseDisplacementCriterion::kMaxSpeedMesh:
+      return "max_speed_mesh";
+    case HierarchicalCoarseDisplacementCriterion::kRmsSplitScale:
+      return "rms_split_scale";
+  }
+  throw ConfigError("unhandled HierarchicalCoarseDisplacementCriterion enum value during serialization");
+}
+
+[[nodiscard]] TreePmAdaptiveErrorEstimator parseTreePmAdaptiveErrorEstimator(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "residual_derivative") return TreePmAdaptiveErrorEstimator::kResidualDerivative;
+  if (lower == "relative_monopole") return TreePmAdaptiveErrorEstimator::kRelativeMonopole;
+  throw ConfigError(
+      "key 'numerics.treepm_adaptive_error_estimator': invalid value '" + value +
+      "' (supported: residual_derivative, relative_monopole)");
+}
+
+[[nodiscard]] std::string treePmAdaptiveErrorEstimatorToString(TreePmAdaptiveErrorEstimator estimator) {
+  switch (estimator) {
+    case TreePmAdaptiveErrorEstimator::kResidualDerivative:
+      return "residual_derivative";
+    case TreePmAdaptiveErrorEstimator::kRelativeMonopole:
+      return "relative_monopole";
+  }
+  throw ConfigError("unhandled TreePmAdaptiveErrorEstimator enum value during serialization");
+}
+
+[[nodiscard]] TreePmCutoffNodePolicy parseTreePmCutoffNodePolicy(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "contain") return TreePmCutoffNodePolicy::kContain;
+  if (lower == "com_distance") return TreePmCutoffNodePolicy::kComDistance;
+  throw ConfigError(
+      "key 'numerics.treepm_cutoff_node_policy': invalid value '" + value +
+      "' (supported: contain, com_distance)");
+}
+
+[[nodiscard]] std::string treePmCutoffNodePolicyToString(TreePmCutoffNodePolicy policy) {
+  switch (policy) {
+    case TreePmCutoffNodePolicy::kContain:
+      return "contain";
+    case TreePmCutoffNodePolicy::kComDistance:
+      return "com_distance";
+  }
+  throw ConfigError("unhandled TreePmCutoffNodePolicy enum value during serialization");
+}
+
 [[nodiscard]] PmDecompositionMode parsePmDecompositionMode(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "slab") {
@@ -1159,6 +1218,8 @@ struct ConfigKeySpec {
       {"numerics.hydro_active_batch_max_cells", "0"},
       {"numerics.max_global_steps", "1024"},
       {"numerics.hierarchical_max_rung", "0"},
+      {"numerics.hierarchical_coarse_displacement_criterion", "max_speed_mesh"},
+      {"numerics.hierarchical_coarse_rms_displacement_factor", "0.25"},
       {"numerics.amr_max_level", "10"},
       {"numerics.gravity_softening", "1.0 kpc"},
       {"numerics.gravity_softening_gas", ""},
@@ -1188,6 +1249,8 @@ struct ConfigKeySpec {
       {"numerics.treepm_full_mac_diagnostics", "true"},
       {"numerics.treepm_adaptive_acceptance_enabled", "false"},
       {"numerics.treepm_adaptive_maximum_opening_angle", "0.25"},
+      {"numerics.treepm_adaptive_error_estimator", "residual_derivative"},
+      {"numerics.treepm_cutoff_node_policy", "contain"},
       {"numerics.treepm_identical_source_tree_reuse_enabled", "false"},
       {"numerics.treepm_topology_refit_enabled", "false"},
       {"numerics.treepm_assignment_scheme", "tsc"},
@@ -1524,6 +1587,11 @@ void validateConfig(const SimulationConfig& config) {
   if (config.numerics.hierarchical_max_rung < 0 || config.numerics.hierarchical_max_rung > 12) {
     throw ConfigError("numerics.hierarchical_max_rung must be in [0, 12]; 0 retains reference global KDK");
   }
+  if (!std::isfinite(config.numerics.hierarchical_coarse_rms_displacement_factor) ||
+      config.numerics.hierarchical_coarse_rms_displacement_factor <= 0.0 ||
+      config.numerics.hierarchical_coarse_rms_displacement_factor > 1.0) {
+    throw ConfigError("numerics.hierarchical_coarse_rms_displacement_factor must be finite and in (0, 1]");
+  }
   if (config.numerics.hierarchical_max_rung > 0 &&
       (config.mode.mode != SimulationMode::kCosmoCube || config.physics.enable_cooling ||
        config.physics.enable_star_formation || config.physics.enable_feedback ||
@@ -1844,8 +1912,8 @@ void validateConfig(const SimulationConfig& config) {
     throw ConfigError("numerics.treepm_tree_max_leaf_size must be in [1,1024]");
   if (!std::isfinite(config.numerics.treepm_adaptive_maximum_opening_angle) ||
       config.numerics.treepm_adaptive_maximum_opening_angle <= 0.0 ||
-      config.numerics.treepm_adaptive_maximum_opening_angle > 0.5) {
-    throw ConfigError("numerics.treepm_adaptive_maximum_opening_angle must be finite and in (0, 0.5]");
+      config.numerics.treepm_adaptive_maximum_opening_angle > 1.0) {
+    throw ConfigError("numerics.treepm_adaptive_maximum_opening_angle must be finite and in (0, 1]");
   }
   if (!std::isfinite(config.numerics.treepm_tree_relative_force_tolerance) ||
       config.numerics.treepm_tree_relative_force_tolerance <= 0.0) {
@@ -2299,6 +2367,11 @@ class NormalizedConfigStream {
   stream << "hydro_active_batch_max_cells = " << frozen.config.numerics.hydro_active_batch_max_cells << '\n';
   stream << "max_global_steps = " << frozen.config.numerics.max_global_steps << '\n';
   stream << "hierarchical_max_rung = " << frozen.config.numerics.hierarchical_max_rung << '\n';
+  stream << "hierarchical_coarse_displacement_criterion = "
+         << hierarchicalCoarseDisplacementCriterionToString(
+                frozen.config.numerics.hierarchical_coarse_displacement_criterion) << '\n';
+  stream << "hierarchical_coarse_rms_displacement_factor = "
+         << frozen.config.numerics.hierarchical_coarse_rms_displacement_factor << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
   stream << "gravity_softening = " << frozen.config.numerics.gravity_softening_kpc_comoving << " kpc\n";
   auto emitOptionalSoftening = [&](std::string_view key, double value_kpc_comoving) {
@@ -2342,6 +2415,10 @@ class NormalizedConfigStream {
          << (frozen.config.numerics.treepm_adaptive_acceptance_enabled ? "true" : "false") << '\n';
   stream << "treepm_adaptive_maximum_opening_angle = "
          << frozen.config.numerics.treepm_adaptive_maximum_opening_angle << '\n';
+  stream << "treepm_adaptive_error_estimator = "
+         << treePmAdaptiveErrorEstimatorToString(frozen.config.numerics.treepm_adaptive_error_estimator) << '\n';
+  stream << "treepm_cutoff_node_policy = "
+         << treePmCutoffNodePolicyToString(frozen.config.numerics.treepm_cutoff_node_policy) << '\n';
   stream << "treepm_identical_source_tree_reuse_enabled = "
          << (frozen.config.numerics.treepm_identical_source_tree_reuse_enabled ? "true" : "false") << '\n';
   stream << "treepm_topology_refit_enabled = "
@@ -2942,6 +3019,14 @@ class NormalizedConfigStream {
   frozen.config.numerics.hierarchical_max_rung = parseNumber<int>(
       requireString(entries, consumed, "numerics.hierarchical_max_rung", "0"),
       "numerics.hierarchical_max_rung");
+  frozen.config.numerics.hierarchical_coarse_displacement_criterion =
+      parseHierarchicalCoarseDisplacementCriterion(requireString(
+          entries, consumed, "numerics.hierarchical_coarse_displacement_criterion",
+          defaultFor("numerics.hierarchical_coarse_displacement_criterion")));
+  frozen.config.numerics.hierarchical_coarse_rms_displacement_factor = parseFloating(
+      requireString(entries, consumed, "numerics.hierarchical_coarse_rms_displacement_factor",
+                    defaultFor("numerics.hierarchical_coarse_rms_displacement_factor")),
+      "numerics.hierarchical_coarse_rms_displacement_factor");
   frozen.config.numerics.amr_max_level = parseNumber<int>(
       requireString(entries, consumed, "numerics.amr_max_level", "10"), "numerics.amr_max_level");
   frozen.config.numerics.gravity_softening_kpc_comoving = parseLengthKpc(
@@ -3056,6 +3141,12 @@ class NormalizedConfigStream {
       requireString(entries, consumed, "numerics.treepm_adaptive_maximum_opening_angle",
                     defaultFor("numerics.treepm_adaptive_maximum_opening_angle")),
       "numerics.treepm_adaptive_maximum_opening_angle");
+  frozen.config.numerics.treepm_adaptive_error_estimator = parseTreePmAdaptiveErrorEstimator(
+      requireString(entries, consumed, "numerics.treepm_adaptive_error_estimator",
+                    defaultFor("numerics.treepm_adaptive_error_estimator")));
+  frozen.config.numerics.treepm_cutoff_node_policy = parseTreePmCutoffNodePolicy(
+      requireString(entries, consumed, "numerics.treepm_cutoff_node_policy",
+                    defaultFor("numerics.treepm_cutoff_node_policy")));
   frozen.config.numerics.treepm_identical_source_tree_reuse_enabled = parseBool(
       requireString(entries, consumed, "numerics.treepm_identical_source_tree_reuse_enabled",
                     defaultFor("numerics.treepm_identical_source_tree_reuse_enabled")),

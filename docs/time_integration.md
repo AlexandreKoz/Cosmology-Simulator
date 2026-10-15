@@ -459,6 +459,48 @@ not a rigorous future-force-growth bound. Expansion limits remain independent.
 This changes optional hierarchical coarse intervals and therefore trajectories,
 scheduler ticks and output cadence; global rung-zero behavior is untouched.
 
+### Coarse-interval criterion selection and diagnostics (October 2026)
+
+The `max_speed_mesh` estimate above remains the default
+(`numerics.hierarchical_coarse_displacement_criterion`). Because it combines
+the box-wide maximum speed with the box-wide maximum total acceleration over
+one PM cell, a single fast halo particle bounds every coarse block; at fine
+PM meshes this made a rung-2 coarse block cover only about 1.8 global KDK
+steps, so the four fine ticks were extra work rather than savings.
+
+`rms_split_scale` instead bounds the long-range interval by the typical
+motion relative to the scale on which the PM field varies. The PM force is
+the Gaussian-filtered field `F_LR(k)=exp(-k^2 r_s^2)`, smooth on `r_s`, so the
+coarse interval requires
+
+\[
+v_{\rm rms}\,\Delta t_{\rm coarse}\le f\,\min(r_s,\bar d),\qquad
+v_{\rm rms}^2=\frac{\sum_i m_i |u_i|^2}{a^2\sum_i m_i},\qquad
+\bar d=\left(\frac{L_xL_yL_z}{N}\right)^{1/3},
+\]
+
+with `f = numerics.hierarchical_coarse_rms_displacement_factor` (default
+0.25). Fast particles in dense regions are still restricted by their own
+softened-acceleration rung criterion for the short-range force. Mass sums,
+mass-weighted squared speeds and particle counts use three unconditional
+`allreduceSumDouble` reductions in both modes. This is the conventional
+GADGET-2 style long-range step rule, implemented from the published formula.
+
+Every `time.hierarchical_block` event now records `coarse_limiter` (one of
+`particle_gravity`, `pm_displacement`, `cosmology_expansion`, `explicit_dt`,
+`output_or_end_boundary`), the candidate intervals
+(`particle_coarse_limit_time_code`, `pm_displacement_limit_time_code`,
+`expansion_limit_time_code`), `coarse_displacement_criterion`, and
+`rank_local_bin_occupancy` (`n0,n1,...` committed rung histogram). The rung-2
+ceiling remains: a coarse block can never exceed `2^max_rung` times the
+smallest particle interval, so useful savings require a larger
+`hierarchical_max_rung` once the coarse limiter no longer binds.
+
+The synchronized bootstrap can grow gravity-owned retained capacity; the
+workflow now reconciles the MemoryGovernor baseline collectively immediately
+after it and before the rung-membership `RetainedCapacityTransaction` (repair
+register B-10). The transaction invariant itself is unchanged.
+
 The production-workflow restart/refinement test and Zel'dovich fundamental-mode
 qualification are registered for dependency-complete builds. The growth gate
 compares global KDK with two hierarchical temporal resolutions, retains the

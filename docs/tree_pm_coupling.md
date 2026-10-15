@@ -1,5 +1,52 @@
 # TreePM coupling
 
+## Residual traversal locality — October 2026
+
+Leaves address contiguous ranges of `TreeMortonOrdering::sorted_particle_index`.
+Each residual evaluation now gathers the caller-owned wrapped source positions
+and masses into tree order (`treepm.tree_ordered_source_*` lanes) and visits
+local active targets in tree order (`treepm.target_visit_order`). Leaf pairs
+therefore read sequential memory instead of gathering through the sorted index,
+and consecutive targets in a block share node cache lines.
+
+- The lanes are derived scratch regathered on every evaluation (O(N), a few
+  milliseconds at 262k sources); they are never authoritative, persisted or
+  reused across source generations. SimulationState rows are not permuted, so
+  ownership, restart, migration and force-cache contracts are unaffected.
+- Per-target walk order and per-target summation order are unchanged; each
+  active slot keeps exactly one writer. Forces are bitwise identical to the
+  previous traversal (verified on 4096 targets of a clustered 64^3 box).
+  Only block-ordered floating diagnostics (sum of squares) change order.
+- Memory: 4 doubles + 1 uint32 per local source and 1 uint32 per target,
+  reported in the TreePM memory report and in
+  `gravity.estimate.treepm_tree_ordered_source_lanes`.
+- Measured (clustered 64^3 box, 64^3 PM, adaptive alpha=0.005, 4 threads):
+  residual traversal 11.9 s -> 5.9 s with identical pair counts.
+
+## Adaptive estimator and cutoff-node policy — October 2026
+
+Two adaptive-policy options (typed config keys in `docs/configuration.md`):
+
+- `adaptive_error_estimator = relative_monopole` accepts a node when
+  `G M l^2 <= alpha |a_previous| r^4`, the leading monopole truncation scale,
+  without the derivative proxy. The derivative proxy charges second-order terms
+  that accepted quadrupoles have already removed (about 9 times the monopole
+  term for `f ~ r^-3`) and costs one `erf`/`exp` per tested node. With valid
+  history the COM-center offset is not computed. Neither estimator is a bound;
+  alpha is calibrated by the measured errors below.
+- `cutoff_node_policy = com_distance` lets a node that straddles `r_cut` reach
+  the MAC; an accepted straddling node is evaluated at its COM distance and is
+  skipped when that distance exceeds `r_cut`. Mass inside an accepted node
+  beyond `r_cut` then feeds the residual kernel untruncated, where the residual
+  is the Gaussian tail (`F_SR(r_cut=5 r_s) ~ 6e-3` of Newtonian). `contain`
+  keeps the previous opening-to-leaves behavior.
+- `adaptive_maximum_opening_angle` may now be up to 1.0.
+
+The strict reference policy ignores both options. Defaults reproduce the
+previous behavior exactly.
+
+MEASURED_ACCURACY_TABLE
+
 ## Attempt 1 recovery interfaces — 20261012
 
 The [implementation handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md)

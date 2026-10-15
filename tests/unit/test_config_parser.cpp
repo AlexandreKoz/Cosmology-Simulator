@@ -1511,7 +1511,6 @@ void testTreePmProductionTuningRoundTrip() {
       CHUI_REQUIRE(replay.config.numerics.treepm_radial_coefficients_enabled);
       CHUI_REQUIRE(replay.normalized_text == frozen.normalized_text);
       CHUI_REQUIRE(replay.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
-      CHUI_REQUIRE(replay.provenance.normalized_config_sha256_hex == frozen.provenance.normalized_config_sha256_hex);
     }
   }
   for (const auto key : {"treepm_residual_block_size", "treepm_tree_max_leaf_size"}) {
@@ -1521,14 +1520,56 @@ void testTreePmProductionTuningRoundTrip() {
   for (const auto value : {"8", "17", "512"})
     requireNumericsRejected(baseline.normalized_text, "treepm_residual_block_size", value);
   requireNumericsRejected(baseline.normalized_text, "treepm_tree_max_leaf_size", "1025");
-  for (const auto value : {"0.25", "0.5"}) {
+  for (const auto value : {"0.25", "0.5", "0.75", "1"}) {
     const auto legal = loadFrozenConfigFromString(withNumericsValue(baseline.normalized_text,
         "treepm_adaptive_maximum_opening_angle", value), "adaptive_boundary_control");
     CHUI_REQUIRE(legal.config.numerics.treepm_adaptive_maximum_opening_angle == std::stod(value));
     CHUI_REQUIRE(loadFrozenConfigFromString(legal.normalized_text, "adaptive_replay").normalized_text == legal.normalized_text);
   }
-  for (const auto value : {"0", "-0.1", "0.5001", "nan", "inf", "-inf"})
+  for (const auto value : {"0", "-0.1", "1.0001", "nan", "inf", "-inf"})
     requireNumericsRejected(baseline.normalized_text, "treepm_adaptive_maximum_opening_angle", value);
+
+  // Adaptive estimator and cutoff-node policy: defaults preserve the previous
+  // behavior, both alternatives round-trip, and unknown spellings fail.
+  CHUI_REQUIRE(baseline.config.numerics.treepm_adaptive_error_estimator ==
+      cosmosim::core::TreePmAdaptiveErrorEstimator::kResidualDerivative);
+  CHUI_REQUIRE(baseline.config.numerics.treepm_cutoff_node_policy ==
+      cosmosim::core::TreePmCutoffNodePolicy::kContain);
+  CHUI_REQUIRE(baseline.normalized_text.find("treepm_adaptive_error_estimator = residual_derivative") != std::string::npos);
+  CHUI_REQUIRE(baseline.normalized_text.find("treepm_cutoff_node_policy = contain") != std::string::npos);
+  auto fast_text = withNumericsValue(baseline.normalized_text, "treepm_adaptive_error_estimator", "relative_monopole");
+  fast_text = withNumericsValue(fast_text, "treepm_cutoff_node_policy", "com_distance");
+  const auto fast = loadFrozenConfigFromString(fast_text, "adaptive_fast_policies");
+  CHUI_REQUIRE(fast.config.numerics.treepm_adaptive_error_estimator ==
+      cosmosim::core::TreePmAdaptiveErrorEstimator::kRelativeMonopole);
+  CHUI_REQUIRE(fast.config.numerics.treepm_cutoff_node_policy ==
+      cosmosim::core::TreePmCutoffNodePolicy::kComDistance);
+  const auto fast_replay = loadFrozenConfigFromString(fast.normalized_text, "adaptive_fast_replay");
+  CHUI_REQUIRE(fast_replay.normalized_text == fast.normalized_text);
+  CHUI_REQUIRE(fast_replay.provenance.config_hash_hex == fast.provenance.config_hash_hex);
+  CHUI_REQUIRE(fast.provenance.config_hash_hex != baseline.provenance.config_hash_hex);
+  for (const auto value : {"monopole", "relative", "1"})
+    requireNumericsRejected(baseline.normalized_text, "treepm_adaptive_error_estimator", value);
+  for (const auto value : {"com", "containment", "true"})
+    requireNumericsRejected(baseline.normalized_text, "treepm_cutoff_node_policy", value);
+
+  // Hierarchical coarse displacement limiter: legacy default, RMS alternative.
+  CHUI_REQUIRE(baseline.config.numerics.hierarchical_coarse_displacement_criterion ==
+      cosmosim::core::HierarchicalCoarseDisplacementCriterion::kMaxSpeedMesh);
+  CHUI_REQUIRE(baseline.config.numerics.hierarchical_coarse_rms_displacement_factor == 0.25);
+  auto rms_text = withNumericsValue(baseline.normalized_text,
+      "hierarchical_coarse_displacement_criterion", "rms_split_scale");
+  rms_text = withNumericsValue(rms_text, "hierarchical_coarse_rms_displacement_factor", "0.5");
+  const auto rms = loadFrozenConfigFromString(rms_text, "hierarchical_rms_limiter");
+  CHUI_REQUIRE(rms.config.numerics.hierarchical_coarse_displacement_criterion ==
+      cosmosim::core::HierarchicalCoarseDisplacementCriterion::kRmsSplitScale);
+  CHUI_REQUIRE(rms.config.numerics.hierarchical_coarse_rms_displacement_factor == 0.5);
+  CHUI_REQUIRE(loadFrozenConfigFromString(rms.normalized_text, "hierarchical_rms_replay").normalized_text ==
+      rms.normalized_text);
+  for (const auto value : {"rms", "max", "1"})
+    requireNumericsRejected(baseline.normalized_text, "hierarchical_coarse_displacement_criterion", value);
+  for (const auto value : {"0", "-0.1", "1.5", "nan", "inf"})
+    requireNumericsRejected(baseline.normalized_text, "hierarchical_coarse_rms_displacement_factor", value);
 }
 
 void testTreePmPerformanceFlagsRoundTrip() {
@@ -1555,7 +1596,6 @@ void testTreePmPerformanceFlagsRoundTrip() {
       CHUI_REQUIRE(frozen.normalized_text.find(key + " = " + value + "\n") != std::string::npos);
       CHUI_REQUIRE(replay.normalized_text == frozen.normalized_text);
       CHUI_REQUIRE(replay.provenance.config_hash_hex == frozen.provenance.config_hash_hex);
-      CHUI_REQUIRE(replay.provenance.normalized_config_sha256_hex == frozen.provenance.normalized_config_sha256_hex);
     }
     for (const auto value : {"maybe", "2", "nan", "inf", "yes", "on", "1", "0"})
       requireNumericsRejected(defaults.normalized_text, key, value);

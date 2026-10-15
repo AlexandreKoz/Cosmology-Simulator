@@ -93,6 +93,11 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_int,
         help="launch exactly N MPI ranks; the runtime still validates parallel.mpi_ranks_expected",
     )
+    run.add_argument(
+        "--no-auto-binding",
+        action="store_true",
+        help="do not add the default Open MPI hybrid placement (see 'MPI/OpenMP placement' in docs/build_instructions.md)",
+    )
     run.add_argument("--quiet", action="store_true", help="suppress routine native CHUI console records")
     run.add_argument(
         "--status-every",
@@ -299,6 +304,37 @@ def _mpi_launcher(build_dir: Path) -> tuple[str, str]:
     return mpi_exec, numproc_flag
 
 
+_BINDING_FLAGS = frozenset({
+    "--bind-to", "-bind-to", "--map-by", "-map-by", "--cpu-set", "--cpu-list",
+    "--rankfile", "-rf", "--cpus-per-proc", "--cpus-per-rank",
+})
+
+
+def _openmpi_binding_args(mpi_exec: str, ranks: int, passthrough: list[str]) -> list[str]:
+    """Explicit hybrid MPI+OpenMP placement for Open MPI launches.
+
+    Open MPI's default binds each rank to a single core, so all OpenMP threads of
+    a rank share one physical core (observed: ~199% CPU for 4 threads). One rank
+    is left unbound; several ranks with OMP_NUM_THREADS=T get T cores each.
+    Any user-supplied placement flag after '--' disables this policy.
+    """
+    if any(arg.split("=", 1)[0] in _BINDING_FLAGS for arg in passthrough):
+        return []
+    try:
+        probe = subprocess.run(
+            [mpi_exec, "--version"], check=False, capture_output=True, text=True, timeout=20
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if "Open MPI" not in (probe.stdout + probe.stderr):
+        return []
+    threads_text = os.environ.get("OMP_NUM_THREADS", "").split(",", 1)[0].strip()
+    threads = int(threads_text) if threads_text.isdigit() and int(threads_text) > 0 else None
+    if ranks > 1 and threads is not None:
+        return ["--map-by", f"slot:PE={threads}", "--bind-to", "core"]
+    return ["--bind-to", "none"]
+
+
 def _infer_mpi_ranks_from_authoritative_config(
     executable: Path, config_path: str
 ) -> int:
@@ -337,7 +373,8 @@ def _harness_console_args(args: argparse.Namespace) -> list[str]:
 
 
 def _emit_launch_provenance(
-    args: argparse.Namespace, executable: Path, build_dir: Path
+    args: argparse.Namespace, executable: Path, build_dir: Path,
+    binding_args: list[str] | None = None,
 ) -> None:
     if args.quiet:
         return
@@ -355,6 +392,9 @@ def _emit_launch_provenance(
     ]
     if args.mpi is not None:
         fields.append(f"mpi_ranks={args.mpi}")
+        fields.append(
+            "auto_binding=" + (json.dumps(" ".join(binding_args)) if binding_args else "none")
+        )
     print("[CHUI][LAUNCH] " + " ".join(fields), flush=True)
 
 
@@ -389,6 +429,7 @@ def _run(args: argparse.Namespace, mpi_passthrough: list[str]) -> int:
             )
 
     harness_args = [str(executable), args.config, *_harness_console_args(args)]
+    binding_args: list[str] = []
 
     if args.mpi is None:
         if mpi_passthrough:
@@ -403,9 +444,13 @@ def _run(args: argparse.Namespace, mpi_passthrough: list[str]) -> int:
                 "COSMOSIM_ENABLE_MPI=OFF. Select an MPI-enabled preset/build."
             )
         mpi_exec, numproc_flag = _mpi_launcher(build_dir)
-        command = [mpi_exec, *mpi_passthrough, numproc_flag, str(args.mpi), *harness_args]
+        binding_args = (
+            [] if args.no_auto_binding
+            else _openmpi_binding_args(mpi_exec, args.mpi, mpi_passthrough)
+        )
+        command = [mpi_exec, *binding_args, *mpi_passthrough, numproc_flag, str(args.mpi), *harness_args]
 
-    _emit_launch_provenance(args, executable, build_dir)
+    _emit_launch_provenance(args, executable, build_dir, binding_args)
 
     # Process replacement preserves the child/MPI exit status and delivers
     # SIGINT/SIGTERM directly to the actual runtime/launcher rather than

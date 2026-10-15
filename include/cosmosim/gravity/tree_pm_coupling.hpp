@@ -142,12 +142,39 @@ enum class TreePmAcceptancePolicy : std::uint8_t {
   kAdaptiveRelative,
 };
 
+// Error estimate compared with alpha*|a_previous| by the adaptive policy.
+// kResidualDerivative: second-order proxy with derivatives of the screened
+//   residual kernel (residualAccuracyProxy); conservative, one erf/exp per test.
+// kRelativeMonopole: classic relative criterion G M l^2 <= alpha |a| r^4
+//   (the leading monopole truncation scale); multiplies only. For accepted
+//   quadrupoles it overestimates the remaining error, so alpha must be
+//   calibrated by measured force errors, not read as an error bound.
+enum class TreePmAdaptiveErrorEstimator : std::uint8_t {
+  kResidualDerivative,
+  kRelativeMonopole,
+};
+
+// Treatment of internal nodes that straddle the short-range cutoff sphere in
+// the adaptive policy (the strict reference always contains).
+// kContainNode: an accepted node must lie entirely inside r_cut; straddling
+//   nodes are opened down to leaves and individual pairs are truncated.
+// kComDistance: a straddling node may pass the MAC and is evaluated at its
+//   COM distance; it contributes nothing when that distance exceeds r_cut.
+//   Mass of an accepted node beyond r_cut then feeds the residual kernel
+//   untruncated, where the residual is already the small Gaussian tail.
+enum class TreePmCutoffNodePolicy : std::uint8_t {
+  kContainNode,
+  kComDistance,
+};
+
 struct TreePmOptions {
   PmSolveOptions pm_options{};
   TreeGravityOptions tree_options{};
   TreePmSplitPolicy split_policy{};
   TreePmAcceptancePolicy acceptance_policy = TreePmAcceptancePolicy::kStrictReference;
   double adaptive_maximum_opening_angle = 0.25;
+  TreePmAdaptiveErrorEstimator adaptive_error_estimator = TreePmAdaptiveErrorEstimator::kResidualDerivative;
+  TreePmCutoffNodePolicy cutoff_node_policy = TreePmCutoffNodePolicy::kContainNode;
   // Opt-in until force qualification; affects direct leaf pairs only.
   bool gaussian_pair_lookup_enabled = false;
   bool full_residual_lookup_enabled = false;
@@ -536,6 +563,17 @@ class TreePmCoordinator {
   std::vector<double> m_tree_source_x_comoving;
   std::vector<double> m_tree_source_y_comoving;
   std::vector<double> m_tree_source_z_comoving;
+
+  // Residual-traversal locality lanes: caller-owned wrapped source positions
+  // and masses gathered into tree (Morton) order, plus the row -> tree-order
+  // position map used to visit local targets in tree order. Derived scratch,
+  // regathered on every residual evaluation; never authoritative or persisted.
+  std::vector<double> m_tree_ordered_source_x_comoving;
+  std::vector<double> m_tree_ordered_source_y_comoving;
+  std::vector<double> m_tree_ordered_source_z_comoving;
+  std::vector<double> m_tree_ordered_source_mass_code;
+  std::vector<std::uint32_t> m_tree_order_position_by_row;
+  std::vector<std::uint32_t> m_target_visit_order;
 
   // Zoom correction is optional and owns compact lanes only while the selected
   // profile enables it. Ordinary source-index targets alias authoritative
