@@ -501,3 +501,17 @@ short-force comparisons are generated separately per candidate. Python >=3.8,
 NumPy and h5py are required for these offline workflows. Exact commands and the
 external reference sidecar fields are in the
 [20261010 repair handoff](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md). No new timings were collected.
+
+## Clustered-box TreePM benchmark (October 2026)
+
+`tools/generate_clustered_dmo_box.py OUT.csv --order random|morton` writes a
+clustered 64^3 DMO workload for `bench_tree_pm_sweep --particles OUT.csv`.
+The benchmark accepts `--alpha`, `--estimator residual_derivative|relative_monopole`,
+`--cutoff-node-policy contain|com_distance` and `--maximum-angle` up to 1.0;
+`--forces FILE` writes total/tree/direct-residual forces for the selected
+targets, so two runs (candidate and `--policy strict --kernel analytic` on the
+same mesh) give a total-force error distribution. Report pairs/target,
+multipoles/target, traversal and PM milliseconds together with the error
+quantiles; the measured table is in `docs/tree_pm_coupling.md`. Hierarchical
+runs additionally record `coarse_limiter` and `rank_local_bin_occupancy` in
+every `time.hierarchical_block` event of `operational_report.json`.

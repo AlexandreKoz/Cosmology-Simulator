@@ -1,5 +1,14 @@
 # Repair open issues
 
+20261015 TreePM performance campaign: tree-ordered residual traversal
+(bitwise-identical forces), threaded FFTW, opt-in adaptive estimator and
+cutoff-node policy, opt-in hierarchical RMS coarse criterion and the B-10
+post-bootstrap governor reconcile are implemented, compiled and tested; see
+the [campaign record](repair/treepm_performance_campaign_20261015.md) for
+measured accuracy/timing, exact commands and the remaining open items
+(endpoint force reuse, group walk/SIMD, trajectory/growth qualification of the
+fast deck and of hierarchical `rms_split_scale`).
+
 20261012 test regression closure: the source repairs in the
 [closure handoff](repair/treepm_deep_hotpath_test_regression_closure_20261012.md)
 await compilation and execution of every stated gate. In particular, active

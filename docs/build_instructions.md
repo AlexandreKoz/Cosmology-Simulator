@@ -138,6 +138,12 @@ cmake --build --preset build-pm-hdf5-fftw-debug
 ctest --preset test-pm-hdf5-fftw-debug --output-on-failure
 ```
 
+When `libfftw3_omp` is found (Debian/Ubuntu: part of `libfftw3-dev`) and
+OpenMP is enabled, PM FFT plans run on `omp_get_max_threads()` threads; the
+configure log prints `CHUI dependency: FFTW OpenMP threads=ON`. Pass
+`-DCOSMOSIM_ENABLE_FFTW_THREADS=OFF` to keep serial FFTW, for example when PM
+forces must be independent of `OMP_NUM_THREADS` at round-off level.
+
 ## Distributed gravity development path (MPI + HDF5 + FFTW)
 
 ```bash

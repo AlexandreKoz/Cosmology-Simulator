@@ -45,7 +45,33 @@ Two adaptive-policy options (typed config keys in `docs/configuration.md`):
 The strict reference policy ignores both options. Defaults reproduce the
 previous behavior exactly.
 
-MEASURED_ACCURACY_TABLE
+Measured on the synthetic clustered 64^3 box
+(`tools/generate_clustered_dmo_box.py`, 10 length units, epsilon 0.005,
+random row order) with `bench_tree_pm_sweep`, Release `-O3 -march=native`,
+4 OpenMP threads, same-snapshot bootstrap history, Gaussian pair lookup,
+leaf 16, block 64. Errors are |a - a_ref|/|a_ref| of the TOTAL Tree+PM force
+over 4096 targets, against the strict reference policy on the same mesh
+(so split/mesh error is excluded). Times are one force evaluation.
+
+| PM | Estimator | Cutoff nodes | alpha | max angle | Tree s | PM s | pairs/target | rms err | p99 err | max err |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | residual_derivative | contain | 0.005 | 0.5 | 6.05 | 0.10 | 2740 | 3.1e-5 | 1.0e-4 | 1.3e-4 |
+| 64 | relative_monopole | contain | 0.005 | 0.5 | 4.72 | 0.10 | 2026 | 1.6e-4 | 4.8e-4 | 7.0e-4 |
+| 64 | relative_monopole | com_distance | 0.005 | 1.0 | 1.89 | 0.10 | 769 | 5.3e-4 | 1.3e-3 | 4.5e-3 |
+| 64 | relative_monopole | com_distance | 0.0025 | 1.0 | 2.56 | 0.14 | 1039 | 2.7e-4 | 7.2e-4 | 2.5e-3 |
+| 64 | relative_monopole | com_distance | 0.01 | 1.0 | 2.07* | 0.29* | 566 | 1.0e-3 | 2.7e-3 | 7.1e-3 |
+| 128 | residual_derivative | contain | 0.005 | 0.5 | 3.92 | 0.18 | 1897 | 2.8e-5 | 9.8e-5 | 1.5e-4 |
+| 128 | relative_monopole | contain | 0.005 | 0.5 | 3.12 | 0.19 | 1481 | 1.4e-4 | 4.7e-4 | 7.1e-4 |
+| 128 | relative_monopole | com_distance | 0.005 | 1.0 | 1.32 | 0.20 | 535 | 4.0e-4 | 1.2e-3 | 4.6e-3 |
+| 128 | relative_monopole | com_distance | 0.0025 | 1.0 | 1.70 | 0.19 | 737 | 2.1e-4 | 6.0e-4 | 2.5e-3 |
+| 128 | relative_monopole | com_distance | 0.01 | 1.0 | 1.11 | 0.22 | 389 | 7.3e-4 | 2.3e-3 | 6.3e-3 |
+
+`*` measured while a compiler job shared the cores; pair counts are exact.
+Before the locality change the first row took 11.9 s. The production deck
+`configs/treepm_evolved_snapshot_fast.param.txt` uses the 128^3 /
+relative_monopole / com_distance / alpha 0.0025 / angle 1.0 row. These are
+force-accuracy results on one synthetic workload; trajectory, growth and
+power-spectrum qualification of the selected settings remain separate gates.
 
 ## Attempt 1 recovery interfaces — 20261012
 
