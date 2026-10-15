@@ -507,7 +507,7 @@ external reference sidecar fields are in the
 `tools/generate_clustered_dmo_box.py OUT.csv --order random|morton` writes a
 clustered 64^3 DMO workload for `bench_tree_pm_sweep --particles OUT.csv`.
 The benchmark accepts `--alpha`, `--estimator residual_derivative|relative_monopole`,
-`--cutoff-node-policy contain|com_distance` and `--maximum-angle` up to 1.0;
+`--cutoff-node-policy contain|com_distance`, `--group-walk on|off` and `--maximum-angle` up to 1.0;
 `--forces FILE` writes total/tree/direct-residual forces for the selected
 targets, so two runs (candidate and `--policy strict --kernel analytic` on the
 same mesh) give a total-force error distribution. Report pairs/target,

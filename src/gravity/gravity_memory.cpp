@@ -630,14 +630,15 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
    // Residual-traversal locality lanes: x/y/z/mass gathered in tree order,
    // the row -> tree-position map, and the tree-order target visit list.
    const std::uint64_t treepm_tree_order_bytes = checkedAdd(
-       checkedMul(input.local_source_count, 4U * sizeof(double) + sizeof(std::uint32_t),
+       // +1 uint32 per source: optional group-walk leaf map (conservatively always counted).
+       checkedMul(input.local_source_count, 4U * sizeof(double) + 2U * sizeof(std::uint32_t),
            "TreePM tree-ordered source lane estimate overflow"),
        checkedMul(input.local_target_count, sizeof(std::uint32_t),
            "TreePM target visit order estimate overflow"),
        "TreePM tree-order locality estimate overflow");
    addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
                "gravity.estimate.treepm_tree_ordered_source_lanes", treepm_tree_order_bytes,
-               "tree-order copies of source position/mass, row->tree-position map and target visit order; regathered every residual evaluation");
+               "tree-order copies of source position/mass, row->tree-position map, target visit order and the optional group-walk leaf map; regathered every residual evaluation");
    if (treepm_block_diagnostic_bytes > 0U) {
      addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
                  "gravity.estimate.treepm_residual_block_diagnostics", treepm_block_diagnostic_bytes,

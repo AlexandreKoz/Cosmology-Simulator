@@ -31,7 +31,7 @@ struct Arguments {
   bool adaptive = false, lookup = false, forensic = true, bootstrap = false;
   double maximum_angle = 0.25;
   double alpha = 0.005;
-  bool relative_monopole = false, com_distance_cutoff = false;
+  bool relative_monopole = false, com_distance_cutoff = false, group_walk = false;
   bool full_residual=false, simd=false, radial=false, reuse=false, refit=false;
   std::string kernel="analytic";
   int ewald_level = 0;
@@ -77,6 +77,7 @@ Arguments parseArguments(int argc, char** argv) {
       a.relative_monopole=value=="relative_monopole";
     else if (key == "--cutoff-node-policy" && (value=="contain" || value=="com_distance"))
       a.com_distance_cutoff=value=="com_distance";
+    else if (key == "--group-walk" && (value=="on" || value=="off")) a.group_walk=value=="on";
     else if (key == "--reuse" && (value=="on" || value=="off")) a.reuse=value=="on";
     else if (key == "--refit" && (value=="on" || value=="off")) a.refit=value=="on";
     else if (key == "--epsilon") a.epsilon=parseRealValue(value);
@@ -264,6 +265,7 @@ int run(const Arguments& a) {
   options.cutoff_node_policy=a.com_distance_cutoff ?
       cosmosim::gravity::TreePmCutoffNodePolicy::kComDistance :
       cosmosim::gravity::TreePmCutoffNodePolicy::kContainNode;
+  options.group_walk_enabled=a.group_walk;
   options.split_policy=cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(a.asmth,a.rcut,
       std::cbrt((a.box_x/a.mesh)*(a.box_y/a.mesh)*(a.box_z/a.mesh)));
   options.gaussian_pair_lookup_enabled=a.lookup;options.full_mac_diagnostics=a.forensic;

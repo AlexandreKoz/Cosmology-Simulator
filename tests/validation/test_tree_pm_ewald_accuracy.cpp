@@ -111,6 +111,7 @@ struct SolverProfile {
   cosmosim::gravity::TreePmCutoffNodePolicy cutoff_node_policy =
       cosmosim::gravity::TreePmCutoffNodePolicy::kContainNode;
   double adaptive_maximum_opening_angle = 0.25;
+  bool group_walk_enabled = false;
 };
 
 struct ErrorMetrics {
@@ -503,6 +504,7 @@ void validateFixture(const ParticleFixture& fixture) {
   options.adaptive_error_estimator = solver_profile.adaptive_error_estimator;
   options.cutoff_node_policy = solver_profile.cutoff_node_policy;
   options.adaptive_maximum_opening_angle = solver_profile.adaptive_maximum_opening_angle;
+  options.group_walk_enabled = solver_profile.group_walk_enabled;
   options.full_mac_diagnostics = false;
   options.tree_options.opening_theta = solver_profile.opening_theta;
   options.tree_options.opening_criterion = solver_profile.opening_criterion;
@@ -1131,6 +1133,26 @@ void testTreePmAgainstIndependentEwald(bool recovery_qualification) {
         requirePhysicalInvariants(results.back());
         requireOrThrow(meetsAccuracyTarget(results.back()), fast.label + '/' + fixture.label +
             ": production fast profile failed unchanged Ewald accuracy target");
+#endif
+      }
+      {
+        // Same profile with the opt-in group walk (shared interaction lists).
+        auto grouped=certified_profile;
+        grouped.label="recovery_adaptive_monopole_com_distance_group_walk";
+        grouped.accuracy_certified=false;
+        grouped.acceptance_policy=cosmosim::gravity::TreePmAcceptancePolicy::kAdaptiveRelative;
+        grouped.adaptive_error_estimator=cosmosim::gravity::TreePmAdaptiveErrorEstimator::kRelativeMonopole;
+        grouped.cutoff_node_policy=cosmosim::gravity::TreePmCutoffNodePolicy::kComDistance;
+        grouped.adaptive_maximum_opening_angle=1.0;
+        grouped.relative_force_tolerance=0.0025;
+        grouped.gaussian_pair_lookup_enabled=true;
+        grouped.supply_converged_reference_force_scale=true;
+        grouped.group_walk_enabled=true;
+        runAndRecord(fixture,ewald_reference,grouped,measure_translation,&results);
+#if COSMOSIM_ENABLE_FFTW
+        requirePhysicalInvariants(results.back());
+        requireOrThrow(meetsAccuracyTarget(results.back()), grouped.label + '/' + fixture.label +
+            ": group-walk fast profile failed unchanged Ewald accuracy target");
 #endif
       }
     }

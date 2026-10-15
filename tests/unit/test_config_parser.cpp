@@ -1553,6 +1553,27 @@ void testTreePmProductionTuningRoundTrip() {
   for (const auto value : {"com", "containment", "true"})
     requireNumericsRejected(baseline.normalized_text, "treepm_cutoff_node_policy", value);
 
+  // Group walk: off by default, round-trips when its prerequisites hold, and
+  // is rejected (not silently ignored) without them.
+  CHUI_REQUIRE(!baseline.config.numerics.treepm_group_walk_enabled);
+  CHUI_REQUIRE(baseline.normalized_text.find("treepm_group_walk_enabled = false") != std::string::npos);
+  auto group_text = withNumericsValue(fast.normalized_text, "treepm_group_walk_enabled", "true");
+  group_text = withNumericsValue(group_text, "treepm_adaptive_acceptance_enabled", "true");
+  group_text = withNumericsValue(group_text, "treepm_gaussian_pair_lookup_enabled", "true");
+  const auto grouped = loadFrozenConfigFromString(group_text, "group_walk_enabled");
+  CHUI_REQUIRE(grouped.config.numerics.treepm_group_walk_enabled);
+  CHUI_REQUIRE(loadFrozenConfigFromString(grouped.normalized_text, "group_walk_replay").normalized_text ==
+      grouped.normalized_text);
+  bool group_without_prerequisites_rejected = false;
+  try {
+    (void)loadFrozenConfigFromString(
+        withNumericsValue(baseline.normalized_text, "treepm_group_walk_enabled", "true"), "group_walk_invalid");
+  } catch (const cosmosim::core::ConfigError& error) {
+    group_without_prerequisites_rejected =
+        std::string(error.what()).find("treepm_group_walk_enabled") != std::string::npos;
+  }
+  CHUI_REQUIRE(group_without_prerequisites_rejected);
+
   // Hierarchical coarse displacement limiter: legacy default, RMS alternative.
   CHUI_REQUIRE(baseline.config.numerics.hierarchical_coarse_displacement_criterion ==
       cosmosim::core::HierarchicalCoarseDisplacementCriterion::kMaxSpeedMesh);

@@ -5,6 +5,8 @@
 # alpha=0.0025 / angle 1.0 row of docs/tree_pm_coupling.md (total-force error
 # rms 2.1e-4, p99 6.0e-4 on the clustered 64^3 fixture; tree 1.70 s + PM 0.19 s
 # per force on 4 threads, versus 11.9 s for the previous deck settings).
+# The group walk (one tree walk per leaf of targets, vectorized pair loop)
+# lowers the tree time to ~1.1 s and the total-force error to rms 1.5e-4.
 # Hierarchical KDK stays off: enable it only after the qualification run in
 # docs/time_integration.md (hierarchical_max_rung >= 4 together with
 # hierarchical_coarse_displacement_criterion = rms_split_scale).
@@ -63,6 +65,7 @@ treepm_adaptive_acceptance_enabled = true
 treepm_adaptive_maximum_opening_angle = 1.0
 treepm_adaptive_error_estimator = relative_monopole
 treepm_cutoff_node_policy = com_distance
+treepm_group_walk_enabled = true
 treepm_full_mac_diagnostics = false
 treepm_gaussian_pair_lookup_enabled = true
 treepm_full_residual_lookup_enabled = false

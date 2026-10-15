@@ -160,6 +160,10 @@ class TreePmGaussianCoefficientTable {
     return (2*u3 - 3*u2 + 1)*m_value[i] + (u3 - 2*u2 + u)*m_slope[i] +
         (-2*u3 + 3*u2)*m_value[i+1U] + (u3 - u2)*m_slope[i+1U];
   }
+  // Read-only knot arrays (k_cells + 1 entries) for vectorized evaluators;
+  // slopes are pre-scaled by k_step, matching dimensionlessCoefficient().
+  [[nodiscard]] const double* knotValues() const noexcept { return m_value.data(); }
+  [[nodiscard]] const double* knotSlopes() const noexcept { return m_slope.data(); }
   TreePmGaussianCoefficientTable() noexcept {
     constexpr double k_two_inv_sqrt_pi = 1.12837916709551257389615890312154517;
     for (std::size_t i = 0U; i <= k_cells; ++i) {

@@ -132,6 +132,7 @@ int main() {
     assert(n.treepm_tree_relative_force_tolerance == 0.0025);
     assert(n.treepm_adaptive_maximum_opening_angle == 1.0);
     assert(n.hierarchical_max_rung == 0);
+    assert(n.treepm_group_walk_enabled);
     assert(!n.treepm_leaf_simd_enabled && !n.treepm_full_residual_lookup_enabled);
     (void)n;
   }

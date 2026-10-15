@@ -17,7 +17,8 @@ and consecutive targets in a block share node cache lines.
   active slot keeps exactly one writer. Forces are bitwise identical to the
   previous traversal (verified on 4096 targets of a clustered 64^3 box).
   Only block-ordered floating diagnostics (sum of squares) change order.
-- Memory: 4 doubles + 1 uint32 per local source and 1 uint32 per target,
+- Memory: 4 doubles + 2 uint32 per local source (the second is the optional
+  group-walk leaf map) and 1 uint32 per target,
   reported in the TreePM memory report and in
   `gravity.estimate.treepm_tree_ordered_source_lanes`.
 - Measured (clustered 64^3 box, 64^3 PM, adaptive alpha=0.005, 4 threads):
@@ -72,6 +73,59 @@ Before the locality change the first row took 11.9 s. The production deck
 relative_monopole / com_distance / alpha 0.0025 / angle 1.0 row. These are
 force-accuracy results on one synthetic workload; trajectory, growth and
 power-spectrum qualification of the selected settings remain separate gates.
+
+## Group walk — October 2026 (opt-in)
+
+`TreePmOptions::group_walk_enabled` / `numerics.treepm_group_walk_enabled`
+(default false) walks the tree once per group instead of once per target. A
+group is the run of active targets, in tree-order visit sequence and within one
+residual block, that lie in the same tree leaf (at most `max_leaf_size`).
+
+Group-conservative acceptance (`src/gravity/internal/tree_pm_group_walk.hpp`):
+
+- prune a node when the minimum distance between its AABB and the group AABB
+  exceeds `r_cut`;
+- open a node whose AABB touches the group AABB (no target may lie inside an
+  accepted node), and under `contain` a node not entirely within `r_cut` of
+  every group point;
+- accept a node only if `G M l^2 <= alpha a_min r_min^4` and
+  `l < theta_max r_min`, with `r_min` the distance from the node COM to the
+  group AABB (a lower bound on every target's COM distance) and `a_min` the
+  smallest previous-acceleration magnitude in the group.
+
+Every target therefore meets the per-target `relative_monopole` criterion with
+margin, and the measured error decreases. Accepted multipoles are evaluated
+per target exactly as in the per-target walk (including the `com_distance`
+zero beyond `r_cut`). Accepted leaves become tree-order source ranges, merged
+when contiguous, and are evaluated by a branch-free pair loop over the
+tree-ordered lanes with the Gaussian Hermite table (AVX2 gathers); the
+compiler vectorizes it (`#pragma omp simd`). A Chebyshev/Estrin polynomial
+alternative was measured slower on the reference CPU and was not kept.
+
+Eligibility: adaptive policy, `relative_monopole`, Gaussian pair lookup,
+uniform softening, local (non-distributed) residual path, leaf SIMD and
+full-residual lookup off, no spatial work history, and
+`(r_cut / 2 r_s)^2 < 63` (table range). Typed config rejects enabling it
+without those settings. At run time a group falls back to the per-target walk
+(before any accumulation) when a target has non-uniform softening, missing or
+sub-floor force history (first evaluation), or periodic coordinates outside
+the certified bounds; isolated/open boundaries therefore always fall back.
+
+Differences from the per-target walk: summation order (not bitwise
+reproducible against it), coincident distinct pairs are not counted in
+`direct_pair_evaluations`, and pairs/target rise while node visits fall.
+
+Measured (same clustered 64^3 box and settings as the table above, 128^3 PM,
+alpha 0.0025, angle 1.0, `com_distance`, 4 threads):
+
+| Walk | Tree s | pairs/target | nodes/target | rms err | p99 err | max err |
+|---|---|---|---|---|---|---|
+| per target | 1.44 | 737 | 351 | 2.1e-4 | 6.0e-4 | 2.5e-3 |
+| group (leaf 16) | 1.06–1.11 | 947 | 102 | 1.5e-4 | 4.4e-4 | 2.5e-3 |
+
+Leaf 32 groups cost more (1.5 s, 1605 pairs/target); leaf 8 matches leaf 16.
+The recovery Ewald qualification gates the group-walk fast profile against the
+unchanged Ewald targets on all five fixtures.
 
 ## Attempt 1 recovery interfaces — 20261012
 

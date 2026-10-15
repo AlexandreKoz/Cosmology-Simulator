@@ -435,6 +435,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
         config.numerics.treepm_cutoff_node_policy == core::TreePmCutoffNodePolicy::kComDistance
         ? gravity::TreePmCutoffNodePolicy::kComDistance
         : gravity::TreePmCutoffNodePolicy::kContainNode;
+    m_tree_pm_options.group_walk_enabled = config.numerics.treepm_group_walk_enabled;
     m_tree_pm_options.tree_options.gravitational_constant_code =
         m_gravitational_constant_code;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;

@@ -1251,6 +1251,7 @@ struct ConfigKeySpec {
       {"numerics.treepm_adaptive_maximum_opening_angle", "0.25"},
       {"numerics.treepm_adaptive_error_estimator", "residual_derivative"},
       {"numerics.treepm_cutoff_node_policy", "contain"},
+      {"numerics.treepm_group_walk_enabled", "false"},
       {"numerics.treepm_identical_source_tree_reuse_enabled", "false"},
       {"numerics.treepm_topology_refit_enabled", "false"},
       {"numerics.treepm_assignment_scheme", "tsc"},
@@ -1915,6 +1916,16 @@ void validateConfig(const SimulationConfig& config) {
       config.numerics.treepm_adaptive_maximum_opening_angle > 1.0) {
     throw ConfigError("numerics.treepm_adaptive_maximum_opening_angle must be finite and in (0, 1]");
   }
+  if (config.numerics.treepm_group_walk_enabled &&
+      (!config.numerics.treepm_adaptive_acceptance_enabled ||
+       config.numerics.treepm_adaptive_error_estimator != TreePmAdaptiveErrorEstimator::kRelativeMonopole ||
+       !config.numerics.treepm_gaussian_pair_lookup_enabled ||
+       config.numerics.treepm_leaf_simd_enabled || config.numerics.treepm_full_residual_lookup_enabled)) {
+    throw ConfigError(
+        "numerics.treepm_group_walk_enabled requires treepm_adaptive_acceptance_enabled=true, "
+        "treepm_adaptive_error_estimator=relative_monopole, treepm_gaussian_pair_lookup_enabled=true "
+        "and leaf SIMD/full-residual lookup disabled");
+  }
   if (!std::isfinite(config.numerics.treepm_tree_relative_force_tolerance) ||
       config.numerics.treepm_tree_relative_force_tolerance <= 0.0) {
     throw ConfigError(
@@ -2419,6 +2430,8 @@ class NormalizedConfigStream {
          << treePmAdaptiveErrorEstimatorToString(frozen.config.numerics.treepm_adaptive_error_estimator) << '\n';
   stream << "treepm_cutoff_node_policy = "
          << treePmCutoffNodePolicyToString(frozen.config.numerics.treepm_cutoff_node_policy) << '\n';
+  stream << "treepm_group_walk_enabled = "
+         << (frozen.config.numerics.treepm_group_walk_enabled ? "true" : "false") << '\n';
   stream << "treepm_identical_source_tree_reuse_enabled = "
          << (frozen.config.numerics.treepm_identical_source_tree_reuse_enabled ? "true" : "false") << '\n';
   stream << "treepm_topology_refit_enabled = "
@@ -3147,6 +3160,10 @@ class NormalizedConfigStream {
   frozen.config.numerics.treepm_cutoff_node_policy = parseTreePmCutoffNodePolicy(
       requireString(entries, consumed, "numerics.treepm_cutoff_node_policy",
                     defaultFor("numerics.treepm_cutoff_node_policy")));
+  frozen.config.numerics.treepm_group_walk_enabled = parseBool(
+      requireString(entries, consumed, "numerics.treepm_group_walk_enabled",
+                    defaultFor("numerics.treepm_group_walk_enabled")),
+      "numerics.treepm_group_walk_enabled");
   frozen.config.numerics.treepm_identical_source_tree_reuse_enabled = parseBool(
       requireString(entries, consumed, "numerics.treepm_identical_source_tree_reuse_enabled",
                     defaultFor("numerics.treepm_identical_source_tree_reuse_enabled")),

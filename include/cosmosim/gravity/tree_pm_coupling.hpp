@@ -167,6 +167,13 @@ enum class TreePmCutoffNodePolicy : std::uint8_t {
   kComDistance,
 };
 
+// Per-worker interaction-list storage for the opt-in TreePM group walk.
+struct TreePmGroupWalkWorkerScratch {
+  std::vector<TreeLocalIndex> multipole_nodes;
+  std::vector<TreeLocalIndex> range_begin;
+  std::vector<TreeLocalIndex> range_end;
+};
+
 struct TreePmOptions {
   PmSolveOptions pm_options{};
   TreeGravityOptions tree_options{};
@@ -175,6 +182,12 @@ struct TreePmOptions {
   double adaptive_maximum_opening_angle = 0.25;
   TreePmAdaptiveErrorEstimator adaptive_error_estimator = TreePmAdaptiveErrorEstimator::kResidualDerivative;
   TreePmCutoffNodePolicy cutoff_node_policy = TreePmCutoffNodePolicy::kContainNode;
+  // Opt-in group walk (docs/tree_pm_coupling.md): one tree walk per leaf of
+  // active targets with a group-conservative relative_monopole criterion and
+  // a vectorized Gaussian-table pair kernel. Effective only for the local
+  // adaptive relative_monopole path with uniform softening and Gaussian pair
+  // lookup; other cases use the per-target walk.
+  bool group_walk_enabled = false;
   // Opt-in until force qualification; affects direct leaf pairs only.
   bool gaussian_pair_lookup_enabled = false;
   bool full_residual_lookup_enabled = false;
@@ -574,6 +587,9 @@ class TreePmCoordinator {
   std::vector<double> m_tree_ordered_source_mass_code;
   std::vector<std::uint32_t> m_tree_order_position_by_row;
   std::vector<std::uint32_t> m_target_visit_order;
+  // Group walk: tree-order position -> containing leaf, and per-worker lists.
+  std::vector<TreeLocalIndex> m_leaf_of_tree_position;
+  std::vector<TreePmGroupWalkWorkerScratch> m_worker_group_scratch;
 
   // Zoom correction is optional and owns compact lanes only while the selected
   // profile enables it. Ordinary source-index targets alias authoritative

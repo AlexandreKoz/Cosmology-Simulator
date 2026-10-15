@@ -279,6 +279,7 @@ struct NumericsConfig {
   TreePmAdaptiveErrorEstimator treepm_adaptive_error_estimator =
       TreePmAdaptiveErrorEstimator::kResidualDerivative;
   TreePmCutoffNodePolicy treepm_cutoff_node_policy = TreePmCutoffNodePolicy::kContain;
+  bool treepm_group_walk_enabled = false;
   bool treepm_identical_source_tree_reuse_enabled = false;
   bool treepm_topology_refit_enabled = false;
   TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kTsc;
