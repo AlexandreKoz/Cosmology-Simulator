@@ -618,7 +618,10 @@ void testPmPlanRetainedCapacityReport() {
   const cosmosim::gravity::PmGridShape shape{4, 3, 5};
   cosmosim::gravity::PmGridStorage grid(shape);
   cosmosim::gravity::PmSolver solver(shape);
-  solver.solvePoissonPeriodic(grid, cosmosim::gravity::PmSolveOptions{});
+  cosmosim::gravity::PmSolveOptions unit_box_options;
+  unit_box_options.box_size_mpc_comoving = 1.0;
+  grid.ensureDensityStorage();
+  solver.solvePoissonPeriodic(grid, unit_box_options);
   constexpr std::uint64_t arrays = 4U * 3U * 5U * sizeof(double) +
       2U * 4U * 3U * 3U * sizeof(std::complex<double>);
   constexpr std::uint64_t axes = 2U * (4U + 3U + 3U) * sizeof(double);
@@ -839,15 +842,25 @@ void testAdaptiveNodeReserveAndMemoryEstimate() {
       .tree_exchange_batch_bytes = 4096U,
       .pm_exchange_batch_bytes = 1024U,
   });
+  // PM routing now lives in the unified communication arena: one physical
+  // owner sized to the largest sequential logical contributor (not their sum),
+  // with PM density routing covering two reusable wire buffers for seven
+  // remote peers at 1024 bytes/peer.
   bool saw_pm_routing = false;
+  std::uint64_t arena_owned = 0U, logical_max = 0U;
   for (const auto& entry : distributed_estimate.report.entries) {
-    if (entry.label == "gravity.estimate.pm_routing_exchange") {
+    if (entry.label == "gravity.estimate.communication_arena") arena_owned = entry.owned_capacity_bytes;
+    if (entry.label.rfind("gravity.estimate.communication_arena.", 0) == 0) {
+      CHUI_REQUIRE(entry.owned_capacity_bytes == 0U);
+      logical_max = std::max(logical_max, entry.high_water_bytes);
+    }
+    if (entry.label == "gravity.estimate.communication_arena.pm_density_logical") {
       saw_pm_routing = true;
-      // Two reusable wire buffers, seven remote peers, 1024 bytes/peer.
-      CHUI_REQUIRE(entry.estimated_next_step_bytes == 2U * 7U * 1024U);
+      CHUI_REQUIRE(entry.high_water_bytes >= 2U * 7U * 1024U);
     }
   }
   CHUI_REQUIRE(saw_pm_routing);
+  CHUI_REQUIRE(arena_owned > 0U && arena_owned == logical_max);
   CHUI_REQUIRE(distributed_estimate.report.distributed.valid);
   CHUI_REQUIRE(distributed_estimate.report.distributed.rank_count == 8);
   CHUI_REQUIRE(distributed_estimate.report.distributed.global_sum_owned_bytes ==

@@ -120,5 +120,21 @@ int main() {
   checkExample(
       source_dir / "configs/release/release_smoke_isolated_galaxy.param.txt",
       cosmosim::core::SimulationMode::kIsolatedGalaxy);
+  {
+    // Measured fast TreePM continuation deck (docs/tree_pm_coupling.md).
+    const auto fast = cosmosim::core::loadFrozenConfigFromFile(
+        source_dir / "configs/treepm_evolved_snapshot_fast.param.txt");
+    const auto& n = fast.config.numerics;
+    assert(n.treepm_pm_grid_nx == 128 && n.treepm_pm_grid_ny == 128 && n.treepm_pm_grid_nz == 128);
+    assert(n.treepm_adaptive_acceptance_enabled);
+    assert(n.treepm_adaptive_error_estimator == cosmosim::core::TreePmAdaptiveErrorEstimator::kRelativeMonopole);
+    assert(n.treepm_cutoff_node_policy == cosmosim::core::TreePmCutoffNodePolicy::kComDistance);
+    assert(n.treepm_tree_relative_force_tolerance == 0.0025);
+    assert(n.treepm_adaptive_maximum_opening_angle == 1.0);
+    assert(n.hierarchical_max_rung == 0);
+    assert(n.treepm_group_walk_enabled);
+    assert(!n.treepm_leaf_simd_enabled && !n.treepm_full_residual_lookup_enabled);
+    (void)n;
+  }
   return 0;
 }

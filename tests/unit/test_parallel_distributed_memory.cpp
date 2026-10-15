@@ -2508,7 +2508,7 @@ void testEmptyCompactDmoRuntimeDecompositionSourceView() {
 
   constexpr std::uint32_t k_local_rank = 7U;
   cosmosim::core::SimulationState dmo;
-  assert(dmo.particles.empty());
+  assert(dmo.particles.size() == 0U);
   assert(dmo.compactHomogeneousDmoMetadata(k_local_rank));
   assert(dmo.hasHomogeneousDmoMetadata());
   assert(dmo.particle_sidecar.species_tag.empty());

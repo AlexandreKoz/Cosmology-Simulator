@@ -639,7 +639,13 @@ dump. No new parser or budget authority is introduced. **Validation pending.**
 | Key | Default | Authority / constraints |
 | --- | --- | --- |
 | `numerics.treepm_adaptive_acceptance_enabled` | `false` | Select adaptive relative residual accuracy plus independent guards; false retains strict reference policy. |
-| `numerics.treepm_adaptive_maximum_opening_angle` | `0.25` | Finite `(0,0.5]`; adaptive convergence safeguard, not the primary accuracy tolerance. This is an unqualified CHUI policy default. |
+| `numerics.treepm_adaptive_maximum_opening_angle` | `0.25` | Finite `(0,1]` (widened from `(0,0.5]` in the October 2026 TreePM campaign; existing values remain valid); adaptive convergence safeguard, not the primary accuracy tolerance. This is an unqualified CHUI policy default. |
+| `numerics.treepm_adaptive_error_estimator` | `residual_derivative` | `residual_derivative` (previous behavior: second-order screened-kernel derivative proxy) or `relative_monopole` (classic `G M l^2 <= alpha |a| r^4`, no per-node transcendental). Adaptive policy only. |
+| `numerics.treepm_cutoff_node_policy` | `contain` | `contain` (previous behavior: open every node straddling `r_cut`) or `com_distance` (evaluate a straddling node at its COM distance, zero beyond `r_cut`). Adaptive policy only; the strict reference always contains. |
+| `numerics.treepm_group_walk_enabled` | `false` | Opt-in group walk (one tree walk per leaf of targets, vectorized pair loop); requires `treepm_adaptive_acceptance_enabled = true`, `treepm_adaptive_error_estimator = relative_monopole`, `treepm_gaussian_pair_lookup_enabled = true`, leaf SIMD and full-residual lookup off. See `docs/tree_pm_coupling.md`. |
+| `numerics.hierarchical_coarse_displacement_criterion` | `max_speed_mesh` | `max_speed_mesh` (previous behavior: fastest particle with the largest total acceleration may move at most one PM cell/split length per coarse block) or `rms_split_scale` (mass-weighted RMS speed may move `factor x min(r_s, mean interparticle spacing)`). Hierarchical KDK only. |
+| `numerics.hierarchical_coarse_rms_displacement_factor` | `0.25` | Finite `(0,1]`; used only by `rms_split_scale`. |
+| `numerics.hierarchical_encounter_timestep_enabled` | `true` | Hierarchical KDK only. Adds the softened-encounter rung criterion `dt <= 0.2 sqrt(a^3 (r_nn^2+eps^2)^{3/2} / (G m_max))`, `r_nn` the nearest direct-pair separation from the synchronized Tree solve. `false` restores the acceleration-only rung criterion. See `docs/time_integration.md`. |
 | `numerics.treepm_identical_source_tree_reuse_enabled` | `false` | Exact generation/count/build/frame/ownership/row-identity match required. |
 | `numerics.treepm_topology_refit_enabled` | `false` | Certify every source inside its original leaf cell, fixed unwrap frame and row membership; rebuild on rejection. |
 | `parallel.decomposition_spatial_work_enabled` | `false` | Fixed periodic `cosmo_cube`, 64 bounded SFC bins; reference feedback retained when false. |
@@ -657,6 +663,15 @@ but strict workflow config-hash checks are retained: old normalized provenance
 is not silently treated as the new config. Qualification must establish an
 explicit fixture/config migration if needed. No config tests were added or run
 in this source-only campaign; they are required in the second campaign.
+
+### October 2026 additions: compatibility and measured accuracy
+
+All four keys above default to the previous behavior, so existing decks keep
+their numerical results; the normalized dump gains the new lines and the
+config hash changes accordingly. Measured total-force errors and timings of
+each combination (clustered 64^3 box, strict-reference comparison) are in
+`docs/tree_pm_coupling.md` ("Adaptive estimator and cutoff-node policy").
+`configs/production_dmo_fast.param.txt` collects the qualified fast settings.
 
 ## TreePM recovery controls (2026-10-10; qualification pending)
 

@@ -636,17 +636,29 @@ void verifyRestartRoundTripIfEnabled(SimulationState state, const TransformOracl
   for (const auto bin : state.particles.time_bin) {
     scheduler_max_bin = std::max(scheduler_max_bin, bin);
   }
+  for (const auto bin : state.cells.time_bin) {
+    scheduler_max_bin = std::max(scheduler_max_bin, bin);
+  }
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(scheduler_max_bin);
   scheduler.reset(static_cast<std::uint32_t>(state.particles.size()), 0, 0);
   for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(state.particles.size()); ++i) {
     scheduler.setElementBin(i, state.particles.time_bin[i], scheduler.currentTick());
   }
   cosmosim::core::syncTimeBinMirrorsFromScheduler(scheduler, state);
+  // Gas cells carry their own scheduler authority; restart payloads with cells
+  // must provide it, sharing the particle scheduler's current tick. It is
+  // seeded from the cell mirror the particle-scheduler sync just produced.
+  cosmosim::core::HierarchicalTimeBinScheduler gas_cell_scheduler(scheduler_max_bin);
+  gas_cell_scheduler.reset(static_cast<std::uint32_t>(state.cells.size()), 0, scheduler.currentTick());
+  for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(state.cells.size()); ++i) {
+    gas_cell_scheduler.setElementBin(i, state.cells.time_bin[i], scheduler.currentTick());
+  }
 
   cosmosim::io::RestartWritePayload payload;
   payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
+  payload.gas_cell_scheduler = state.cells.size() != 0U ? &gas_cell_scheduler : nullptr;
   payload.normalized_config_text = "schema_version = 1\n[mode]\nmode = zoom_in\n[fuzz]\nseed = fixed\n";
   payload.normalized_config_hash_hex = cosmosim::core::stableConfigHashHex(payload.normalized_config_text);
   state.metadata.run_name = "transform_fuzz_invariants";

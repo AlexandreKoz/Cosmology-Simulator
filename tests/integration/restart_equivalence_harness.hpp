@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -242,16 +243,34 @@ inline void advanceRuntimeStep(
   syncParticleTimeBinMirror(state, scheduler);
 }
 
+inline core::HierarchicalTimeBinScheduler makeRestartEquivalenceGasCellScheduler(
+    const core::SimulationState& state,
+    const core::HierarchicalTimeBinScheduler& particle_scheduler) {
+  if (state.cells.size() == particle_scheduler.elementCount()) {
+    return particle_scheduler;
+  }
+  core::HierarchicalTimeBinScheduler gas_cell_scheduler(particle_scheduler.maxBin());
+  gas_cell_scheduler.reset(
+      static_cast<std::uint32_t>(state.cells.size()), 0, particle_scheduler.currentTick());
+  for (std::uint32_t cell_index = 0; cell_index < state.cells.size(); ++cell_index) {
+    gas_cell_scheduler.setElementBin(
+        cell_index, state.cells.time_bin[cell_index], particle_scheduler.currentTick());
+  }
+  return gas_cell_scheduler;
+}
+
 inline io::RestartWritePayload makeRestartEquivalencePayload(
     const core::SimulationState& state,
     const core::IntegratorState& integrator_state,
     const core::HierarchicalTimeBinScheduler& scheduler,
     const io::OutputCadencePersistentState& output_state,
-    const io::StochasticPersistentState& stochastic_state) {
+    const io::StochasticPersistentState& stochastic_state,
+    const core::HierarchicalTimeBinScheduler* gas_cell_scheduler = nullptr) {
   io::RestartWritePayload payload;
   payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
+  payload.gas_cell_scheduler = gas_cell_scheduler;
   payload.normalized_config_text = "stage8_restart_equivalence_harness=1\n";
   payload.normalized_config_hash_hex = core::stableConfigHashHex(payload.normalized_config_text);
   payload.provenance = core::makeProvenanceRecord(payload.normalized_config_hash_hex, "restart_equivalence", 0, payload.normalized_config_text);
@@ -398,10 +417,21 @@ inline void compareSimulationState(
   requireAlignedNear(lhs.particles.velocity_y_peculiar, rhs.particles.velocity_y_peculiar, tolerances.velocity_abs, "vel_y");
   requireAlignedNear(lhs.particles.velocity_z_peculiar, rhs.particles.velocity_z_peculiar, tolerances.velocity_abs, "vel_z");
   requireAlignedNear(lhs.particles.mass_code, rhs.particles.mass_code, tolerances.scalar_abs, "mass");
-  requireAlignedExact(lhs.particles.time_bin, rhs.particles.time_bin, "time_bin mirror");
   requireAlignedExact(lhs.particle_sidecar.particle_id, rhs.particle_sidecar.particle_id, "particle_id");
-  requireAlignedExact(lhs.particle_sidecar.species_tag, rhs.particle_sidecar.species_tag, "species_tag");
-  requireAlignedExact(lhs.particle_sidecar.owning_rank, rhs.particle_sidecar.owning_rank, "owning_rank");
+  // Compact homogeneous-DMO states keep species, owner and time-bin mirrors as
+  // uniform metadata rather than lanes, while a restart reader may
+  // materialize them; equivalence is a statement about logical values.
+  for (std::size_t i = 0; i < lhs.particles.size(); ++i) {
+    if (lhs.particleTimeBin(i) != rhs.particleTimeBin(i)) {
+      failRestartEquivalence("time_bin mirror element " + std::to_string(i));
+    }
+    if (lhs.particleSpeciesTag(i) != rhs.particleSpeciesTag(i)) {
+      failRestartEquivalence("species_tag element " + std::to_string(i));
+    }
+    if (lhs.particleOwningRank(i) != rhs.particleOwningRank(i)) {
+      failRestartEquivalence("owning_rank element " + std::to_string(i));
+    }
+  }
   requireAlignedNear(lhs.particle_sidecar.gravity_softening_comoving, rhs.particle_sidecar.gravity_softening_comoving, tolerances.scalar_abs, "gravity_softening");
   requireAlignedExact(lhs.particle_sidecar.has_gravity_softening_override, rhs.particle_sidecar.has_gravity_softening_override, "has_gravity_softening_override");
   if (lhs.cells.size() != rhs.cells.size() || lhs.gas_cells.size() != rhs.gas_cells.size()) {
@@ -605,12 +635,21 @@ inline RestartEquivalenceResult runRestartEquivalenceScenario(RestartEquivalence
       scenario.step_kernel,
       &result.restarted_output_events);
 
+  // Restart payloads with gas cells must carry the authoritative gas-cell
+  // scheduler. The toy kernels advance cell bins in lockstep with the particle
+  // scheduler (syncParticleTimeBinMirror), so that scheduler is the authority
+  // the cell time_bin mirror was synced from.
+  std::optional<core::HierarchicalTimeBinScheduler> gas_cell_scheduler;
+  if (result.restarted_state.cells.size() != 0U) {
+    gas_cell_scheduler = makeRestartEquivalenceGasCellScheduler(result.restarted_state, restarted_scheduler);
+  }
   const io::RestartWritePayload payload = makeRestartEquivalencePayload(
       result.restarted_state,
       result.restarted_integrator_state,
       restarted_scheduler,
       result.restarted_output_cadence_state,
-      result.restarted_stochastic_state);
+      result.restarted_stochastic_state,
+      gas_cell_scheduler ? &*gas_cell_scheduler : nullptr);
   io::writeRestartCheckpointHdf5(scenario.restart_path, payload);
   const io::RestartReadResult readback = io::readRestartCheckpointHdf5(scenario.restart_path);
   result.restarted_state = readback.state;

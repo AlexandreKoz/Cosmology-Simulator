@@ -1,3 +1,4 @@
+#include <numeric>
 #include "../support/test_require.hpp"
 #include <cmath>
 #include <cstdint>
@@ -141,7 +142,7 @@ void testProductionHierarchicalDispatcherFreeDrift() {
   particles.setElementBin(1,1,0);particles.setElementBin(2,2,0);
   TransientStepWorkspace workspace;
   workspace.prepareGravityParticleIndexScratch(3);
-  workspace.gravity_particle_index_scratch={0,1,2};
+  std::iota(workspace.gravity_particle_index_scratch.begin(),workspace.gravity_particle_index_scratch.end(),0U);
   StepOrchestrator orchestrator;
   const auto generation=state.gravitySourceGeneration();
   unsigned drifts=0,refreshes=0,endpoint_outputs=0;
@@ -194,7 +195,7 @@ void testProductionHierarchicalDispatcherFreeDrift() {
   for (const auto tick:saved.next_activation_tick) CHUI_REQUIRE(tick==4U);
   for (const auto flag:saved.active_flag) CHUI_REQUIRE(flag==0U);
   // A duplicated/missing source row must fail before any next block mutates.
-  workspace.gravity_particle_index_scratch={0,0,2};
+  workspace.gravity_particle_index_scratch[0]=0;workspace.gravity_particle_index_scratch[1]=0;workspace.gravity_particle_index_scratch[2]=2;
   CHUI_REQUIRE(throwsWithContext([&] {
     orchestrator.executeHierarchicalBlockWithDispatcher(state,integrator,particles,cells,
         [](StepContext&,bool){},&background,workspace,nullptr);
@@ -223,7 +224,7 @@ void testProductionHierarchicalDispatcherRejectsMissingAndStalePmEpoch() {
     particles.reset(1, 0, 0); cells.reset(0, 0, 0);
     TransientStepWorkspace workspace;
     workspace.prepareGravityParticleIndexScratch(1);
-    workspace.gravity_particle_index_scratch = {0};
+    workspace.gravity_particle_index_scratch[0] = 0;
     StepOrchestrator orchestrator;
     bool injected = false;
     const auto dispatcher = [&](StepContext& context, bool) {

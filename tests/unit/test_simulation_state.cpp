@@ -438,9 +438,15 @@ int main() {
   assert(threw);
 
   state.particle_sidecar.particle_id[1] = state.particle_sidecar.particle_id[0];
+  state.notifyParticleIdentityMutation();
   assert(!state.validateUniqueParticleIds());
   state.particle_sidecar.particle_id[1] = 1001;
+  state.notifyParticleIdentityMutation();
   assert(state.validateUniqueParticleIds());
+  // Without notification an in-place rewrite would reuse the certificate.
+  assert(state.hasCertifiedUniqueParticleIds());
+  state.notifyParticleIdentityMutation();
+  assert(!state.hasCertifiedUniqueParticleIds());
 
   state.species.count_by_species = {3, 0, 2, 0, 0};
   assert(!state.validateOwnershipInvariants());

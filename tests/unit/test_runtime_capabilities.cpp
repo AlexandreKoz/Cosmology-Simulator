@@ -30,8 +30,10 @@ void testCapabilityTruth() {
          cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
   assert(report.require("fixed_global_timestep").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
+  // Source-implemented collisionless DMO block KDK; qualification pending
+  // (docs/time_integration.md), hence provisional rather than supported.
   assert(report.require("production_hierarchical_local_timestep").status ==
-         cosmosim::workflows::RuntimeCapabilityStatus::kUnsupported);
+         cosmosim::workflows::RuntimeCapabilityStatus::kProvisional);
   assert(report.require("production_hydro_cooling").status ==
          cosmosim::workflows::RuntimeCapabilityStatus::kSupported);
   assert(report.require("production_hydro_cooling").active == config.physics.enable_cooling);
@@ -64,20 +66,18 @@ void testCapabilityTruth() {
 #endif
   cosmosim::workflows::validateRequestedRuntimeCapabilities(config, report);
 
+  // Provisional hierarchical KDK is runtime-available, so requesting it is
+  // accepted (its maturity is reported, not rejected).
   config.numerics.hierarchical_max_rung = 1;
-  bool threw = false;
-  try {
-    cosmosim::workflows::validateRequestedRuntimeCapabilities(config, report);
-  } catch (const std::invalid_argument&) {
-    threw = true;
-  }
-  assert(threw);
+  assert(report.require("production_hierarchical_local_timestep").runtime_available);
+  cosmosim::workflows::validateRequestedRuntimeCapabilities(config, report);
+  config.numerics.hierarchical_max_rung = 0;
 
   auto bh_seeding = cosmosim::core::makeUnvalidatedSimulationConfigForTests();
   bh_seeding.physics.enable_black_hole_agn = true;
   bh_seeding.physics.bh_enable_seeding = true;
   const auto bh_report = cosmosim::workflows::buildRuntimeCapabilityReport(bh_seeding);
-  threw = false;
+  bool threw = false;
   try {
     cosmosim::workflows::validateRequestedRuntimeCapabilities(bh_seeding, bh_report);
   } catch (const std::invalid_argument&) {

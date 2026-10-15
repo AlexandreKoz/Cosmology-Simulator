@@ -106,6 +106,16 @@ class GravityRuntime : public GravityAccelerationProvider,
   virtual void importRestartForceCache(
       const io::GravityForceCachePersistentState& cache,
       const core::SimulationState& state) = 0;
+  // Hierarchical KDK endpoint reuse (rank-local; callers agree collectively).
+  // True when the last all-active synchronization endpoint left Tree and PM
+  // split components for every row at the current source positions, with PM
+  // from the integrator's committed field version: the next block may open
+  // with these forces instead of re-evaluating at the same positions.
+  [[nodiscard]] virtual bool hierarchicalEndpointForceReusable(
+      const core::SimulationState& state, const core::IntegratorState& integrator) const = 0;
+  // Per-row squared nearest direct-pair separation from the latest Tree
+  // solve (+infinity: none inside r_cut). Empty outside hierarchical KDK.
+  [[nodiscard]] virtual std::span<const double> hierarchicalNearestPairR2() const noexcept = 0;
 
 };
 

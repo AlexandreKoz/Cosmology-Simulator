@@ -26,6 +26,9 @@
 #include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/device_buffer.hpp"
 #include "cosmosim/gravity/tree_pm_split_kernel.hpp"
+#if COSMOSIM_HAVE_OPENMP
+#include <omp.h>
+#endif
 #if COSMOSIM_ENABLE_CUDA
 #include <cuda_runtime.h>
 #include "cosmosim/gravity/pm_cuda_kernels.hpp"
@@ -45,6 +48,20 @@ namespace cosmosim::gravity {
 namespace {
 
 constexpr double k_pi = 3.141592653589793238462643383279502884;
+
+#if COSMOSIM_ENABLE_FFTW
+// Threaded FFTW (libfftw3_omp) when linked: each plan uses the OpenMP team
+// size current at plan creation. fftw_init_threads must precede every other
+// FFTW call, including fftw_mpi_init, and is process-global and idempotent.
+// Transforms stay deterministic for a fixed plan rigor and thread count; a
+// different thread count may change results at round-off level.
+void configureFftwPlannerThreads() {
+#if COSMOSIM_FFTW_THREADS && COSMOSIM_HAVE_OPENMP
+  static const bool k_threads_ready = fftw_init_threads() != 0;
+  if (k_threads_ready) fftw_plan_with_nthreads(std::max(1, omp_get_max_threads()));
+#endif
+}
+#endif
 
 #if COSMOSIM_ENABLE_MPI
 [[nodiscard]] std::string pmMpiErrorText(int error_code) {
@@ -1104,6 +1121,7 @@ struct PmPlanLocalStorageLayout {
           "PM slab layout world metadata must match active MPI_COMM_WORLD for distributed FFT storage");
     }
 
+    configureFftwPlannerThreads();
     fftw_mpi_init();
     ptrdiff_t backend_local_nx = 0;
     ptrdiff_t backend_begin_x = 0;
@@ -1781,6 +1799,7 @@ class PmSolver::Impl {
     m_isolated_workspace.dz = 0.0;
     m_isolated_workspace.split_scale = -1.0;
 #if COSMOSIM_ENABLE_FFTW
+    configureFftwPlannerThreads();
     m_isolated_workspace.forward_plan = fftw_plan_dft_3d(
         static_cast<int>(nx),
         static_cast<int>(ny),
@@ -1905,6 +1924,7 @@ class PmSolver::Impl {
 #endif
 #if COSMOSIM_ENABLE_MPI
     if (layout.world_size > 1) {
+      configureFftwPlannerThreads();
       plan.forward_plan = fftw_mpi_plan_dft_r2c_3d(
           static_cast<ptrdiff_t>(m_shape.nx),
           static_cast<ptrdiff_t>(m_shape.ny),
@@ -1942,6 +1962,7 @@ class PmSolver::Impl {
       plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
+      configureFftwPlannerThreads();
       plan.forward_plan = fftw_plan_dft_r2c_3d(
           static_cast<int>(m_shape.nx),
           static_cast<int>(m_shape.ny),

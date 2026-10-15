@@ -2613,3 +2613,20 @@ Implementation-only campaign over the existing worktree (P1/P2/P3 retained). Val
 - Validation/testing intentionally deferred by user request.
 - No production qualification or measured speedup claim is made by this campaign.
 - Reproducibility: no config keys, no snapshot/restart schema, no solver numerics (opening_theta, MAC, cutoff, split scale, softening, PM mesh/TSC/cadence) changed; production rebalance call path switched to the compact planner with identical cut/MPI protocol semantics.
+
+## 2026-10-15 — TreePM performance campaign
+
+### Changes applied
+
+Tree-ordered TreePM residual traversal, optional threaded FFTW, adaptive
+`relative_monopole` estimator and `com_distance` cutoff-node policy (opt-in),
+hierarchical `rms_split_scale` coarse criterion (opt-in) with coarse-limiter
+diagnostics, post-bootstrap governor reconcile (B-10 site), Open MPI hybrid
+placement in `chui`, measurement tooling, fast continuation deck, and repairs
+of stale tests that no longer compiled or ran.
+
+### Validation status
+
+Compiled and tested in this session (`cpu-only-debug` full CTest,
+`pm-hdf5-fftw-debug` gravity/hierarchical gates, Release benchmark accuracy
+matrix). Exact results: [campaign record](repair/treepm_performance_campaign_20261015.md).

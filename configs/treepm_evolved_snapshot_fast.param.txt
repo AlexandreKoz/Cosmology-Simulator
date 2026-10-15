@@ -1,0 +1,96 @@
+# Fast evolved-state continuation from snap_1698 to z=0 (global KDK).
+# Same IC bridge as treepm_evolved_snapshot_replay.param.txt; verify the
+# snap_1698 header/Units/manifest before use. NOT an exact checkpoint restart.
+# TreePM settings are the measured 128^3 / relative_monopole / com_distance /
+# alpha=0.0025 / angle 1.0 row of docs/tree_pm_coupling.md (total-force error
+# rms 2.1e-4, p99 6.0e-4 on the clustered 64^3 fixture; tree 1.70 s + PM 0.19 s
+# per force on 4 threads, versus 11.9 s for the previous deck settings).
+# The group walk (one tree walk per leaf of targets, vectorized pair loop)
+# lowers the tree time to ~1.1 s and the total-force error to rms 1.5e-4.
+# Hierarchical KDK stays off: enable it only after the qualification run in
+# docs/time_integration.md (hierarchical_max_rung >= 4 together with
+# hierarchical_coarse_displacement_criterion = rms_split_scale).
+# Launch: OMP_NUM_THREADS=4 ./chui run configs/treepm_evolved_snapshot_fast.param.txt --preset <mpi-hdf5-fftw-release preset>
+schema_version = 1
+
+[units]
+length_unit = mpc
+mass_unit = msun
+velocity_unit = km_s
+coordinate_frame = comoving
+
+[mode]
+mode = cosmo_cube
+ic_file = ../ics/snap_1698.hdf5
+ic_convention = gadget_arepo_bridge_v1
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e22
+ic_bridge_source_mass_unit_to_si = 1.98847e30
+ic_bridge_source_velocity_unit_to_si = 1000
+ic_bridge_coordinate_frame = comoving
+ic_bridge_velocity_convention = gadget_arepo_stored_peculiar
+ic_bridge_length_hubble_exponent = -1
+ic_bridge_length_scale_factor_exponent = 0
+ic_bridge_mass_hubble_exponent = -1
+ic_bridge_mass_scale_factor_exponent = 0
+ic_bridge_velocity_hubble_exponent = 0
+ic_bridge_velocity_scale_factor_exponent = 0
+ic_chunk_particle_count = 65536
+ic_staging_particle_count = 65536
+
+[cosmology]
+omega_matter = 0.3099
+omega_lambda = 0.6901
+omega_baryon = 0.0488911
+hubble_param = 0.67742
+box_size = 14.761890702961235 mpc
+
+[numerics]
+a_begin = 0.76366757582395572
+z_begin = 0.30947028741013982
+a_end = 1
+integrator_time_variable = scale_factor
+max_global_steps = 1000000
+hierarchical_max_rung = 0
+gravity_solver = treepm
+gravity_softening = 15 kpc
+treepm_pm_grid = 128
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 6.25
+treepm_assignment_scheme = tsc
+treepm_enable_window_deconvolution = true
+treepm_tree_opening_criterion = com_distance
+treepm_tree_opening_theta = 0.7
+treepm_tree_relative_force_tolerance = 0.0025
+treepm_adaptive_acceptance_enabled = true
+treepm_adaptive_maximum_opening_angle = 1.0
+treepm_adaptive_error_estimator = relative_monopole
+treepm_cutoff_node_policy = com_distance
+treepm_group_walk_enabled = true
+treepm_full_mac_diagnostics = false
+treepm_gaussian_pair_lookup_enabled = true
+treepm_full_residual_lookup_enabled = false
+treepm_leaf_simd_enabled = false
+treepm_radial_coefficients_enabled = false
+treepm_identical_source_tree_reuse_enabled = false
+treepm_topology_refit_enabled = false
+treepm_residual_block_size = 64
+treepm_tree_max_leaf_size = 16
+
+[physics]
+enable_cooling = false
+enable_star_formation = false
+enable_feedback = false
+enable_stellar_evolution = false
+enable_black_hole_agn = false
+enable_tracers = false
+enable_metal_diffusion = false
+
+[parallel]
+mpi_ranks_expected = 1
+omp_threads = 4
+process_memory_budget_bytes = 51539607552
+
+[output]
+run_name = treepm_snapshot_fast_to_z0
+snapshot_interval_steps = 128
+write_restarts = true

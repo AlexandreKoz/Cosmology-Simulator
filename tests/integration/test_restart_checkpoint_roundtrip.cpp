@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -433,7 +434,8 @@ void testRestartRoundtrip() {
 
   cosmosim::io::GravityForceCachePersistentState force_cache;
   force_cache.valid = true;
-  force_cache.particle_id = state.particle_sidecar.particle_id;
+  force_cache.particle_id.assign(
+      state.particle_sidecar.particle_id.begin(), state.particle_sidecar.particle_id.end());
   force_cache.gas_cell_id = gasCellIdsByDenseRow(state);
   force_cache.particle_accel_x_comoving.resize(state.particles.size());
   force_cache.particle_accel_y_comoving.resize(state.particles.size());
@@ -451,7 +453,44 @@ void testRestartRoundtrip() {
     force_cache.cell_accel_y_comoving[cidx] = -1.5 - static_cast<double>(cidx);
     force_cache.cell_accel_z_comoving[cidx] = 2.0 + 0.25 * static_cast<double>(cidx);
   }
+  // v24 hierarchical synchronized endpoint, including a +inf nearest-pair
+  // entry (target without a direct pair inside r_cut).
+  force_cache.hierarchical_endpoint_valid = true;
+  force_cache.hierarchical_pm_field_version = 7U;
+  const std::size_t particle_count = state.particles.size();
+  for (auto* lane : {&force_cache.hierarchical_tree_accel_x_comoving, &force_cache.hierarchical_tree_accel_y_comoving,
+                     &force_cache.hierarchical_tree_accel_z_comoving, &force_cache.hierarchical_pm_accel_x_comoving,
+                     &force_cache.hierarchical_pm_accel_y_comoving, &force_cache.hierarchical_pm_accel_z_comoving,
+                     &force_cache.hierarchical_nearest_pair_r2_comoving}) {
+    lane->resize(particle_count);
+  }
+  for (std::size_t pidx = 0; pidx < particle_count; ++pidx) {
+    const double row = static_cast<double>(pidx);
+    force_cache.hierarchical_tree_accel_x_comoving[pidx] = 0.0625 + row;
+    force_cache.hierarchical_tree_accel_y_comoving[pidx] = -0.125 - row;
+    force_cache.hierarchical_tree_accel_z_comoving[pidx] = 0.25 + 0.5 * row;
+    force_cache.hierarchical_pm_accel_x_comoving[pidx] = 0.0625;
+    force_cache.hierarchical_pm_accel_y_comoving[pidx] = -0.125;
+    force_cache.hierarchical_pm_accel_z_comoving[pidx] = 0.25;
+    force_cache.hierarchical_nearest_pair_r2_comoving[pidx] =
+        pidx == 0U ? std::numeric_limits<double>::infinity() : 1.0e-4 * (row + 1.0);
+  }
   payload.gravity_force_cache = &force_cache;
+
+  // An invalid endpoint must not carry stale lanes.
+  {
+    cosmosim::io::GravityForceCachePersistentState stale = force_cache;
+    stale.hierarchical_endpoint_valid = false;
+    cosmosim::io::RestartWritePayload stale_payload = payload;
+    stale_payload.gravity_force_cache = &stale;
+    bool stale_endpoint_rejected = false;
+    try {
+      (void)cosmosim::io::restartPayloadIntegrityHash(stale_payload);
+    } catch (const std::invalid_argument& error) {
+      stale_endpoint_rejected = std::string(error.what()).find("hierarchical endpoint") != std::string::npos;
+    }
+    CHUI_REQUIRE(stale_endpoint_rejected);
+  }
 
   const std::filesystem::path checkpoint_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_roundtrip.hdf5");
@@ -495,6 +534,22 @@ void testRestartRoundtrip() {
          force_cache.cell_accel_y_comoving);
   CHUI_REQUIRE(restored.gravity_force_cache.cell_accel_z_comoving ==
          force_cache.cell_accel_z_comoving);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_endpoint_valid);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_pm_field_version == 7U);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_tree_accel_x_comoving ==
+         force_cache.hierarchical_tree_accel_x_comoving);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_tree_accel_y_comoving ==
+         force_cache.hierarchical_tree_accel_y_comoving);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_tree_accel_z_comoving ==
+         force_cache.hierarchical_tree_accel_z_comoving);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_pm_accel_x_comoving ==
+         force_cache.hierarchical_pm_accel_x_comoving);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_pm_accel_y_comoving ==
+         force_cache.hierarchical_pm_accel_y_comoving);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_pm_accel_z_comoving ==
+         force_cache.hierarchical_pm_accel_z_comoving);
+  CHUI_REQUIRE(restored.gravity_force_cache.hierarchical_nearest_pair_r2_comoving ==
+         force_cache.hierarchical_nearest_pair_r2_comoving);
 
   CHUI_REQUIRE(restored.state.validateOwnershipInvariants());
   cosmosim::core::debugAssertGasCellIdentityContract(restored.state);

@@ -101,7 +101,7 @@ struct RuntimeEvent {
 class ProfilerSession {
  public:
   using Clock = std::chrono::steady_clock;
-  static constexpr std::size_t k_recent_event_limit = 256U;
+  static constexpr std::size_t k_recent_event_limit = 4096U;
 
   explicit ProfilerSession(bool enabled = false);
 

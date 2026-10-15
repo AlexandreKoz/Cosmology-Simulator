@@ -106,6 +106,12 @@ struct SolverProfile {
   bool accuracy_certified = false;
   cosmosim::gravity::TreePmAcceptancePolicy acceptance_policy = cosmosim::gravity::TreePmAcceptancePolicy::kStrictReference;
   bool gaussian_pair_lookup_enabled = false;
+  cosmosim::gravity::TreePmAdaptiveErrorEstimator adaptive_error_estimator =
+      cosmosim::gravity::TreePmAdaptiveErrorEstimator::kResidualDerivative;
+  cosmosim::gravity::TreePmCutoffNodePolicy cutoff_node_policy =
+      cosmosim::gravity::TreePmCutoffNodePolicy::kContainNode;
+  double adaptive_maximum_opening_angle = 0.25;
+  bool group_walk_enabled = false;
 };
 
 struct ErrorMetrics {
@@ -495,6 +501,10 @@ void validateFixture(const ParticleFixture& fixture) {
   // non-certifying bounded cutoff.
   options.acceptance_policy = solver_profile.acceptance_policy;
   options.gaussian_pair_lookup_enabled = solver_profile.gaussian_pair_lookup_enabled;
+  options.adaptive_error_estimator = solver_profile.adaptive_error_estimator;
+  options.cutoff_node_policy = solver_profile.cutoff_node_policy;
+  options.adaptive_maximum_opening_angle = solver_profile.adaptive_maximum_opening_angle;
+  options.group_walk_enabled = solver_profile.group_walk_enabled;
   options.full_mac_diagnostics = false;
   options.tree_options.opening_theta = solver_profile.opening_theta;
   options.tree_options.opening_criterion = solver_profile.opening_criterion;
@@ -1093,12 +1103,56 @@ void testTreePmAgainstIndependentEwald(bool recovery_qualification) {
         runAndRecord(fixture,ewald_reference,candidate,measure_translation,&results);
 #if COSMOSIM_ENABLE_FFTW
         requirePhysicalInvariants(results.back());
-        if (fixture.label == "quasi_uniform_cubic") {
+        // Coverage gate on the clustered fixture: with the FFTW 32^3 mesh,
+        // r_cut = 6.25/32 is below every separation of the 24-point
+        // quasi-uniform set, which therefore never reaches a leaf pair.
+        if (fixture.label == "two_cluster_cubic") {
           requireOrThrow(results.back().profile.tree_profile.particle_particle_interactions > 0U,
               candidate.label + ": qualification must exercise direct pairs (including the selected lookup)");
         }
         requireOrThrow(meetsAccuracyTarget(results.back()), candidate.label + '/' + fixture.label +
             ": experimental recovery qualification failed unchanged Ewald accuracy target");
+#endif
+      }
+      // Production fast deck (configs/treepm_evolved_snapshot_fast.param.txt):
+      // adaptive relative_monopole + com_distance, alpha 0.0025, angle 1.0,
+      // Gaussian lookup, held to the same unchanged Ewald targets.
+      {
+        auto fast=certified_profile;
+        fast.label="recovery_adaptive_monopole_com_distance";
+        fast.accuracy_certified=false;
+        fast.acceptance_policy=cosmosim::gravity::TreePmAcceptancePolicy::kAdaptiveRelative;
+        fast.adaptive_error_estimator=cosmosim::gravity::TreePmAdaptiveErrorEstimator::kRelativeMonopole;
+        fast.cutoff_node_policy=cosmosim::gravity::TreePmCutoffNodePolicy::kComDistance;
+        fast.adaptive_maximum_opening_angle=1.0;
+        fast.relative_force_tolerance=0.0025;
+        fast.gaussian_pair_lookup_enabled=true;
+        fast.supply_converged_reference_force_scale=true;
+        runAndRecord(fixture,ewald_reference,fast,measure_translation,&results);
+#if COSMOSIM_ENABLE_FFTW
+        requirePhysicalInvariants(results.back());
+        requireOrThrow(meetsAccuracyTarget(results.back()), fast.label + '/' + fixture.label +
+            ": production fast profile failed unchanged Ewald accuracy target");
+#endif
+      }
+      {
+        // Same profile with the opt-in group walk (shared interaction lists).
+        auto grouped=certified_profile;
+        grouped.label="recovery_adaptive_monopole_com_distance_group_walk";
+        grouped.accuracy_certified=false;
+        grouped.acceptance_policy=cosmosim::gravity::TreePmAcceptancePolicy::kAdaptiveRelative;
+        grouped.adaptive_error_estimator=cosmosim::gravity::TreePmAdaptiveErrorEstimator::kRelativeMonopole;
+        grouped.cutoff_node_policy=cosmosim::gravity::TreePmCutoffNodePolicy::kComDistance;
+        grouped.adaptive_maximum_opening_angle=1.0;
+        grouped.relative_force_tolerance=0.0025;
+        grouped.gaussian_pair_lookup_enabled=true;
+        grouped.supply_converged_reference_force_scale=true;
+        grouped.group_walk_enabled=true;
+        runAndRecord(fixture,ewald_reference,grouped,measure_translation,&results);
+#if COSMOSIM_ENABLE_FFTW
+        requirePhysicalInvariants(results.back());
+        requireOrThrow(meetsAccuracyTarget(results.back()), grouped.label + '/' + fixture.label +
+            ": group-walk fast profile failed unchanged Ewald accuracy target");
 #endif
       }
     }

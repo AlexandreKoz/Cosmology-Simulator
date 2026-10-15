@@ -723,3 +723,21 @@ negative categories (completion, member identity/counts, units, masses, lanes,
 IDs and checkpoint refusal). Missing Python packages are an explicit skip.
 All new/changed gates are **NOT RUN — deferred by user**. See the
 [repair report and manual matrix](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md).
+
+## TreePM fast-settings qualification (October 2026)
+
+Force level (done, synthetic clustered 64^3 box): total-force error quantiles
+of every adaptive estimator / cutoff-node / alpha / PM-grid combination
+against the strict reference on the same mesh (`docs/tree_pm_coupling.md`).
+Acceptance used for the fast deck: rms <= 3e-4, p99 <= 1e-3.
+
+Still required before calling the fast deck or hierarchical `rms_split_scale`
+production-qualified:
+
+1. The same force comparison on `snap_1698` (real clustering, real softening).
+2. Matched-scale-factor trajectory comparison (positions/velocities by ID) of
+   the fast deck against the strict reference deck over the snap_1698 -> z=0
+   continuation, plus P(k) and halo mass function at z=0.
+3. Hierarchical: `rms_split_scale` with `hierarchical_max_rung` 4 and 6 versus
+   global KDK at matched scale factors (same diagnostics), restart equivalence
+   and the existing `validation_hierarchical_dmo_growth_*` gates.

@@ -200,3 +200,14 @@ other metadata preserves a present mirror; compaction releases an all-zero bin
 lane. Scheduler remains authoritative. Restart v23 writes the existing logical
 time_bin dataset from the mirror or streamed implicit zero. Rung-zero compact
 state and migration retain their existing zero-cold-owner path.
+
+## Particle identity validation certificate (October 2026 note)
+
+`SimulationState::validateUniqueParticleIds()` and
+`validatePersistentParticleIds()` cache a certificate keyed by the particle
+identity generation and count. Resize, reorder, compaction and migration
+commits bump that generation. Code that rewrites
+`particle_sidecar.particle_id` in place without such a commit must call
+`SimulationState::notifyParticleIdentityMutation()` so the cached certificate
+is not reused for the mutated lane. Production writers (black-hole seeding,
+star formation) append through `resizeParticles`, which already invalidates.

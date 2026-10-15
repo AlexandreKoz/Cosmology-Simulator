@@ -1,5 +1,132 @@
 # TreePM coupling
 
+## Residual traversal locality — October 2026
+
+Leaves address contiguous ranges of `TreeMortonOrdering::sorted_particle_index`.
+Each residual evaluation now gathers the caller-owned wrapped source positions
+and masses into tree order (`treepm.tree_ordered_source_*` lanes) and visits
+local active targets in tree order (`treepm.target_visit_order`). Leaf pairs
+therefore read sequential memory instead of gathering through the sorted index,
+and consecutive targets in a block share node cache lines.
+
+- The lanes are derived scratch regathered on every evaluation (O(N), a few
+  milliseconds at 262k sources); they are never authoritative, persisted or
+  reused across source generations. SimulationState rows are not permuted, so
+  ownership, restart, migration and force-cache contracts are unaffected.
+- Per-target walk order and per-target summation order are unchanged; each
+  active slot keeps exactly one writer. Forces are bitwise identical to the
+  previous traversal (verified on 4096 targets of a clustered 64^3 box).
+  Only block-ordered floating diagnostics (sum of squares) change order.
+- Memory: 4 doubles + 2 uint32 per local source (the second is the optional
+  group-walk leaf map) and 1 uint32 per target,
+  reported in the TreePM memory report and in
+  `gravity.estimate.treepm_tree_ordered_source_lanes`.
+- Measured (clustered 64^3 box, 64^3 PM, adaptive alpha=0.005, 4 threads):
+  residual traversal 11.9 s -> 5.9 s with identical pair counts.
+
+## Adaptive estimator and cutoff-node policy — October 2026
+
+Two adaptive-policy options (typed config keys in `docs/configuration.md`):
+
+- `adaptive_error_estimator = relative_monopole` accepts a node when
+  `G M l^2 <= alpha |a_previous| r^4`, the leading monopole truncation scale,
+  without the derivative proxy. The derivative proxy charges second-order terms
+  that accepted quadrupoles have already removed (about 9 times the monopole
+  term for `f ~ r^-3`) and costs one `erf`/`exp` per tested node. With valid
+  history the COM-center offset is not computed. Neither estimator is a bound;
+  alpha is calibrated by the measured errors below.
+- `cutoff_node_policy = com_distance` lets a node that straddles `r_cut` reach
+  the MAC; an accepted straddling node is evaluated at its COM distance and is
+  skipped when that distance exceeds `r_cut`. Mass inside an accepted node
+  beyond `r_cut` then feeds the residual kernel untruncated, where the residual
+  is the Gaussian tail (`F_SR(r_cut=5 r_s) ~ 6e-3` of Newtonian). `contain`
+  keeps the previous opening-to-leaves behavior.
+- `adaptive_maximum_opening_angle` may now be up to 1.0.
+
+The strict reference policy ignores both options. Defaults reproduce the
+previous behavior exactly.
+
+Measured on the synthetic clustered 64^3 box
+(`tools/generate_clustered_dmo_box.py`, 10 length units, epsilon 0.005,
+random row order) with `bench_tree_pm_sweep`, Release `-O3 -march=native`,
+4 OpenMP threads, same-snapshot bootstrap history, Gaussian pair lookup,
+leaf 16, block 64. Errors are |a - a_ref|/|a_ref| of the TOTAL Tree+PM force
+over 4096 targets, against the strict reference policy on the same mesh
+(so split/mesh error is excluded). Times are one force evaluation.
+
+| PM | Estimator | Cutoff nodes | alpha | max angle | Tree s | PM s | pairs/target | rms err | p99 err | max err |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | residual_derivative | contain | 0.005 | 0.5 | 6.05 | 0.10 | 2740 | 3.1e-5 | 1.0e-4 | 1.3e-4 |
+| 64 | relative_monopole | contain | 0.005 | 0.5 | 4.72 | 0.10 | 2026 | 1.6e-4 | 4.8e-4 | 7.0e-4 |
+| 64 | relative_monopole | com_distance | 0.005 | 1.0 | 1.89 | 0.10 | 769 | 5.3e-4 | 1.3e-3 | 4.5e-3 |
+| 64 | relative_monopole | com_distance | 0.0025 | 1.0 | 2.56 | 0.14 | 1039 | 2.7e-4 | 7.2e-4 | 2.5e-3 |
+| 64 | relative_monopole | com_distance | 0.01 | 1.0 | 2.07* | 0.29* | 566 | 1.0e-3 | 2.7e-3 | 7.1e-3 |
+| 128 | residual_derivative | contain | 0.005 | 0.5 | 3.92 | 0.18 | 1897 | 2.8e-5 | 9.8e-5 | 1.5e-4 |
+| 128 | relative_monopole | contain | 0.005 | 0.5 | 3.12 | 0.19 | 1481 | 1.4e-4 | 4.7e-4 | 7.1e-4 |
+| 128 | relative_monopole | com_distance | 0.005 | 1.0 | 1.32 | 0.20 | 535 | 4.0e-4 | 1.2e-3 | 4.6e-3 |
+| 128 | relative_monopole | com_distance | 0.0025 | 1.0 | 1.70 | 0.19 | 737 | 2.1e-4 | 6.0e-4 | 2.5e-3 |
+| 128 | relative_monopole | com_distance | 0.01 | 1.0 | 1.11 | 0.22 | 389 | 7.3e-4 | 2.3e-3 | 6.3e-3 |
+
+`*` measured while a compiler job shared the cores; pair counts are exact.
+Before the locality change the first row took 11.9 s. The production deck
+`configs/treepm_evolved_snapshot_fast.param.txt` uses the 128^3 /
+relative_monopole / com_distance / alpha 0.0025 / angle 1.0 row. These are
+force-accuracy results on one synthetic workload; trajectory, growth and
+power-spectrum qualification of the selected settings remain separate gates.
+
+## Group walk — October 2026 (opt-in)
+
+`TreePmOptions::group_walk_enabled` / `numerics.treepm_group_walk_enabled`
+(default false) walks the tree once per group instead of once per target. A
+group is the run of active targets, in tree-order visit sequence and within one
+residual block, that lie in the same tree leaf (at most `max_leaf_size`).
+
+Group-conservative acceptance (`src/gravity/internal/tree_pm_group_walk.hpp`):
+
+- prune a node when the minimum distance between its AABB and the group AABB
+  exceeds `r_cut`;
+- open a node whose AABB touches the group AABB (no target may lie inside an
+  accepted node), and under `contain` a node not entirely within `r_cut` of
+  every group point;
+- accept a node only if `G M l^2 <= alpha a_min r_min^4` and
+  `l < theta_max r_min`, with `r_min` the distance from the node COM to the
+  group AABB (a lower bound on every target's COM distance) and `a_min` the
+  smallest previous-acceleration magnitude in the group.
+
+Every target therefore meets the per-target `relative_monopole` criterion with
+margin, and the measured error decreases. Accepted multipoles are evaluated
+per target exactly as in the per-target walk (including the `com_distance`
+zero beyond `r_cut`). Accepted leaves become tree-order source ranges, merged
+when contiguous, and are evaluated by a branch-free pair loop over the
+tree-ordered lanes with the Gaussian Hermite table (AVX2 gathers); the
+compiler vectorizes it (`#pragma omp simd`). A Chebyshev/Estrin polynomial
+alternative was measured slower on the reference CPU and was not kept.
+
+Eligibility: adaptive policy, `relative_monopole`, Gaussian pair lookup,
+uniform softening, local (non-distributed) residual path, leaf SIMD and
+full-residual lookup off, no spatial work history, and
+`(r_cut / 2 r_s)^2 < 63` (table range). Typed config rejects enabling it
+without those settings. At run time a group falls back to the per-target walk
+(before any accumulation) when a target has non-uniform softening, missing or
+sub-floor force history (first evaluation), or periodic coordinates outside
+the certified bounds; isolated/open boundaries therefore always fall back.
+
+Differences from the per-target walk: summation order (not bitwise
+reproducible against it), coincident distinct pairs are not counted in
+`direct_pair_evaluations`, and pairs/target rise while node visits fall.
+
+Measured (same clustered 64^3 box and settings as the table above, 128^3 PM,
+alpha 0.0025, angle 1.0, `com_distance`, 4 threads):
+
+| Walk | Tree s | pairs/target | nodes/target | rms err | p99 err | max err |
+|---|---|---|---|---|---|---|
+| per target | 1.44 | 737 | 351 | 2.1e-4 | 6.0e-4 | 2.5e-3 |
+| group (leaf 16) | 1.06–1.11 | 947 | 102 | 1.5e-4 | 4.4e-4 | 2.5e-3 |
+
+Leaf 32 groups cost more (1.5 s, 1605 pairs/target); leaf 8 matches leaf 16.
+The recovery Ewald qualification gates the group-walk fast profile against the
+unchanged Ewald targets on all five fixtures.
+
 ## Attempt 1 recovery interfaces — 20261012
 
 The [implementation handoff](repair/treepm_deep_hotpath_attempt1_closure_20261012.md)
@@ -248,7 +375,8 @@ versioned little-endian records rather than raw C++ object representations.
 Protocol identity covers source/destination rank, exchange sequence, strong
 decomposition/source/tree/force identities at the serialization boundary, batch
 token, request/target identity, target geometry/softening, previous-force-scale
-presence, and returned acceleration components.
+presence, returned acceleration components and (wire v2) the nearest
+direct-pair separation squared.
 
 The compact top-level domain cache is reusable only when every rank agrees that
 its decomposition epoch, gravity source generation, and local tree-build
@@ -621,16 +749,18 @@ target-softening allocation is retained or admitted.
 ```text
 b = floor(B / 96)                    # targets per peer per batch
 d = max(R - 1, 0)                    # peer rounds
-M_wire = 2 * d * b * (96 + 80)       # request + response payloads
+M_wire = 2 * d * b * (96 + 88)       # request + response payloads
 known  = wire
        + structured request storage
        + count/mask/accumulator/metadata terms
-       + transient codec workspace b * (2*(96+80)+24)
+       + transient codec workspace b * (2*(96+88)+24)
 ```
 
 Wire record widths are the shared public constants
 `kTreePmShortRangeRequestWireBytes = 96` and
-`kTreePmShortRangeResponseWireBytes = 80`. Host `sizeof` of the request/response
+`kTreePmShortRangeResponseWireBytes = 88` (wire v2: the response appends the
+serving rank's nearest direct-pair separation squared, `+inf` when none, for the
+hierarchical encounter timestep criterion; it was 80 in wire v1). Host `sizeof` of the request/response
 packet structs equals these widths, and that identity is compile-time enforced
 by `static_assert` next to the packet definitions in `tree_pm_coupling.cpp`;
 if a supported ABI ever pads the structs, the build fails rather than letting

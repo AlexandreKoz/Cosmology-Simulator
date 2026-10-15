@@ -63,6 +63,22 @@ constexpr RuntimeEpochField k_state_stage_epochs =
   return stream.str();
 }
 
+// Rank-local rung histogram "n0,n1,...,nmax" of the committed assignment.
+[[nodiscard]] std::string formatBinOccupancy(
+    const core::HierarchicalTimeBinScheduler& scheduler, std::span<const std::uint32_t> rows) {
+  std::vector<std::uint64_t> counts(static_cast<std::size_t>(scheduler.maxBin()) + 1U, 0U);
+  for (const auto row : rows) {
+    const auto bin = static_cast<std::size_t>(scheduler.binIndex(row));
+    if (bin < counts.size()) ++counts[bin];
+  }
+  std::string text;
+  for (std::size_t bin = 0; bin < counts.size(); ++bin) {
+    if (bin != 0U) text += ',';
+    text += std::to_string(counts[bin]);
+  }
+  return text;
+}
+
 void ensureSchedulerCoversState(
     std::size_t required_size,
     core::HierarchicalTimeBinScheduler& scheduler,
@@ -1448,54 +1464,133 @@ void TimeCoordinator::runHierarchicalSegment(
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical workspace admission");
     const auto all_rows = std::span<const std::uint32_t>(workspace.gravity_particle_index_scratch);
-    // Mandatory fresh synchronized endpoint bootstrap in BOTH uninterrupted
-    // and restarted runs. Existing total force history remains the MAC scale;
-    // derived split caches/PM meshes need no new restart payload.
-    core::StepContext sync{.state = state, .integrator_state = integrator,
-        .active_set = {.particle_indices = all_rows, .cell_indices = {}},
-        .active_gravity_particles = {}, .has_active_gravity_particles = false,
-        .workspace = &workspace, .cosmology_background = background,
-        .mode_policy = &mode_policy, .profiler_session = &profiler,
-        .timeline_step = {.time_begin_code = integrator.current_time_code,
-            .time_end_code = integrator.current_time_code,
-            .scale_factor_begin = integrator.current_scale_factor,
-            .scale_factor_end = integrator.current_scale_factor},
-        .boundary = {.kind = core::StepBoundaryKind::kGlobalSynchronizationPoint},
-        .pm_refresh_directive = {.force_refresh_surface = true, .cadence_opportunity_allowed = true,
-            .sync_event_requested = true, .force_evaluation_scale_factor = integrator.current_scale_factor,
-            .reason = core::PmRefreshDirective::Reason::kScheduledForceRefreshStage},
-        .stage = core::IntegrationStage::kForceRefresh};
-    sync.hierarchical_kdk = {.enabled = true, .include_long_range_force = true,
-        .force_only_synchronization = true, .coarse_source_generation = state.gravitySourceGeneration(),
-        .evaluation_tick = particles.currentTick()};
-    dispatchStage(sync, false);
-    const auto& d = sync.pm_refresh_directive;
-    if (!d.has_sync_event || !d.solver_executed || !d.refresh_long_range_field) {
-      throw std::logic_error("hierarchical synchronized bootstrap did not commit a fresh split force");
+    // Endpoint force reuse. The previous block closed with an all-active
+    // Tree+PM force at exactly these positions (no drift since); when every
+    // rank still holds it complete (no migration, same committed PM field),
+    // the block opens with it. Otherwise (first block, after a migration, or
+    // a pre-v24 restart without the persisted endpoint) a synchronized
+    // bootstrap evaluates it. Restart schema v24 persists the endpoint, so
+    // uninterrupted and resumed runs take the same branch with the same
+    // forces. The decision is collective.
+    bool endpoint_reusable_local = false;
+    preparation_failure = {};
+    try {
+      endpoint_reusable_local = m_gravity.hierarchicalEndpointForceReusable(state, integrator);
+    } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical endpoint reuse check");
+    const bool reuse_endpoint = mpi.allreduceMinDouble(endpoint_reusable_local ? 1.0 : 0.0) > 0.5;
+    if (reuse_endpoint) {
+      profiler.counters().addCount("time.hierarchical_endpoint_force_reuse");
+      // The reused PM component was built at these source positions (the
+      // reuse check proves it); restate that for a resumed run, whose
+      // integrator does not persist this derived generation.
+      integrator.pm_source_generation = state.gravitySourceGeneration();
+    } else {
+      profiler.counters().addCount("time.hierarchical_endpoint_force_bootstrap");
+      core::StepContext sync{.state = state, .integrator_state = integrator,
+          .active_set = {.particle_indices = all_rows, .cell_indices = {}},
+          .active_gravity_particles = {}, .has_active_gravity_particles = false,
+          .workspace = &workspace, .cosmology_background = background,
+          .mode_policy = &mode_policy, .profiler_session = &profiler,
+          .timeline_step = {.time_begin_code = integrator.current_time_code,
+              .time_end_code = integrator.current_time_code,
+              .scale_factor_begin = integrator.current_scale_factor,
+              .scale_factor_end = integrator.current_scale_factor},
+          .boundary = {.kind = core::StepBoundaryKind::kGlobalSynchronizationPoint},
+          .pm_refresh_directive = {.force_refresh_surface = true, .cadence_opportunity_allowed = true,
+              .sync_event_requested = true, .force_evaluation_scale_factor = integrator.current_scale_factor,
+              .reason = core::PmRefreshDirective::Reason::kScheduledForceRefreshStage},
+          .stage = core::IntegrationStage::kForceRefresh};
+      sync.hierarchical_kdk = {.enabled = true, .include_long_range_force = true,
+          .force_only_synchronization = true, .coarse_source_generation = state.gravitySourceGeneration(),
+          .evaluation_tick = particles.currentTick()};
+      dispatchStage(sync, false);
+      const auto& d = sync.pm_refresh_directive;
+      if (!d.has_sync_event || !d.solver_executed || !d.refresh_long_range_field) {
+        throw std::logic_error("hierarchical synchronized bootstrap did not commit a fresh split force");
+      }
+      const core::PmSyncEvent event{d.gravity_kick_opportunity, d.refresh_long_range_field,
+          d.field_version, d.last_refresh_opportunity, d.field_built_step_index, d.field_built_scale_factor};
+      integrator.pm_sync_state.commitKickOpportunity(event);
+      integrator.pm_sync_state.commitRefresh(event);
+      integrator.pm_long_range_field_valid = true;
+      integrator.pm_source_generation = state.gravitySourceGeneration();
     }
-    const core::PmSyncEvent event{d.gravity_kick_opportunity, d.refresh_long_range_field,
-        d.field_version, d.last_refresh_opportunity, d.field_built_step_index, d.field_built_scale_factor};
-    integrator.pm_sync_state.commitKickOpportunity(event);
-    integrator.pm_sync_state.commitRefresh(event);
-    integrator.pm_long_range_field_valid = true;
-    integrator.pm_source_generation = state.gravitySourceGeneration();
+    // Phase boundary: the synchronized bootstrap may grow gravity-owned
+    // retained capacity (PM plans, tree and residual workspaces). Reconcile
+    // the governor baseline before the rung-membership transaction measures
+    // retained bytes; otherwise that transaction correctly reports a stale
+    // baseline (repair register B-10). reconcile_runtime is collective.
+    {
+      std::exception_ptr reconcile_failure;
+      try { reconcile_runtime(); } catch (...) { reconcile_failure = std::current_exception(); }
+      FailureCoordinator(m_services).rethrowCollectiveFailure(
+          reconcile_failure, "hierarchical post-bootstrap memory reconciliation");
+    }
     const auto ax = m_gravity.particleAccelX();
     const auto ay = m_gravity.particleAccelY();
     const auto az = m_gravity.particleAccelZ();
+    const auto nearest_pair_r2 = m_gravity.hierarchicalNearestPairR2();
     const auto softening = speciesSofteningByTag(config);
     const double eps = softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)];
+    constexpr double k_gravity_timestep_eta = 0.2;
+    // Softened-encounter criterion. The acceleration criterion
+    // eta sqrt(eps a^3/|A|) is blind to a softened pair passing through
+    // coincidence (|A| -> 0 at r -> 0). The pair's tidal rate
+    // T = G m/(r^2+eps^2)^{3/2} (comoving, scale-free; physical T/a^3) stays
+    // finite and maximal there, so dt <= eta sqrt(a^3/T) bounds the step by
+    // the softened two-body dynamical time eta sqrt(eps^3 a^3/(G m)) at
+    // coincidence while being weaker than the acceleration criterion by
+    // sqrt(r/eps) beyond r ~ eps. r is the nearest direct pair from the
+    // synchronized Tree solve (restart-persisted with the v24 endpoint);
+    // m_max, the global maximum particle mass, makes it conservative for
+    // unequal masses. Nodes accepted as multipoles are not neighbours here.
+    const bool encounter_criterion = config.numerics.hierarchical_encounter_timestep_enabled;
+    double local_mass_max = 0.0;
+    for (const auto row : all_rows) local_mass_max = std::max(local_mass_max, state.particles.mass_code[row]);
+    const double mass_max = -mpi.allreduceMinDouble(-local_mass_max);
+    const double encounter_g_mass = m_gravity.gravitationalConstantCode() * mass_max;
+    const double a_cubed = integrator.current_scale_factor * integrator.current_scale_factor *
+        integrator.current_scale_factor;
+    // Timestep growth limiter: a particle's interval may at most double from
+    // one synchronization point to the next (refinement is unrestricted).
+    // The acceleration-only criterion sqrt(2 eta eps/|a|) is blind to the
+    // instant a softened pair passes through coincidence, where |a| -> 0;
+    // without this limit such a pair jumped to the coarsest rung for a whole
+    // block and crossed its encounter in one step. The previous interval is
+    // reconstructed from restart-persisted state only (the previous quantum,
+    // integrator.dt_time_code, times the committed rung period), so resumed
+    // and uninterrupted runs apply the same limit. No history before the
+    // first completed step.
+    const double previous_quantum = integrator.dt_time_code;
+    const bool growth_limited = integrator.step_index > 0U &&
+        std::isfinite(previous_quantum) && previous_quantum > 0.0;
     const auto criterion = [&](std::uint32_t row) {
-      return core::computeComovingGravityTimeStep({.softening_length_comoving_code = std::max(eps, 1.0e-12),
+      double dt = core::computeComovingGravityTimeStep({.softening_length_comoving_code = std::max(eps, 1.0e-12),
           .scale_free_acceleration_magnitude_code = std::sqrt(ax[row] * ax[row] + ay[row] * ay[row] + az[row] * az[row]),
-          .scale_factor = integrator.current_scale_factor}, 0.2);
+          .scale_factor = integrator.current_scale_factor}, k_gravity_timestep_eta);
+      if (encounter_criterion && std::isfinite(nearest_pair_r2[row]) && encounter_g_mass > 0.0) {
+        const double d = nearest_pair_r2[row] + eps * eps;
+        dt = std::min(dt, k_gravity_timestep_eta * std::sqrt(a_cubed * d * std::sqrt(d) / encounter_g_mass));
+      }
+      if (growth_limited) {
+        dt = std::min(dt, 2.0 * previous_quantum *
+            static_cast<double>(particles.binPeriodTicks(particles.binIndex(row))));
+      }
+      return dt;
     };
     double local_min = std::numeric_limits<double>::infinity();
     double local_speed_max = 0.0;
     double local_acceleration_max = 0.0;
+    double local_mass_sum = 0.0;
+    double local_mass_speed2_sum = 0.0;
     preparation_failure = {};
     try {
       if (ax.size() != state.particles.size() || ay.size() != ax.size() || az.size() != ax.size()) {
         throw std::logic_error("hierarchical timestep criteria lack synchronized total force rows");
+      }
+      if (encounter_criterion && nearest_pair_r2.size() != state.particles.size()) {
+        throw std::logic_error("hierarchical encounter criterion lacks synchronized nearest-pair rows");
       }
       for (const auto row : all_rows) {
         local_min = std::min(local_min, criterion(row));
@@ -1507,6 +1602,9 @@ void TimeCoordinator::runHierarchicalSegment(
         }
         local_speed_max = std::max(local_speed_max, speed);
         local_acceleration_max = std::max(local_acceleration_max, acceleration);
+        const double mass = state.particles.mass_code[row];
+        local_mass_sum += mass;
+        local_mass_speed2_sum += mass * speed * speed;
       }
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical timestep criteria");
@@ -1518,21 +1616,60 @@ void TimeCoordinator::runHierarchicalSegment(
     const double dy = config.cosmology.box_size_y_mpc_comoving / config.numerics.treepm_pm_grid_ny;
     const double dz = config.cosmology.box_size_z_mpc_comoving / config.numerics.treepm_pm_grid_nz;
     const double split_scale = config.numerics.treepm_asmth_cells*std::cbrt(dx*dy*dz);
-    const double displacement_dt = core::computeComovingDisplacementTimeStep({
-        .mesh_or_split_length_comoving_code = std::min({dx,dy,dz,split_scale}),
-        .velocity_magnitude_peculiar_code = speed_max,
-        .scale_free_acceleration_magnitude_code = acceleration_max,
-        .scale_factor = background != nullptr ? integrator.current_scale_factor : 1.0});
-    coarse_dt = std::min(coarse_dt, displacement_dt);
-    if (background != nullptr) coarse_dt = std::min(coarse_dt, core::computeCosmologyExpansionTimeStep(
-        *background, integrator.current_scale_factor, config.numerics.cosmology_max_delta_ln_a,
-        config.numerics.cosmology_max_hubble_time_fraction, integrator.time_si_per_code));
-    if (options.dt_time_code > 0.0) coarse_dt = std::min(coarse_dt, options.dt_time_code);
+    // Collective in both modes so every rank issues identical reductions.
+    const double global_mass_sum = mpi.allreduceSumDouble(local_mass_sum);
+    const double global_mass_speed2_sum = mpi.allreduceSumDouble(local_mass_speed2_sum);
+    const double global_particle_count = mpi.allreduceSumDouble(static_cast<double>(all_rows.size()));
+    const double displacement_scale_factor = background != nullptr ? integrator.current_scale_factor : 1.0;
+    double displacement_dt = std::numeric_limits<double>::infinity();
+    if (config.numerics.hierarchical_coarse_displacement_criterion ==
+        core::HierarchicalCoarseDisplacementCriterion::kRmsSplitScale) {
+      // The long-range field is Gaussian-smoothed on r_s, so a coarse PM
+      // interval only needs the typical (mass-weighted RMS) particle to move
+      // a fraction of min(r_s, mean interparticle spacing). Fast particles in
+      // dense regions keep their own fine rungs for the short-range force.
+      const double box_volume = config.cosmology.box_size_x_mpc_comoving *
+          config.cosmology.box_size_y_mpc_comoving * config.cosmology.box_size_z_mpc_comoving;
+      const double mean_spacing = global_particle_count > 0.0
+          ? std::cbrt(box_volume / global_particle_count) : split_scale;
+      const double speed_rms_comoving = global_mass_sum > 0.0
+          ? std::sqrt(global_mass_speed2_sum / global_mass_sum) / displacement_scale_factor : 0.0;
+      if (!std::isfinite(speed_rms_comoving) || !std::isfinite(mean_spacing) || mean_spacing <= 0.0) {
+        throw std::runtime_error("hierarchical RMS displacement criterion received invalid inputs");
+      }
+      if (speed_rms_comoving > 0.0) {
+        displacement_dt = config.numerics.hierarchical_coarse_rms_displacement_factor *
+            std::min(split_scale, mean_spacing) / speed_rms_comoving;
+      }
+    } else {
+      displacement_dt = core::computeComovingDisplacementTimeStep({
+          .mesh_or_split_length_comoving_code = std::min({dx,dy,dz,split_scale}),
+          .velocity_magnitude_peculiar_code = speed_max,
+          .scale_free_acceleration_magnitude_code = acceleration_max,
+          .scale_factor = displacement_scale_factor});
+    }
+    // Diagnostic only: name the criterion that bounds this coarse interval.
+    const double particle_coarse_dt = coarse_dt;
+    const char* coarse_limiter = "particle_gravity";
+    const auto limit_coarse = [&](double candidate, const char* name) {
+      if (candidate < coarse_dt) {
+        coarse_dt = candidate;
+        coarse_limiter = name;
+      }
+    };
+    limit_coarse(displacement_dt, "pm_displacement");
+    const double expansion_dt = background != nullptr
+        ? core::computeCosmologyExpansionTimeStep(*background, integrator.current_scale_factor,
+              config.numerics.cosmology_max_delta_ln_a, config.numerics.cosmology_max_hubble_time_fraction,
+              integrator.time_si_per_code)
+        : std::numeric_limits<double>::infinity();
+    limit_coarse(expansion_dt, "cosmology_expansion");
+    if (options.dt_time_code > 0.0) limit_coarse(options.dt_time_code, "explicit_dt");
     double boundary_time = config.numerics.t_code_end;
     if (pending.snapshot_interval_time_code > 0.0 && pending.next_snapshot_time_code > integrator.current_time_code) {
       boundary_time = std::min(boundary_time, pending.next_snapshot_time_code);
     }
-    coarse_dt = std::min(coarse_dt, boundary_time - integrator.current_time_code);
+    limit_coarse(boundary_time - integrator.current_time_code, "output_or_end_boundary");
     const double quantum = coarse_dt / static_cast<double>(periods);
     if (!std::isfinite(quantum) || quantum <= 0.0 || integrator.current_time_code + quantum <= integrator.current_time_code) {
       throw std::runtime_error("hierarchical quantum is not finite positive representable");
@@ -1562,6 +1699,14 @@ void TimeCoordinator::runHierarchicalSegment(
         .payload = {{"quantum_time_code", formatRuntimeDouble(quantum)},
             {"coarse_interval_time_code", formatRuntimeDouble(coarse_dt)},
             {"pm_displacement_limit_time_code", formatRuntimeDouble(displacement_dt)}, {"fine_ticks", std::to_string(periods)},
+            {"particle_coarse_limit_time_code", formatRuntimeDouble(particle_coarse_dt)},
+            {"expansion_limit_time_code", formatRuntimeDouble(expansion_dt)},
+            {"coarse_limiter", coarse_limiter},
+            {"coarse_displacement_criterion",
+             config.numerics.hierarchical_coarse_displacement_criterion ==
+                     core::HierarchicalCoarseDisplacementCriterion::kRmsSplitScale
+                 ? "rms_split_scale" : "max_speed_mesh"},
+            {"rank_local_bin_occupancy", formatBinOccupancy(particles, all_rows)},
             {"pm_policy", "coarse_endpoint_half_kicks"}, {"rung_assignment", "fixed_within_block"}}});
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical output and event preparation");

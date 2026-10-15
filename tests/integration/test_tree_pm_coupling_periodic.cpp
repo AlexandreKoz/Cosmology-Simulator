@@ -264,7 +264,9 @@ void testPmPlanRetainedStorageMatchesAllocation() {
     PmGridStorage grid(shape, layout);
     PmSolver solver(shape);
     PmSolveOptions options;
+    options.box_size_mpc_comoving = 1.0;
     options.decomposition_mode = mode;
+    grid.ensureDensityStorage();
     solver.solvePoissonPeriodicForcesOnly(grid, options);
     const auto estimate = estimatePmPlanResourcesMemory(shape, layout, mode);
     requireOrThrow(estimate.used_backend_allocation_query == (ranks > 1),
@@ -306,6 +308,7 @@ void testShortRangeSurfaceRejectsPmRequests() {
   ForceField force{std::vector<double>(2), std::vector<double>(2), std::vector<double>(2)};
   TreePmForceAccumulatorView accumulator{active, force.ax, force.ay, force.az};
   TreePmOptions options;
+  options.pm_options.box_size_mpc_comoving = 1.0;
   options.short_range_only = true;
   options.tree_options.softening.epsilon_comoving = 0.01;
   options.split_policy = makeTreePmSplitPolicyFromMeshSpacing(1.25, 3.0, 0.125);
@@ -892,6 +895,12 @@ void testPmOnlyAndTreePmConsistency() {
     pos_z[i] = std::fmod((23.0 * static_cast<double>(i) + 3.0) * 0.017, box_size_comoving);
     mass[i] = 0.9 + 0.05 * static_cast<double>(i % 5U);
   }
+  // Guarantee one source inside r_cut on every backend: the FFTW 32^3 mesh
+  // gives r_cut = 4.5/32 = 0.14, below every separation of the quasi-random
+  // lattice above, so the residual path otherwise evaluates no direct pair.
+  pos_x[1] = std::fmod(pos_x[0] + 0.03, box_size_comoving);
+  pos_y[1] = std::fmod(pos_y[0] + 0.02, box_size_comoving);
+  pos_z[1] = std::fmod(pos_z[0] + 0.01, box_size_comoving);
 
   const cosmosim::gravity::PmGridShape pm_shape = pmShapeForAvailableBackend(32, 8);
   const double mesh_spacing = box_size_comoving / static_cast<double>(pm_shape.nx);

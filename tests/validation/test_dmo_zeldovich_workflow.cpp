@@ -247,6 +247,11 @@ void requireOrThrow(bool condition, const std::string& message) {
     gathered_time_bin.assign(
         local_state.particles.time_bin.begin(),
         local_state.particles.time_bin.end());
+    // Global-KDK compact states keep no time-bin mirror; rung zero, as the
+    // distributed gather path already assumes.
+    if (gathered_time_bin.size() != local_state.particles.size()) {
+      gathered_time_bin.assign(local_state.particles.size(), 0U);
+    }
     gathered_id.assign(
         local_state.particle_sidecar.particle_id.begin(),
         local_state.particle_sidecar.particle_id.end());
@@ -535,8 +540,9 @@ struct StateSummary {
           std::isfinite(state.particles.position_y_comoving[row]) &&
           std::isfinite(state.particles.position_z_comoving[row]) && std::isfinite(mass) &&
           std::isfinite(vx) && std::isfinite(vy) && std::isfinite(vz) && mass > 0.0;
+      // Accessor: compact homogeneous-DMO states keep no materialized lane.
       local.dm_only = local.dm_only &&
-          state.particle_sidecar.species_tag[row] ==
+          state.particleSpeciesTag(row) ==
               static_cast<std::uint32_t>(cosmosim::core::ParticleSpecies::kDarkMatter);
       local.mass_code += mass;
       local.momentum_code[0] += mass * vx;
@@ -1345,11 +1351,13 @@ void runHierarchicalGrowthQualification(const ParallelRuntime& runtime) {
   const auto initial=makeZeldovichState();
   const auto initial_mode=directFourierMetrics(initial,runtime.world_rank==0);
   const auto gathered_initial=gatherParticlesByStableId(initial,runtime,runtime.world_rank==0);
-  const auto run_case=[&](const char* label,unsigned rung,double dt,std::uint64_t steps) {
+  const auto run_case=[&](const char* label,unsigned rung,double dt,std::uint64_t steps,bool rms_limiter=false) {
     auto text=configText(runtime.world_size,label);
     if (rung>0U) {
       const std::string old="hierarchical_max_rung = 0";
-      text.replace(text.find(old),old.size(),"hierarchical_max_rung = "+std::to_string(rung));
+      std::string replacement="hierarchical_max_rung = "+std::to_string(rung);
+      if (rms_limiter) replacement+="\nhierarchical_coarse_displacement_criterion = rms_split_scale";
+      text.replace(text.find(old),old.size(),replacement);
     }
     const auto frozen=cosmosim::core::loadFrozenConfigFromString(text,label);
     const cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
@@ -1362,9 +1370,20 @@ void runHierarchicalGrowthQualification(const ParallelRuntime& runtime) {
   const auto reference=run_case("global_fine",0U,k_step_dt_code/4.0,8U);
   const auto coarse=run_case("hierarchical_coarse",2U,k_step_dt_code,2U);
   const auto refined=run_case("hierarchical_refined",2U,k_step_dt_code/2.0,4U);
+  // Same schedule with the RMS split-scale coarse criterion: it may only
+  // shorten coarse intervals, so it must meet the refined-case accuracy.
+  const auto rms=run_case("hierarchical_refined_rms",2U,k_step_dt_code/2.0,4U,true);
   requireOrThrow(std::abs(reference.integrator_state.current_time_code-coarse.integrator_state.current_time_code)<1e-15 &&
-      std::abs(reference.integrator_state.current_time_code-refined.integrator_state.current_time_code)<1e-15,
+      std::abs(reference.integrator_state.current_time_code-refined.integrator_state.current_time_code)<1e-15 &&
+      std::abs(reference.integrator_state.current_time_code-rms.integrator_state.current_time_code)<1e-15,
       "hierarchical growth comparison has mismatched time endpoints");
+  {
+    const auto rms_mode=directFourierMetrics(rms.state,true);
+    const auto ref_rms_mode=directFourierMetrics(reference.state,true);
+    const double rms_error=std::abs(rms_mode.fundamental_amplitude/ref_rms_mode.fundamental_amplitude-1.0);
+    requireOrThrow(rms_error<=1e-4,
+        "hierarchical rms_split_scale coarse criterion failed global-reference growing-mode accuracy");
+  }
   const auto ref_mode=directFourierMetrics(reference.state,true);
   const auto coarse_mode=directFourierMetrics(coarse.state,true);
   const auto fine_mode=directFourierMetrics(refined.state,true);
@@ -1472,11 +1491,14 @@ void runScientificValidation(const ParallelRuntime& runtime, const std::filesyst
   const cosmosim::io::RestartReadResult first_restart =
       cosmosim::io::readRestartCheckpointHdf5(first_report.restart_path);
 
+  // ReferenceWorkflowOptions::dt_time_code caps the adaptive step and is a
+  // process-local run option, not restart state; an equivalent continuation
+  // must therefore apply the same cap as the uninterrupted run.
   const auto resumed_report = runner.run(
       root / "resumed",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .step_index = 0U,
-          .dt_time_code = 0.0,
+          .dt_time_code = k_step_dt_code,
           .write_outputs = true,
           .initial_state_override = nullptr,
           .restart_state_override = &first_restart,

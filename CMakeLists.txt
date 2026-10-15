@@ -68,6 +68,7 @@ option(COSMOSIM_ENABLE_MPI "Enable MPI backend" OFF)
 option(COSMOSIM_ENABLE_OPENMP "Enable OpenMP shared-memory backend when available" ON)
 option(COSMOSIM_ENABLE_HDF5 "Enable HDF5 I/O backend" OFF)
 option(COSMOSIM_ENABLE_FFTW "Enable FFTW backend" OFF)
+option(COSMOSIM_ENABLE_FFTW_THREADS "Use libfftw3_omp for OpenMP-threaded PM FFTs when available" ON)
 option(COSMOSIM_ENABLE_CUDA "Enable CUDA/cuFFT backend" OFF)
 option(COSMOSIM_ENABLE_PYTHON "Enable Python tooling integration" OFF)
 option(COSMOSIM_ENABLE_TRACERS "Enable tracer update module" OFF)
@@ -128,7 +129,13 @@ function(cosmosim_apply_test_defaults)
     elseif(cosmosim_test_name MATCHES "^validation_")
       list(APPEND cosmosim_existing_labels validation)
     elseif(cosmosim_test_name MATCHES "^python_")
-      list(APPEND cosmosim_existing_labels python)
+      # "python" is also the Python-binding backend label; offline Python
+      # tools registered without that backend get a distinct tier label.
+      if(COSMOSIM_ENABLE_PYTHON)
+        list(APPEND cosmosim_existing_labels python)
+      else()
+        list(APPEND cosmosim_existing_labels python_offline)
+      endif()
     endif()
 
     if(COSMOSIM_ENABLE_MPI AND cosmosim_test_name MATCHES "two_rank|three_rank|four_rank|eight_rank|[2348]_rank|_np[0-9]+$")
@@ -688,6 +695,19 @@ endif()
 
 if(COSMOSIM_ENABLE_FFTW)
   target_compile_definitions(cosmosim_gravity PRIVATE COSMOSIM_FFTW_PLANNER_FLAGS=${COSMOSIM_FFTW_PLANNER_FLAGS})
+  # Optional threaded FFTW. When libfftw3_omp is available PM plans use the
+  # OpenMP team size; otherwise the serial FFTW backend is retained.
+  set(COSMOSIM_FFTW_THREADS OFF)
+  if(COSMOSIM_ENABLE_FFTW_THREADS AND COSMOSIM_HAVE_OPENMP)
+    find_library(COSMOSIM_FFTW_OMP_LIBRARY NAMES fftw3_omp)
+    if(COSMOSIM_FFTW_OMP_LIBRARY)
+      # Static archives require the threads layer before the serial library.
+      target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_OMP_LIBRARY})
+      set(COSMOSIM_FFTW_THREADS ON)
+    endif()
+  endif()
+  target_compile_definitions(cosmosim_gravity PRIVATE COSMOSIM_FFTW_THREADS=$<BOOL:${COSMOSIM_FFTW_THREADS}>)
+  message(STATUS "CHUI dependency: FFTW OpenMP threads=${COSMOSIM_FFTW_THREADS} library=${COSMOSIM_FFTW_OMP_LIBRARY}")
   target_link_libraries(cosmosim_gravity PUBLIC ${COSMOSIM_FFTW_TARGET})
   target_link_libraries(cosmosim_analysis PUBLIC ${COSMOSIM_FFTW_TARGET})
   if(COSMOSIM_ENABLE_MPI)
@@ -1008,8 +1028,10 @@ if(COSMOSIM_ENABLE_TESTS)
   if(Python3_Interpreter_FOUND AND Python3_VERSION VERSION_GREATER_EQUAL "3.8")
     add_test(NAME python_treepm_snapshot_tools
       COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/python/test_treepm_snapshot_tools.py)
+    # Offline h5py tooling: it needs neither the C++ HDF5 nor the Python-binding
+    # backend, so it must not carry those backend labels (label audit).
     set_tests_properties(python_treepm_snapshot_tools PROPERTIES
-      SKIP_RETURN_CODE 77 LABELS "python;hdf5;treepm;snapshot;integrity;qualification")
+      SKIP_RETURN_CODE 77 LABELS "offline_tools;h5py;treepm;snapshot;integrity;qualification")
   else()
     message(STATUS "Offline TreePM snapshot tests unavailable: Python >=3.8 interpreter required")
   endif()
