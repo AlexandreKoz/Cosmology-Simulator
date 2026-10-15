@@ -505,6 +505,40 @@ from restart-persisted state only (previous quantum `integrator.dt_time_code`
 times the committed rung period), so resumed and uninterrupted runs apply the
 same limit; there is no limit before the first completed step.
 
+Softened-encounter criterion (`numerics.hierarchical_encounter_timestep_enabled`,
+default `true`). The growth limiter alone left the D1 pair-crossing error at
+1.62e-3 against the 1e-3 gate, because the acceleration criterion still
+under-resolves the crossing itself. Each synchronized Tree solve now records,
+per target, the squared separation `r_nn^2` of its nearest distinct
+direct-summed source inside `r_cut` (min-combined over local, group-walk and
+remote MPI contributions; response wire v2). The rung candidate is
+
+```
+dt = min( eta sqrt(eps a^3 / |A|),                       acceleration
+          eta sqrt(a^3 (r_nn^2 + eps^2)^{3/2} / (G m_max)) )  encounter
+```
+
+with `eta = 0.2`, comoving scale-free `A` and `G m/(r^2+eps^2)^{3/2}` (physical
+values divide by `a^3`), and `m_max` the global maximum particle mass
+(conservative for unequal masses). At coincidence the encounter term is the
+softened two-body dynamical time `eta sqrt(eps^3 a^3/(G m))`; beyond
+`r ~ eps` it is weaker than the acceleration criterion by `sqrt(r/eps)`, so
+it binds only during close encounters. Assumptions: Plummer-equivalent
+softening scale `eps`; the nearest neighbour is a direct pair (nodes accepted
+as multipoles are not treated as neighbours, which the relative MAC makes
+safe at `r <~ eps`); the group-walk path cannot distinguish an exactly
+coincident distinct source from the target and omits `r = 0`. The lane is
+restart-persisted with the v24 endpoint. Global KDK is unchanged. Validation
+target: `integration_hierarchical_treepm_workflow` refined trajectory error
+`< 1e-3` against global KDK with no change to that gate.
+
+Endpoint force reuse: a block opens with the previous block's all-active
+endpoint force when every rank still holds it complete at the same positions
+(counter `time.hierarchical_endpoint_force_reuse`); otherwise the synchronized
+bootstrap solve runs (`time.hierarchical_endpoint_force_bootstrap`). This saves
+one all-target Tree+PM solve per coarse block. Restart equivalence is kept by
+schema v24 (see `docs/restart_checkpointing.md`).
+
 The synchronized bootstrap can grow gravity-owned retained capacity; the
 workflow now reconciles the MemoryGovernor baseline collectively immediately
 after it and before the rung-membership `RetainedCapacityTransaction` (repair

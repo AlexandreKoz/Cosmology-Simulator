@@ -158,17 +158,22 @@ struct TreePmGroupPairKernel {
 // [begin,end) on one target. Requires bounded periodic deltas (every wrapped
 // source and target lie in [0,L)), so one conditional shift per axis is the
 // nearest image; pairs near half a box lie beyond r_cut < L/2 and are masked.
-// Self and coincident pairs contribute exactly zero.
+// Self and coincident pairs contribute exactly zero. nearest_pair_r2 is
+// min-combined with the squared separation of every evaluated pair; the
+// group path cannot tell an exactly coincident distinct source from the
+// target itself, so r2 == 0 is excluded there (the per-target walk keeps it).
 inline void accumulateTreePmGroupPairs(
     const TreePmGroupPairKernel& k, double px, double py, double pz,
     std::size_t begin, std::size_t end,
-    double& ax, double& ay, double& az, std::uint64_t& pairs) noexcept {
+    double& ax, double& ay, double& az, std::uint64_t& pairs,
+    double& nearest_pair_r2) noexcept {
   const double lx = k.length[0], ly = k.length[1], lz = k.length[2];
   const double hx = 0.5 * lx, hy = 0.5 * ly, hz = 0.5 * lz;
   double sx = 0.0, sy = 0.0, sz = 0.0;
+  double nearest = nearest_pair_r2;
   std::uint64_t counted = 0U;
 #if defined(_OPENMP)
-#pragma omp simd reduction(+:sx,sy,sz,counted)
+#pragma omp simd reduction(+:sx,sy,sz,counted) reduction(min:nearest)
 #endif
   for (std::size_t j = begin; j < end; ++j) {
     double dx = k.x[j] - px, dy = k.y[j] - py, dz = k.z[j] - pz;
@@ -193,7 +198,9 @@ inline void accumulateTreePmGroupPairs(
     sy += factor * dy;
     sz += factor * dz;
     counted += inside ? 1U : 0U;
+    nearest = std::min(nearest, inside ? r2 : nearest);
   }
+  nearest_pair_r2 = nearest;
   ax += sx;
   ay += sy;
   az += sz;

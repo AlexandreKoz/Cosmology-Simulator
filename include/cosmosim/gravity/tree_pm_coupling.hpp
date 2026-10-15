@@ -25,7 +25,7 @@ namespace cosmosim::gravity {
 // object bytes. Gravity memory estimation reuses the same constants so
 // protocol and budget arithmetic cannot drift apart.
 inline constexpr std::size_t kTreePmShortRangeRequestWireBytes = 96U;
-inline constexpr std::size_t kTreePmShortRangeResponseWireBytes = 80U;
+inline constexpr std::size_t kTreePmShortRangeResponseWireBytes = 88U;
 inline constexpr std::size_t kTreePmResidualBlockSize = 64U;
 inline constexpr std::size_t k_tree_pm_leaf_lanes = 16U;
 // One bounded scratch block per worker, allocated before traversal. No source
@@ -131,10 +131,17 @@ struct TreePmForceAccumulatorView {
   std::span<double> short_range_accel_x_comoving{};
   std::span<double> short_range_accel_y_comoving{};
   std::span<double> short_range_accel_z_comoving{};
+  // Optional source-indexed encounter lane (same extent contract as the
+  // Tree-only lanes): the squared comoving separation of the nearest distinct
+  // direct-summed source inside r_cut, +infinity when none. Each active row is
+  // reset to +infinity and min-combined across local and remote tree parts.
+  // Consumed by the hierarchical encounter timestep criterion.
+  std::span<double> short_range_nearest_pair_r2_comoving{};
 
   void reset() const;
   void addToActiveSlot(std::size_t active_slot, double ax_comoving, double ay_comoving, double az_comoving) const;
   void addShortRangeToActiveSlot(std::size_t active_slot, double ax_comoving, double ay_comoving, double az_comoving) const;
+  void noteNearestPairToActiveSlot(std::size_t active_slot, double nearest_pair_r2_comoving) const;
 };
 
 enum class TreePmAcceptancePolicy : std::uint8_t {

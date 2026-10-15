@@ -1464,37 +1464,58 @@ void TimeCoordinator::runHierarchicalSegment(
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical workspace admission");
     const auto all_rows = std::span<const std::uint32_t>(workspace.gravity_particle_index_scratch);
-    // Mandatory fresh synchronized endpoint bootstrap in BOTH uninterrupted
-    // and restarted runs. Existing total force history remains the MAC scale;
-    // derived split caches/PM meshes need no new restart payload.
-    core::StepContext sync{.state = state, .integrator_state = integrator,
-        .active_set = {.particle_indices = all_rows, .cell_indices = {}},
-        .active_gravity_particles = {}, .has_active_gravity_particles = false,
-        .workspace = &workspace, .cosmology_background = background,
-        .mode_policy = &mode_policy, .profiler_session = &profiler,
-        .timeline_step = {.time_begin_code = integrator.current_time_code,
-            .time_end_code = integrator.current_time_code,
-            .scale_factor_begin = integrator.current_scale_factor,
-            .scale_factor_end = integrator.current_scale_factor},
-        .boundary = {.kind = core::StepBoundaryKind::kGlobalSynchronizationPoint},
-        .pm_refresh_directive = {.force_refresh_surface = true, .cadence_opportunity_allowed = true,
-            .sync_event_requested = true, .force_evaluation_scale_factor = integrator.current_scale_factor,
-            .reason = core::PmRefreshDirective::Reason::kScheduledForceRefreshStage},
-        .stage = core::IntegrationStage::kForceRefresh};
-    sync.hierarchical_kdk = {.enabled = true, .include_long_range_force = true,
-        .force_only_synchronization = true, .coarse_source_generation = state.gravitySourceGeneration(),
-        .evaluation_tick = particles.currentTick()};
-    dispatchStage(sync, false);
-    const auto& d = sync.pm_refresh_directive;
-    if (!d.has_sync_event || !d.solver_executed || !d.refresh_long_range_field) {
-      throw std::logic_error("hierarchical synchronized bootstrap did not commit a fresh split force");
+    // Endpoint force reuse. The previous block closed with an all-active
+    // Tree+PM force at exactly these positions (no drift since); when every
+    // rank still holds it complete (no migration, same committed PM field),
+    // the block opens with it. Otherwise (first block, after a migration, or
+    // a pre-v24 restart without the persisted endpoint) a synchronized
+    // bootstrap evaluates it. Restart schema v24 persists the endpoint, so
+    // uninterrupted and resumed runs take the same branch with the same
+    // forces. The decision is collective.
+    bool endpoint_reusable_local = false;
+    preparation_failure = {};
+    try {
+      endpoint_reusable_local = m_gravity.hierarchicalEndpointForceReusable(state, integrator);
+    } catch (...) { preparation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical endpoint reuse check");
+    const bool reuse_endpoint = mpi.allreduceMinDouble(endpoint_reusable_local ? 1.0 : 0.0) > 0.5;
+    if (reuse_endpoint) {
+      profiler.counters().addCount("time.hierarchical_endpoint_force_reuse");
+      // The reused PM component was built at these source positions (the
+      // reuse check proves it); restate that for a resumed run, whose
+      // integrator does not persist this derived generation.
+      integrator.pm_source_generation = state.gravitySourceGeneration();
+    } else {
+      profiler.counters().addCount("time.hierarchical_endpoint_force_bootstrap");
+      core::StepContext sync{.state = state, .integrator_state = integrator,
+          .active_set = {.particle_indices = all_rows, .cell_indices = {}},
+          .active_gravity_particles = {}, .has_active_gravity_particles = false,
+          .workspace = &workspace, .cosmology_background = background,
+          .mode_policy = &mode_policy, .profiler_session = &profiler,
+          .timeline_step = {.time_begin_code = integrator.current_time_code,
+              .time_end_code = integrator.current_time_code,
+              .scale_factor_begin = integrator.current_scale_factor,
+              .scale_factor_end = integrator.current_scale_factor},
+          .boundary = {.kind = core::StepBoundaryKind::kGlobalSynchronizationPoint},
+          .pm_refresh_directive = {.force_refresh_surface = true, .cadence_opportunity_allowed = true,
+              .sync_event_requested = true, .force_evaluation_scale_factor = integrator.current_scale_factor,
+              .reason = core::PmRefreshDirective::Reason::kScheduledForceRefreshStage},
+          .stage = core::IntegrationStage::kForceRefresh};
+      sync.hierarchical_kdk = {.enabled = true, .include_long_range_force = true,
+          .force_only_synchronization = true, .coarse_source_generation = state.gravitySourceGeneration(),
+          .evaluation_tick = particles.currentTick()};
+      dispatchStage(sync, false);
+      const auto& d = sync.pm_refresh_directive;
+      if (!d.has_sync_event || !d.solver_executed || !d.refresh_long_range_field) {
+        throw std::logic_error("hierarchical synchronized bootstrap did not commit a fresh split force");
+      }
+      const core::PmSyncEvent event{d.gravity_kick_opportunity, d.refresh_long_range_field,
+          d.field_version, d.last_refresh_opportunity, d.field_built_step_index, d.field_built_scale_factor};
+      integrator.pm_sync_state.commitKickOpportunity(event);
+      integrator.pm_sync_state.commitRefresh(event);
+      integrator.pm_long_range_field_valid = true;
+      integrator.pm_source_generation = state.gravitySourceGeneration();
     }
-    const core::PmSyncEvent event{d.gravity_kick_opportunity, d.refresh_long_range_field,
-        d.field_version, d.last_refresh_opportunity, d.field_built_step_index, d.field_built_scale_factor};
-    integrator.pm_sync_state.commitKickOpportunity(event);
-    integrator.pm_sync_state.commitRefresh(event);
-    integrator.pm_long_range_field_valid = true;
-    integrator.pm_source_generation = state.gravitySourceGeneration();
     // Phase boundary: the synchronized bootstrap may grow gravity-owned
     // retained capacity (PM plans, tree and residual workspaces). Reconcile
     // the governor baseline before the rung-membership transaction measures
@@ -1509,8 +1530,28 @@ void TimeCoordinator::runHierarchicalSegment(
     const auto ax = m_gravity.particleAccelX();
     const auto ay = m_gravity.particleAccelY();
     const auto az = m_gravity.particleAccelZ();
+    const auto nearest_pair_r2 = m_gravity.hierarchicalNearestPairR2();
     const auto softening = speciesSofteningByTag(config);
     const double eps = softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)];
+    constexpr double k_gravity_timestep_eta = 0.2;
+    // Softened-encounter criterion. The acceleration criterion
+    // eta sqrt(eps a^3/|A|) is blind to a softened pair passing through
+    // coincidence (|A| -> 0 at r -> 0). The pair's tidal rate
+    // T = G m/(r^2+eps^2)^{3/2} (comoving, scale-free; physical T/a^3) stays
+    // finite and maximal there, so dt <= eta sqrt(a^3/T) bounds the step by
+    // the softened two-body dynamical time eta sqrt(eps^3 a^3/(G m)) at
+    // coincidence while being weaker than the acceleration criterion by
+    // sqrt(r/eps) beyond r ~ eps. r is the nearest direct pair from the
+    // synchronized Tree solve (restart-persisted with the v24 endpoint);
+    // m_max, the global maximum particle mass, makes it conservative for
+    // unequal masses. Nodes accepted as multipoles are not neighbours here.
+    const bool encounter_criterion = config.numerics.hierarchical_encounter_timestep_enabled;
+    double local_mass_max = 0.0;
+    for (const auto row : all_rows) local_mass_max = std::max(local_mass_max, state.particles.mass_code[row]);
+    const double mass_max = -mpi.allreduceMinDouble(-local_mass_max);
+    const double encounter_g_mass = m_gravity.gravitationalConstantCode() * mass_max;
+    const double a_cubed = integrator.current_scale_factor * integrator.current_scale_factor *
+        integrator.current_scale_factor;
     // Timestep growth limiter: a particle's interval may at most double from
     // one synchronization point to the next (refinement is unrestricted).
     // The acceleration-only criterion sqrt(2 eta eps/|a|) is blind to the
@@ -1527,7 +1568,11 @@ void TimeCoordinator::runHierarchicalSegment(
     const auto criterion = [&](std::uint32_t row) {
       double dt = core::computeComovingGravityTimeStep({.softening_length_comoving_code = std::max(eps, 1.0e-12),
           .scale_free_acceleration_magnitude_code = std::sqrt(ax[row] * ax[row] + ay[row] * ay[row] + az[row] * az[row]),
-          .scale_factor = integrator.current_scale_factor}, 0.2);
+          .scale_factor = integrator.current_scale_factor}, k_gravity_timestep_eta);
+      if (encounter_criterion && std::isfinite(nearest_pair_r2[row]) && encounter_g_mass > 0.0) {
+        const double d = nearest_pair_r2[row] + eps * eps;
+        dt = std::min(dt, k_gravity_timestep_eta * std::sqrt(a_cubed * d * std::sqrt(d) / encounter_g_mass));
+      }
       if (growth_limited) {
         dt = std::min(dt, 2.0 * previous_quantum *
             static_cast<double>(particles.binPeriodTicks(particles.binIndex(row))));
@@ -1543,6 +1588,9 @@ void TimeCoordinator::runHierarchicalSegment(
     try {
       if (ax.size() != state.particles.size() || ay.size() != ax.size() || az.size() != ax.size()) {
         throw std::logic_error("hierarchical timestep criteria lack synchronized total force rows");
+      }
+      if (encounter_criterion && nearest_pair_r2.size() != state.particles.size()) {
+        throw std::logic_error("hierarchical encounter criterion lacks synchronized nearest-pair rows");
       }
       for (const auto row : all_rows) {
         local_min = std::min(local_min, criterion(row));

@@ -1578,6 +1578,18 @@ void testTreePmProductionTuningRoundTrip() {
   CHUI_REQUIRE(baseline.config.numerics.hierarchical_coarse_displacement_criterion ==
       cosmosim::core::HierarchicalCoarseDisplacementCriterion::kMaxSpeedMesh);
   CHUI_REQUIRE(baseline.config.numerics.hierarchical_coarse_rms_displacement_factor == 0.25);
+  // Encounter rung criterion: on by default, round-trips when disabled.
+  CHUI_REQUIRE(baseline.config.numerics.hierarchical_encounter_timestep_enabled);
+  CHUI_REQUIRE(baseline.normalized_text.find("hierarchical_encounter_timestep_enabled = true") != std::string::npos);
+  {
+    const auto no_encounter = loadFrozenConfigFromString(
+        withNumericsValue(baseline.normalized_text, "hierarchical_encounter_timestep_enabled", "false"),
+        "encounter_disabled");
+    CHUI_REQUIRE(!no_encounter.config.numerics.hierarchical_encounter_timestep_enabled);
+    CHUI_REQUIRE(loadFrozenConfigFromString(no_encounter.normalized_text, "encounter_replay").normalized_text ==
+        no_encounter.normalized_text);
+    requireNumericsRejected(baseline.normalized_text, "hierarchical_encounter_timestep_enabled", "maybe");
+  }
   auto rms_text = withNumericsValue(baseline.normalized_text,
       "hierarchical_coarse_displacement_criterion", "rms_split_scale");
   rms_text = withNumericsValue(rms_text, "hierarchical_coarse_rms_displacement_factor", "0.5");

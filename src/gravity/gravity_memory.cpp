@@ -161,9 +161,9 @@ TreePmExchangeMemoryEstimate estimateTreePmExchangeMemory(
   estimate.response_count_bytes = checkedMul(
       batch_targets, 2U * sizeof(std::uint32_t),
       "TreePM exchange response count capacity overflow");
-  // remote_batch accel x/y/z lanes.
+  // remote_batch accel x/y/z and nearest-pair r^2 lanes.
   estimate.remote_accumulator_bytes = checkedMul(
-      batch_targets, 3U * sizeof(double),
+      batch_targets, 4U * sizeof(double),
       "TreePM exchange remote accumulator capacity overflow");
   // Arena-backed rank metadata includes the eight communicator-wide
   // count/displacement vectors, eight sparse-neighbor count/displacement
@@ -380,10 +380,12 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
           3U * sizeof(double),
           "gravity zoom active correction estimate overflow")
       : 0U;
+  // Hierarchical split lanes: Tree x/y/z, PM x/y/z, nearest-pair r^2 and
+  // the per-row force generation.
   const std::uint64_t persistent_force_cache_bytes = checkedMul(
       input.local_source_count,
       3U * sizeof(double) + sizeof(std::uint8_t) +
-          (input.hierarchical_kdk_enabled ? 6U * sizeof(double) + sizeof(std::uint64_t) : 0U),
+          (input.hierarchical_kdk_enabled ? 7U * sizeof(double) + sizeof(std::uint64_t) : 0U),
       "gravity persistent force cache estimate overflow");
   const std::uint64_t runtime_particle_map_bytes = borrowed_homogeneous_dmo
       ? 0U

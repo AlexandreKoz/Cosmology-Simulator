@@ -375,7 +375,8 @@ versioned little-endian records rather than raw C++ object representations.
 Protocol identity covers source/destination rank, exchange sequence, strong
 decomposition/source/tree/force identities at the serialization boundary, batch
 token, request/target identity, target geometry/softening, previous-force-scale
-presence, and returned acceleration components.
+presence, returned acceleration components and (wire v2) the nearest
+direct-pair separation squared.
 
 The compact top-level domain cache is reusable only when every rank agrees that
 its decomposition epoch, gravity source generation, and local tree-build
@@ -748,16 +749,18 @@ target-softening allocation is retained or admitted.
 ```text
 b = floor(B / 96)                    # targets per peer per batch
 d = max(R - 1, 0)                    # peer rounds
-M_wire = 2 * d * b * (96 + 80)       # request + response payloads
+M_wire = 2 * d * b * (96 + 88)       # request + response payloads
 known  = wire
        + structured request storage
        + count/mask/accumulator/metadata terms
-       + transient codec workspace b * (2*(96+80)+24)
+       + transient codec workspace b * (2*(96+88)+24)
 ```
 
 Wire record widths are the shared public constants
 `kTreePmShortRangeRequestWireBytes = 96` and
-`kTreePmShortRangeResponseWireBytes = 80`. Host `sizeof` of the request/response
+`kTreePmShortRangeResponseWireBytes = 88` (wire v2: the response appends the
+serving rank's nearest direct-pair separation squared, `+inf` when none, for the
+hierarchical encounter timestep criterion; it was 80 in wire v1). Host `sizeof` of the request/response
 packet structs equals these widths, and that identity is compile-time enforced
 by `static_assert` next to the packet definitions in `tree_pm_coupling.cpp`;
 if a supported ABI ever pads the structs, the build fails rather than letting

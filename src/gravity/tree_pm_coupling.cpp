@@ -259,6 +259,11 @@ void validateTreePmPreflight(
       !accumulator.target_pos_x_comoving.empty())) {
     throw std::invalid_argument("Tree component output requires source-indexed full source extents");
   }
+  if (!accumulator.short_range_nearest_pair_r2_comoving.empty() &&
+      (accumulator.short_range_nearest_pair_r2_comoving.size() != pos_x_comoving.size() ||
+       !accumulator.target_pos_x_comoving.empty())) {
+    throw std::invalid_argument("Tree nearest-pair output requires source-indexed full source extents");
+  }
   if (!forceAccumulatorShapeValid(accumulator)) {
     throw std::invalid_argument(
         "TreePM force accumulator spans must have matching active-set extent");
@@ -1268,9 +1273,13 @@ struct ShortRangeTargetResponsePacket {
   double accel_x_comoving = 0.0;
   double accel_y_comoving = 0.0;
   double accel_z_comoving = 0.0;
+  // Nearest distinct direct-pair separation squared on the serving rank
+  // (+infinity when none); min-combined by the target owner.
+  double nearest_pair_r2_comoving = std::numeric_limits<double>::infinity();
 };
 
-constexpr std::uint32_t k_short_range_wire_version = 1U;
+// v2 appends nearest_pair_r2_comoving to the response record.
+constexpr std::uint32_t k_short_range_wire_version = 2U;
 constexpr std::uint32_t k_short_range_flag_previous_acceleration = 1U << 0U;
 constexpr std::size_t k_short_range_request_wire_bytes = kTreePmShortRangeRequestWireBytes;
 constexpr std::size_t k_short_range_response_wire_bytes = kTreePmShortRangeResponseWireBytes;
@@ -1375,6 +1384,7 @@ void encodeShortRangeResponses(
     appendWireDouble(bytes, record.accel_x_comoving);
     appendWireDouble(bytes, record.accel_y_comoving);
     appendWireDouble(bytes, record.accel_z_comoving);
+    appendWireDouble(bytes, record.nearest_pair_r2_comoving);
   }
 }
 
@@ -1406,6 +1416,7 @@ void decodeShortRangeResponses(
     record.accel_x_comoving = readWireDouble(bytes, offset);
     record.accel_y_comoving = readWireDouble(bytes, offset);
     record.accel_z_comoving = readWireDouble(bytes, offset);
+    record.nearest_pair_r2_comoving = readWireDouble(bytes, offset);
     records.push_back(record);
   }
 }
@@ -1954,6 +1965,14 @@ void TreePmForceAccumulatorView::addShortRangeToActiveSlot(
   }
 }
 
+void TreePmForceAccumulatorView::noteNearestPairToActiveSlot(
+    std::size_t slot, double nearest_pair_r2_comoving) const {
+  if (short_range_nearest_pair_r2_comoving.empty()) return;
+  const auto row = active_particle_index[slot];
+  short_range_nearest_pair_r2_comoving[row] =
+      std::min(short_range_nearest_pair_r2_comoving[row], nearest_pair_r2_comoving);
+}
+
 void TreePmCoordinator::shutdownMpiResources() {
   m_pm_solver.shutdownBackendResources();
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
@@ -2381,6 +2400,11 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       accumulator.short_range_accel_x_comoving[row] = 0.0;
       accumulator.short_range_accel_y_comoving[row] = 0.0;
       accumulator.short_range_accel_z_comoving[row] = 0.0;
+    }
+  }
+  if (!accumulator.short_range_nearest_pair_r2_comoving.empty()) {
+    for (const auto row : accumulator.active_particle_index) {
+      accumulator.short_range_nearest_pair_r2_comoving[row] = std::numeric_limits<double>::infinity();
     }
   }
 
@@ -3835,8 +3859,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     const std::uint64_t pairs_begin = spatial_counters != nullptr ? counters.direct_pair_evaluations : 0U;
 
     double ax = 0.0;
+    // Squared separation of the nearest distinct direct-summed source inside
+    // r_cut (encounter timestep input); +infinity when none.
+    double nearest_pair_r2 = std::numeric_limits<double>::infinity();
     if (nodes.size() == 0) {
-      return std::array<double, 3>{0.0, 0.0, 0.0};
+      return std::array<double, 4>{0.0, 0.0, 0.0, nearest_pair_r2};
     }
     double ay = 0.0;
     double az = 0.0;
@@ -3956,6 +3983,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                 if (!lane.valid[i]) continue;
                 if (lane.r2[i] > cutoff_radius2_comoving) { ++counters.cutoff_skipped_pairs; continue; }
                 ++counters.direct_pair_evaluations;
+                nearest_pair_r2 = std::min(nearest_pair_r2, lane.r2[i]);
                 if (lane.dx[i] == 0.0 && lane.dy[i] == 0.0 && lane.dz[i] == 0.0) continue;
                 double value;
                 if (residual_table != nullptr && residual_table->evaluate(lane.r2[i], value)) {
@@ -3988,6 +4016,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               ++counters.cutoff_skipped_pairs;
               continue;
             }
+            nearest_pair_r2 = std::min(nearest_pair_r2, sr2);
             // The exact coincident-pair vector is zero, including when its
             // finite-softening radial coefficient overflows double. Never form
             // 0*infinity. Still count the physical direct interaction.
@@ -4058,7 +4087,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           (counters.direct_pair_evaluations - pairs_begin);
       ++spatial_counters->spatial_targets[bin];
     }
-    return std::array<double, 3>{ax, ay, az};
+    return std::array<double, 4>{ax, ay, az, nearest_pair_r2};
   };
 
   // Group walk (tree_pm_group_walk.hpp). evaluate_group returns false, before
@@ -4136,10 +4165,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const double px = target_x(active_i), py = target_y(active_i), pz = target_z(active_i);
       ++counters.targets;
       double ax = 0.0, ay = 0.0, az = 0.0;
+      double nearest_pair_r2 = std::numeric_limits<double>::infinity();
       std::uint64_t pairs = 0U;
       for (std::size_t range = 0; range < scratch.range_begin.size(); ++range) {
         internal::accumulateTreePmGroupPairs(group_kernel, px, py, pz,
-            scratch.range_begin[range], scratch.range_end[range], ax, ay, az, pairs);
+            scratch.range_begin[range], scratch.range_end[range], ax, ay, az, pairs,
+            nearest_pair_r2);
       }
       counters.direct_pair_evaluations += pairs;
       const std::array<double, 3> target{px, py, pz};
@@ -4166,6 +4197,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         az += contrib[2];
       }
       accumulator.addShortRangeToActiveSlot(active_i, ax, ay, az);
+      accumulator.noteNearestPairToActiveSlot(active_i, nearest_pair_r2);
       sum_sq += ax * ax + ay * ay + az * az;
     }
     return true;
@@ -4290,6 +4322,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               previous_acceleration_available,
               previous_acceleration_magnitude_code);
           accumulator.addShortRangeToActiveSlot(active_i, local_accel[0], local_accel[1], local_accel[2]);
+          accumulator.noteNearestPairToActiveSlot(active_i, local_accel[3]);
           local_sum_sq +=
               local_accel[0] * local_accel[0] + local_accel[1] * local_accel[1] +
               local_accel[2] * local_accel[2];
@@ -4476,11 +4509,13 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     std::pmr::vector<double> remote_batch_ax(tree_resource);
     std::pmr::vector<double> remote_batch_ay(tree_resource);
     std::pmr::vector<double> remote_batch_az(tree_resource);
+    std::pmr::vector<double> remote_batch_nearest_r2(tree_resource);
     std::pmr::vector<std::uint32_t> expected_response_count(tree_resource);
     std::pmr::vector<std::uint32_t> received_response_count(tree_resource);
     remote_batch_ax.reserve(reserved_batch_targets);
     remote_batch_ay.reserve(reserved_batch_targets);
     remote_batch_az.reserve(reserved_batch_targets);
+    remote_batch_nearest_r2.reserve(reserved_batch_targets);
     expected_response_count.reserve(reserved_batch_targets);
     received_response_count.reserve(reserved_batch_targets);
 
@@ -5184,6 +5219,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                      local_accel[0],
                      local_accel[1],
                      local_accel[2]);
+                 accumulator.noteNearestPairToActiveSlot(
+                     batch_begin + batch_slot, local_accel[3]);
                  local_sum_sq +=
                      local_accel[0] * local_accel[0] +
                      local_accel[1] * local_accel[1] +
@@ -5447,6 +5484,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                 peer_responses[peer_slot].accel_x_comoving = remote_accel[0];
                 peer_responses[peer_slot].accel_y_comoving = remote_accel[1];
                 peer_responses[peer_slot].accel_z_comoving = remote_accel[2];
+                peer_responses[peer_slot].nearest_pair_r2_comoving = remote_accel[3];
               }
               const double block_work_ms = std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - block_work_start).count();
@@ -5575,6 +5613,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       remote_batch_ax.assign(batch_size, 0.0);
       remote_batch_ay.assign(batch_size, 0.0);
       remote_batch_az.assign(batch_size, 0.0);
+      remote_batch_nearest_r2.assign(batch_size, std::numeric_limits<double>::infinity());
       m_last_residual_stats.remote_response_bytes += static_cast<std::uint64_t>(response_recv_payload.size());
       m_last_residual_stats.let_wire_bytes_sent += static_cast<std::uint64_t>(total_response_send_bytes);
       m_last_residual_stats.let_wire_bytes_received += static_cast<std::uint64_t>(total_response_recv_bytes);
@@ -5609,7 +5648,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       const std::uint64_t let_remote_accumulator_bytes =
           static_cast<std::uint64_t>(
               remote_batch_ax.capacity() + remote_batch_ay.capacity() +
-              remote_batch_az.capacity()) *
+              remote_batch_az.capacity() + remote_batch_nearest_r2.capacity()) *
           static_cast<std::uint64_t>(sizeof(double));
       const std::uint64_t let_rank_metadata_bytes =
           static_cast<std::uint64_t>(
@@ -5707,10 +5746,15 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               !std::isfinite(response.accel_z_comoving)) {
             throw std::runtime_error("TreePM short-range response contains non-finite acceleration");
           }
+          if (std::isnan(response.nearest_pair_r2_comoving) || response.nearest_pair_r2_comoving < 0.0) {
+            throw std::runtime_error("TreePM short-range response carries an invalid nearest-pair separation");
+          }
           response_seen_by_peer[static_cast<std::size_t>(peer)][response.request_id] = 1U;
           remote_batch_ax[response.request_id] += response.accel_x_comoving;
           remote_batch_ay[response.request_id] += response.accel_y_comoving;
           remote_batch_az[response.request_id] += response.accel_z_comoving;
+          remote_batch_nearest_r2[response.request_id] = std::min(
+              remote_batch_nearest_r2[response.request_id], response.nearest_pair_r2_comoving);
           if (received_response_count[response.request_id] == std::numeric_limits<std::uint32_t>::max()) {
             throw std::overflow_error("TreePM short-range received-response counter overflow");
           }
@@ -5750,6 +5794,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
             remote_batch_ax[batch_slot],
             remote_batch_ay[batch_slot],
             remote_batch_az[batch_slot]);
+        accumulator.noteNearestPairToActiveSlot(
+            batch_begin + batch_slot, remote_batch_nearest_r2[batch_slot]);
         m_last_residual_stats.remote_short_range_sum_sq +=
             remote_batch_ax[batch_slot] * remote_batch_ax[batch_slot] +
             remote_batch_ay[batch_slot] * remote_batch_ay[batch_slot] +

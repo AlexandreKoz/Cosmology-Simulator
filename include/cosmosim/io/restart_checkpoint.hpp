@@ -18,11 +18,15 @@ namespace cosmosim::core { class MemoryGovernor; struct FrozenConfig; }
 namespace cosmosim::io {
 
 struct RestartSchema {
+  // v24 adds /gravity_force_cache/hierarchical_endpoint: the synchronized
+  // hierarchical-KDK split force (Tree and PM components) and nearest-pair
+  // encounter lane at the checkpoint, so a resumed run reuses the same
+  // endpoint force as the uninterrupted run instead of re-evaluating it.
   // v23 adds canonical SHA-256 payload integrity while retaining the v22 legacy hash
   // only for backward compatibility and migration diagnostics.
   // v22 adds conserved gas metal mass and immutable star-birth identity.
-  std::string name = "cosmosim_restart_v23";
-  std::uint32_t version = 23;
+  std::string name = "cosmosim_restart_v24";
+  std::uint32_t version = 24;
 };
 
 [[nodiscard]] const RestartSchema& restartSchema();
@@ -114,6 +118,19 @@ struct GravityForceCachePersistentView {
   std::span<const double> cell_accel_x_comoving;
   std::span<const double> cell_accel_y_comoving;
   std::span<const double> cell_accel_z_comoving;
+  // v24 hierarchical synchronized endpoint (rows follow particle_id). Valid
+  // only together with `valid`, at a hierarchical synchronization boundary
+  // whose Tree/PM split force was evaluated at the checkpoint positions.
+  bool hierarchical_endpoint_valid = false;
+  std::uint64_t hierarchical_pm_field_version = 0U;
+  std::span<const double> hierarchical_tree_accel_x_comoving;
+  std::span<const double> hierarchical_tree_accel_y_comoving;
+  std::span<const double> hierarchical_tree_accel_z_comoving;
+  std::span<const double> hierarchical_pm_accel_x_comoving;
+  std::span<const double> hierarchical_pm_accel_y_comoving;
+  std::span<const double> hierarchical_pm_accel_z_comoving;
+  // Squared comoving nearest direct-pair separation; +infinity when none.
+  std::span<const double> hierarchical_nearest_pair_r2_comoving;
 };
 
 struct GravityForceCachePersistentState {
@@ -130,7 +147,21 @@ struct GravityForceCachePersistentState {
   std::vector<double> cell_accel_x_comoving;
   std::vector<double> cell_accel_y_comoving;
   std::vector<double> cell_accel_z_comoving;
+  // v24 hierarchical synchronized endpoint; see GravityForceCachePersistentView.
+  bool hierarchical_endpoint_valid = false;
+  std::uint64_t hierarchical_pm_field_version = 0U;
+  std::vector<double> hierarchical_tree_accel_x_comoving;
+  std::vector<double> hierarchical_tree_accel_y_comoving;
+  std::vector<double> hierarchical_tree_accel_z_comoving;
+  std::vector<double> hierarchical_pm_accel_x_comoving;
+  std::vector<double> hierarchical_pm_accel_y_comoving;
+  std::vector<double> hierarchical_pm_accel_z_comoving;
+  std::vector<double> hierarchical_nearest_pair_r2_comoving;
 };
+
+// Non-owning view over an owning cache (all lanes, including v24 endpoint).
+[[nodiscard]] GravityForceCachePersistentView makeGravityForceCachePersistentView(
+    const GravityForceCachePersistentState& cache) noexcept;
 
 struct RestartWritePayload {
   RestartPersistentStateView persistent_state;

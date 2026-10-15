@@ -170,4 +170,69 @@ and fixes (validation of these is left to the project owner):
 | `integration_transform_fuzz_invariants`, `validation_transform_fuzz_invariants_long` | Same missing gas-cell scheduler | Builds one from the synced cell mirror at the particle scheduler's tick |
 | `integration_reference_workflow` | `restart.read.complete` was deliberately renamed `restart.verify.complete` by the streaming-verification change (`36967e9`), which also dropped `scheduler_pending_transition_count` from the event | Test expects the new name; the diagnostic is restored in `restart.verify.complete` |
 | `unit_ic_reader` | Serial duplicate-ID message changed to "duplicate or zero persistent particle IDs" (`a5620b2`) | Test accepts the serial and distributed wordings (both still contain "duplicate" and "particle IDs") |
-| `integration_hierarchical_treepm_workflow` | D1 above (1.62e-3 vs gate 1e-3) | Open — design decision |
+| `integration_hierarchical_treepm_workflow` | D1 above (1.62e-3 vs gate 1e-3) | Round 4 below |
+
+### Round 4 — D1 encounter criterion and R1 endpoint force reuse (source-level)
+
+Status: implemented and compiled (`pm-hdf5-fftw-debug`, `cpu-only-debug`,
+`cpu-only-release-native` full builds, no errors); **not executed** — the
+project owner runs the suites.
+
+**D1 — softened-encounter rung criterion.** Every Tree solve records per target
+the squared separation of its nearest distinct direct-summed source inside
+`r_cut` (`TreePmForceAccumulatorView::short_range_nearest_pair_r2_comoving`,
+min-combined over the per-target walk, group walk (`omp simd reduction(min)`)
+and remote MPI responses). The hierarchical rung candidate adds
+`dt <= 0.2 sqrt(a^3 (r_nn^2+eps^2)^{3/2} / (G m_max))`: the softened two-body
+dynamical time at coincidence, weaker than the acceleration criterion by
+`sqrt(r/eps)` beyond `r ~ eps`. Config `numerics.hierarchical_encounter_timestep_enabled`
+(default `true`, typed, dumped, documented, parser test). Global KDK unchanged.
+Wire: the short-range response record grows 80 -> 88 bytes (wire v2), memory
+estimators follow the shared constant; the remote accumulator estimate is
+4 lanes. Expected effect on the gate: the crossing pair is now held at the
+softened dynamical time for the whole block; whether that closes the remaining
+1.62e-3 -> < 1e-3 is the validation target (gate unchanged).
+
+**R1 — hierarchical endpoint force reuse.** A block closes with an all-active
+Tree+PM solve at the synchronized positions and the next block opened with a
+second all-target solve at the same positions. `TimeCoordinator` now skips that
+bootstrap when every rank (collective min) reports the endpoint complete:
+every row's Tree generation equals the source generation, PM captured at it
+from the integrator's committed field version (`GravityRuntime::
+hierarchicalEndpointForceReusable`). Migration clears the lanes, so a block
+after a migration bootstraps. Counters `time.hierarchical_endpoint_force_reuse`
+/ `_bootstrap`. Saves one all-target Tree+PM solve per coarse block.
+
+Restart equivalence: re-evaluating at the same positions is not bitwise equal
+to the endpoint (the adaptive relative MAC reads the force history the endpoint
+updated), so restart schema **v24** persists `/gravity_force_cache/hierarchical_endpoint`
+(Tree xyz, PM xyz, nearest-pair r^2, `valid`, `pm_field_version`), validated,
+covered by both integrity digests and the streaming verifier, and restored by
+`importRestartForceCache`. v23 files stay readable (no endpoint -> bootstrap).
+Read-staging admission now also counts the force cache and endpoint lanes.
+
+Public interface changes (migration notes): `GravityRuntime` gains pure virtual
+`hierarchicalEndpointForceReusable(state, integrator)` and
+`hierarchicalNearestPairR2()` (single in-tree implementation);
+`GravityForceCachePersistentView/State` gain the v24 fields and
+`makeGravityForceCachePersistentView()`; `TreePmForceAccumulatorView` gains
+`short_range_nearest_pair_r2_comoving` and `noteNearestPairToActiveSlot`;
+`kTreePmShortRangeResponseWireBytes` is 88. `restartSchema()` reports v24;
+release manifest and doc gates updated.
+
+Reproducibility impact: hierarchical trajectories change (encounter criterion
+and reuse of the endpoint force instead of a re-evaluated one); global KDK,
+snapshots and provenance schemas are unchanged; all ranks must run the same
+binary (wire v2).
+
+Tests added/updated: `unit_config_parser` (new key), `unit_restart_checkpoint_schema`
+(v24 identity, v23 compatible), `integration_restart_checkpoint_roundtrip`
+(endpoint roundtrip incl. `+inf`, stale-lane rejection), doc/release gates.
+
+Commands for the owner:
+
+```bash
+cmake --build build/pm-hdf5-fftw-debug -j
+ctest --test-dir build/pm-hdf5-fftw-debug --output-on-failure
+ctest --test-dir build/pm-hdf5-fftw-debug -R "hierarchical|restart|config_parser|tree_pm" --output-on-failure
+```

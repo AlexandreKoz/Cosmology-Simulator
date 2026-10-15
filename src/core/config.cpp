@@ -1220,6 +1220,7 @@ struct ConfigKeySpec {
       {"numerics.hierarchical_max_rung", "0"},
       {"numerics.hierarchical_coarse_displacement_criterion", "max_speed_mesh"},
       {"numerics.hierarchical_coarse_rms_displacement_factor", "0.25"},
+      {"numerics.hierarchical_encounter_timestep_enabled", "true"},
       {"numerics.amr_max_level", "10"},
       {"numerics.gravity_softening", "1.0 kpc"},
       {"numerics.gravity_softening_gas", ""},
@@ -2383,6 +2384,8 @@ class NormalizedConfigStream {
                 frozen.config.numerics.hierarchical_coarse_displacement_criterion) << '\n';
   stream << "hierarchical_coarse_rms_displacement_factor = "
          << frozen.config.numerics.hierarchical_coarse_rms_displacement_factor << '\n';
+  stream << "hierarchical_encounter_timestep_enabled = "
+         << (frozen.config.numerics.hierarchical_encounter_timestep_enabled ? "true" : "false") << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
   stream << "gravity_softening = " << frozen.config.numerics.gravity_softening_kpc_comoving << " kpc\n";
   auto emitOptionalSoftening = [&](std::string_view key, double value_kpc_comoving) {
@@ -3040,6 +3043,10 @@ class NormalizedConfigStream {
       requireString(entries, consumed, "numerics.hierarchical_coarse_rms_displacement_factor",
                     defaultFor("numerics.hierarchical_coarse_rms_displacement_factor")),
       "numerics.hierarchical_coarse_rms_displacement_factor");
+  frozen.config.numerics.hierarchical_encounter_timestep_enabled = parseBool(
+      requireString(entries, consumed, "numerics.hierarchical_encounter_timestep_enabled",
+                    defaultFor("numerics.hierarchical_encounter_timestep_enabled")),
+      "numerics.hierarchical_encounter_timestep_enabled");
   frozen.config.numerics.amr_max_level = parseNumber<int>(
       requireString(entries, consumed, "numerics.amr_max_level", "10"), "numerics.amr_max_level");
   frozen.config.numerics.gravity_softening_kpc_comoving = parseLengthKpc(

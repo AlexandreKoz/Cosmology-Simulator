@@ -582,6 +582,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     persistent("gravity_runtime.hierarchical_tree_x", m_hierarchical_tree_x);
     persistent("gravity_runtime.hierarchical_tree_y", m_hierarchical_tree_y);
     persistent("gravity_runtime.hierarchical_tree_z", m_hierarchical_tree_z);
+    persistent("gravity_runtime.hierarchical_nearest_pair_r2", m_hierarchical_nearest_r2);
     persistent("gravity_runtime.cell_force_cache_valid", m_cell_force_cache_valid);
 
     core::MemoryReport owned_report = std::move(builder).finish();
@@ -757,6 +758,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_particle_force_cache_valid.clear();
     m_cell_force_cache_valid.clear();
     m_hierarchical_force_generation.clear();
+    m_hierarchical_nearest_r2.clear();
     m_hierarchical_pm_source_generation = 0U;
     m_hierarchical_pm_field_version = 0U;
     m_active_source_indices = {};
@@ -838,7 +840,60 @@ class GravityRuntimeImpl final : public GravityRuntime {
     cache.cell_accel_x_comoving = m_cell_accel_x;
     cache.cell_accel_y_comoving = m_cell_accel_y;
     cache.cell_accel_z_comoving = m_cell_accel_z;
+    // v24: persist the synchronized hierarchical split endpoint whenever it
+    // is complete at the checkpoint positions, so a resumed run reuses the
+    // exact force the uninterrupted run reuses (no re-evaluation whose
+    // relative MAC would see a different force history).
+    if (hierarchicalEndpointCompleteAt(state)) {
+      cache.hierarchical_endpoint_valid = true;
+      cache.hierarchical_pm_field_version = m_hierarchical_pm_field_version;
+      cache.hierarchical_tree_accel_x_comoving = m_hierarchical_tree_x;
+      cache.hierarchical_tree_accel_y_comoving = m_hierarchical_tree_y;
+      cache.hierarchical_tree_accel_z_comoving = m_hierarchical_tree_z;
+      cache.hierarchical_pm_accel_x_comoving = m_hierarchical_pm_x;
+      cache.hierarchical_pm_accel_y_comoving = m_hierarchical_pm_y;
+      cache.hierarchical_pm_accel_z_comoving = m_hierarchical_pm_z;
+      cache.hierarchical_nearest_pair_r2_comoving = m_hierarchical_nearest_r2;
+    }
     return cache;
+  }
+
+  // Local completeness of the synchronized hierarchical endpoint: every row
+  // carries Tree and PM components (and the nearest-pair lane) evaluated at
+  // the current source positions, with the PM component from one committed
+  // field. Only an all-active synchronization endpoint establishes this.
+  [[nodiscard]] bool hierarchicalEndpointCompleteAt(const core::SimulationState& state) const noexcept {
+    const std::size_t n = state.particles.size();
+    const std::uint64_t generation = state.gravitySourceGeneration();
+    if (!m_force_cache_valid || state.cells.size() != 0U ||
+        m_force_cache_particle_index_generation != state.particleIndexGeneration() ||
+        m_force_cache_source_generation != generation ||
+        m_hierarchical_pm_source_generation != generation || m_hierarchical_pm_field_version == 0U ||
+        m_hierarchical_force_generation.size() != n || m_particle_force_cache_valid.size() != n ||
+        m_particle_accel_x.size() != n || m_particle_accel_y.size() != n || m_particle_accel_z.size() != n ||
+        m_hierarchical_tree_x.size() != n || m_hierarchical_tree_y.size() != n ||
+        m_hierarchical_tree_z.size() != n || m_hierarchical_pm_x.size() != n ||
+        m_hierarchical_pm_y.size() != n || m_hierarchical_pm_z.size() != n ||
+        m_hierarchical_nearest_r2.size() != n) {
+      return false;
+    }
+    for (std::size_t row = 0; row < n; ++row) {
+      if (m_hierarchical_force_generation[row] != generation || m_particle_force_cache_valid[row] == 0U) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool hierarchicalEndpointForceReusable(
+      const core::SimulationState& state, const core::IntegratorState& integrator) const override {
+    return integrator.pm_long_range_field_valid &&
+        m_hierarchical_pm_field_version == integrator.pm_sync_state.fieldVersion() &&
+        hierarchicalEndpointCompleteAt(state);
+  }
+
+  [[nodiscard]] std::span<const double> hierarchicalNearestPairR2() const noexcept override {
+    return m_hierarchical_nearest_r2;
   }
 
   void importRestartForceCache(
@@ -947,6 +1002,49 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_source_generation = state.gravitySourceGeneration();
     m_particle_force_cache_valid.assign(state.particles.size(), 1U);
     m_cell_force_cache_valid.assign(state.cells.size(), 1U);
+
+    // v24 hierarchical endpoint. Absent (pre-v24 or not at a synchronized
+    // hierarchical endpoint) leaves the split lanes unmaterialized, so the
+    // hierarchical segment performs its synchronized bootstrap evaluation.
+    m_hierarchical_force_generation.clear();
+    m_hierarchical_nearest_r2.clear();
+    m_hierarchical_pm_source_generation = 0U;
+    m_hierarchical_pm_field_version = 0U;
+    if (!cache.hierarchical_endpoint_valid) {
+      return;
+    }
+    const std::size_t n = state.particles.size();
+    const std::array<const std::vector<double>*, 7> endpoint_lanes{
+        &cache.hierarchical_tree_accel_x_comoving, &cache.hierarchical_tree_accel_y_comoving,
+        &cache.hierarchical_tree_accel_z_comoving, &cache.hierarchical_pm_accel_x_comoving,
+        &cache.hierarchical_pm_accel_y_comoving, &cache.hierarchical_pm_accel_z_comoving,
+        &cache.hierarchical_nearest_pair_r2_comoving};
+    for (const auto* lane : endpoint_lanes) {
+      if (lane->size() != n) {
+        throw std::runtime_error(
+            "restart hierarchical endpoint extent does not match authoritative SimulationState");
+      }
+    }
+    m_hierarchical_tree_x.resize(n);
+    m_hierarchical_tree_y.resize(n);
+    m_hierarchical_tree_z.resize(n);
+    m_hierarchical_pm_x.resize(n);
+    m_hierarchical_pm_y.resize(n);
+    m_hierarchical_pm_z.resize(n);
+    m_hierarchical_nearest_r2.resize(n);
+    for (std::size_t row = 0; row < n; ++row) {
+      const std::size_t cached_row = particle_index_by_id.at(state.particle_sidecar.particle_id[row]);
+      m_hierarchical_tree_x[row] = cache.hierarchical_tree_accel_x_comoving[cached_row];
+      m_hierarchical_tree_y[row] = cache.hierarchical_tree_accel_y_comoving[cached_row];
+      m_hierarchical_tree_z[row] = cache.hierarchical_tree_accel_z_comoving[cached_row];
+      m_hierarchical_pm_x[row] = cache.hierarchical_pm_accel_x_comoving[cached_row];
+      m_hierarchical_pm_y[row] = cache.hierarchical_pm_accel_y_comoving[cached_row];
+      m_hierarchical_pm_z[row] = cache.hierarchical_pm_accel_z_comoving[cached_row];
+      m_hierarchical_nearest_r2[row] = cache.hierarchical_nearest_pair_r2_comoving[cached_row];
+    }
+    m_hierarchical_force_generation.assign(n, state.gravitySourceGeneration());
+    m_hierarchical_pm_source_generation = state.gravitySourceGeneration();
+    m_hierarchical_pm_field_version = cache.hierarchical_pm_field_version;
   }
 
   [[nodiscard]] static PmSyncSurface toPmSyncSurface(core::IntegrationStage stage) {
@@ -1712,7 +1810,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     if (hierarchical) {
       std::exception_ptr split_cache_failure;
       try {
-        if (m_hierarchical_force_generation.size() != particle_count) {
+        if (m_hierarchical_force_generation.size() != particle_count ||
+            m_hierarchical_nearest_r2.size() != particle_count) {
           m_hierarchical_force_generation.assign(particle_count, m_force_cache_valid &&
               m_force_cache_source_generation == context.state.gravitySourceGeneration()
               ? context.state.gravitySourceGeneration() : 0U);
@@ -1722,6 +1821,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
           m_hierarchical_tree_x.assign(particle_count, 0.0);
           m_hierarchical_tree_y.assign(particle_count, 0.0);
           m_hierarchical_tree_z.assign(particle_count, 0.0);
+          m_hierarchical_nearest_r2.assign(particle_count, std::numeric_limits<double>::infinity());
         }
       } catch (...) { split_cache_failure = std::current_exception(); }
       FailureCoordinator(m_services).rethrowCollectiveFailure(split_cache_failure,
@@ -1787,6 +1887,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .short_range_accel_x_comoving = hierarchical ? std::span<double>(m_hierarchical_tree_x) : std::span<double>{},
         .short_range_accel_y_comoving = hierarchical ? std::span<double>(m_hierarchical_tree_y) : std::span<double>{},
         .short_range_accel_z_comoving = hierarchical ? std::span<double>(m_hierarchical_tree_z) : std::span<double>{},
+        .short_range_nearest_pair_r2_comoving =
+            hierarchical ? std::span<double>(m_hierarchical_nearest_r2) : std::span<double>{},
     };
 
     // The integrator owns PM cadence state. At every rank-coordinated force
@@ -3619,6 +3721,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
   std::vector<double> m_hierarchical_tree_x;
   std::vector<double> m_hierarchical_tree_y;
   std::vector<double> m_hierarchical_tree_z;
+  // Nearest distinct direct-pair separation squared from the latest Tree
+  // solve of each row (+infinity: none inside r_cut). Same freshness as the
+  // Tree lanes (m_hierarchical_force_generation).
+  std::vector<double> m_hierarchical_nearest_r2;
   std::vector<std::uint8_t> m_cell_force_cache_valid;
   gravity::DecompositionEpoch m_decomposition_epoch{};
   gravity::GravityMemoryEstimate m_last_pre_run_memory_estimate{};

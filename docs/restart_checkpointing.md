@@ -3,7 +3,7 @@
 ## Scope and schema
 
 CosmoSim restart checkpoints are **exact-continuation artifacts** and intentionally richer than analysis snapshots.
-The restart schema (`cosmosim_restart_v23`) persists:
+The restart schema (`cosmosim_restart_v24`) persists:
 
 - full `SimulationState` hot/cold SoA lanes (through a narrow `RestartPersistentStateView`),
 - `StateMetadata` blob,
@@ -17,6 +17,9 @@ The restart schema (`cosmosim_restart_v23`) persists:
 - module sidecars (`ModuleSidecarRegistry`) with per-module schema versions,
 - `IntegratorState`, including the `pm_refresh_enabled` policy bit,
 - restart-authoritative `/gravity_force_cache` acceleration triplets used by the next KDK pre-kick,
+- v24 `/gravity_force_cache/hierarchical_endpoint`: at a closed hierarchical KDK block the
+  Tree and PM split components and the nearest direct-pair separation squared for every
+  particle, so the next block opens with the same force in uninterrupted and resumed runs,
 - hierarchical scheduler persistent state (`TimeBinPersistentState`),
 - distributed TreePM continuation state (`distributed_gravity_state`, schema-versioned),
 - normalized config text/hash and provenance payload,
@@ -139,7 +142,7 @@ Schema v15 retains the compact `/restart_diagnostics` group. It records the sche
 - Format: HDF5 (`writeRestartCheckpointHdf5`, `readRestartCheckpointHdf5`).
 - Root file-kind gate: restart readers require `cosmosim_file_kind=restart_checkpoint` and reject ordinary `science_snapshot` files before reading runtime truth.
 - Schema version gate: `isRestartSchemaCompatible(file_schema_version)`.
-- Current compatibility policy: write current v23; read v22/v21 plus documented v20/v19/v18/v17/v16/v15/v14 paths. v20 has no code-time output-event fields and materializes that lane as disabled. v19 also has no serialized gravity force cache and therefore follows the explicit safe-bootstrap compatibility path rather than claiming bitwise workflow continuation.
+- Current compatibility policy: write current v24; read v23 (no hierarchical endpoint: the resumed hierarchical segment bootstraps its first block), v22/v21 plus documented v20/v19/v18/v17/v16/v15/v14 paths. v20 has no code-time output-event fields and materializes that lane as disabled. v19 also has no serialized gravity force cache and therefore follows the explicit safe-bootstrap compatibility path rather than claiming bitwise workflow continuation.
 - v14 compatibility materializes `/state/gas_cell_identity` from
   `/state/gas_cells/{gas_cell_id,parent_particle_id}` with `has_parent_particle=true`
   and requires `gas_cell_id == parent_particle_id != 0` for every cell. It does not
@@ -426,8 +429,8 @@ This does **not** change actual resume semantics: `readRestartCheckpointHdf5()` 
 
 ## P6 optional hierarchical boundary contract
 
-SOURCE-IMPLEMENTED / VALIDATION PENDING. Restart schema remains v23: no new
-HDF5 fields or redundant reconstructible fine state are added. Existing scheduler
+SOURCE-IMPLEMENTED / VALIDATION PENDING. Restart schema v24 adds only the
+synchronized endpoint split force (below); no fine/in-flight state. Existing scheduler
 bins, next activation, integer tick, integrator/common drift epoch, source
 identity, PM cadence and synchronized total-force history suffice **only at a
 closed coarse block boundary**. Hierarchy validates aligned ticks, inactive
@@ -442,10 +445,21 @@ absent. Dataset shape/type are unchanged. Migration carries existing scheduler
 and drift fields through its bounded generic transaction, then recompacts
 uniform species/owner/drift metadata. Rung-zero compact migration is preserved.
 
-PM/Tree split caches and per-row Tree-generation tags are transient. Every
-coarse block starts with an all-target synchronized solve in both uninterrupted
-and restarted execution, so continuation does not depend on uncheckpointed
-component caches. PM opportunities/versions remain persisted authority. Exact
+Endpoint force reuse (October 2026 TreePM campaign, R1). A coarse block closes
+with an all-active Tree+PM solve at the synchronized positions; the next block
+opens at exactly those positions. When every rank still holds that endpoint
+complete (every row's Tree generation equals the source generation, PM was
+captured at it from the integrator's committed field version, no migration in
+between), the block opens with it instead of a second synchronized solve.
+Otherwise (first block, after a migration, a pre-v24 restart) the
+all-target synchronized bootstrap solve runs, as before. A re-evaluation at the
+same positions is not bitwise identical to the endpoint because the adaptive
+relative MAC reads the force history, which the endpoint itself updated; v24
+therefore persists the endpoint Tree/PM components and nearest-pair lane, and
+`GravityRuntime::importRestartForceCache` restores them with the restored source
+generation and the persisted PM field version, so uninterrupted and resumed runs
+take the same branch with the same forces. Per-row Tree-generation tags remain
+transient (re-stamped on import). PM opportunities/versions remain persisted authority. Exact
 restart equivalence still needs qualification. Optional refit retains different
 transient topology across an uninterrupted run, and spatial EMA starts cold on
 restart; compare these modes separately without an unsupported bitwise claim.
