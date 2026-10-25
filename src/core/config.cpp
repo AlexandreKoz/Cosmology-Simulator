@@ -673,6 +673,15 @@ parseInitialConditionMissingFieldPolicy(
       "' (supported: cic, tsc)");
 }
 
+[[nodiscard]] TreePmForceGradient parseTreePmForceGradient(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "spectral") return TreePmForceGradient::kSpectral;
+  if (lower == "finite_difference_4") return TreePmForceGradient::kFiniteDifference4;
+  throw ConfigError(
+      "key 'numerics.treepm_pm_force_gradient': invalid value '" + value +
+      "' (supported: spectral, finite_difference_4)");
+}
+
 [[nodiscard]] TreePmOpeningCriterion parseTreePmOpeningCriterion(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "geometric") {
@@ -852,6 +861,20 @@ parseInitialConditionMissingFieldPolicy(
     case ScienceSnapshotLayout::kSharded: return "sharded";
   }
   throw ConfigError("unhandled output.snapshot_layout enum value");
+}
+
+[[nodiscard]] SnapshotVerificationPolicy parseSnapshotVerificationPolicy(const std::string& value) {
+  if (value == "full_readback") return SnapshotVerificationPolicy::kFullReadback;
+  if (value == "structural") return SnapshotVerificationPolicy::kStructural;
+  throw ConfigError("output.snapshot_verification must be one of: full_readback, structural");
+}
+
+[[nodiscard]] std::string_view snapshotVerificationPolicyLabel(SnapshotVerificationPolicy policy) {
+  switch (policy) {
+    case SnapshotVerificationPolicy::kFullReadback: return "full_readback";
+    case SnapshotVerificationPolicy::kStructural: return "structural";
+  }
+  throw ConfigError("unhandled output.snapshot_verification enum value");
 }
 
 [[nodiscard]] StarFormationModelKind parseStarFormationModelKind(const std::string& value) {
@@ -1221,6 +1244,7 @@ struct ConfigKeySpec {
       {"numerics.hierarchical_coarse_displacement_criterion", "max_speed_mesh"},
       {"numerics.hierarchical_coarse_rms_displacement_factor", "0.25"},
       {"numerics.hierarchical_encounter_timestep_enabled", "true"},
+      {"numerics.gravity_timestep_eta", "0.2"},
       {"numerics.amr_max_level", "10"},
       {"numerics.gravity_softening", "1.0 kpc"},
       {"numerics.gravity_softening_gas", ""},
@@ -1253,9 +1277,11 @@ struct ConfigKeySpec {
       {"numerics.treepm_adaptive_error_estimator", "residual_derivative"},
       {"numerics.treepm_cutoff_node_policy", "contain"},
       {"numerics.treepm_group_walk_enabled", "false"},
+      {"numerics.treepm_group_walk_target_size", "0"},
       {"numerics.treepm_identical_source_tree_reuse_enabled", "false"},
       {"numerics.treepm_topology_refit_enabled", "false"},
       {"numerics.treepm_assignment_scheme", "tsc"},
+      {"numerics.treepm_pm_force_gradient", "spectral"},
       {"numerics.treepm_enable_window_deconvolution", "true"},
       {"numerics.treepm_update_cadence_steps", "1"},
       {"numerics.treepm_allow_diagnostic_naive_dft", "false"},
@@ -1363,6 +1389,8 @@ struct ConfigKeySpec {
       {"output.snapshot_layout", "auto"},
       {"output.snapshot_num_files", "0"},
       {"output.write_restarts", "true"},
+      {"output.restart_interval_steps", "0"},
+      {"output.snapshot_verification", "full_readback"},
       {"parallel.mpi_ranks_expected", "1"},
       {"parallel.omp_threads", "1"},
       {"parallel.gpu_devices", "0"},
@@ -1594,6 +1622,14 @@ void validateConfig(const SimulationConfig& config) {
       config.numerics.hierarchical_coarse_rms_displacement_factor > 1.0) {
     throw ConfigError("numerics.hierarchical_coarse_rms_displacement_factor must be finite and in (0, 1]");
   }
+  // eta > 1 would let a particle cross more than its softening length per
+  // step under constant acceleration (dt^2 |a| / eps = eta^2), which leaves the
+  // regime the softened second-order KDK criterion is designed for.
+  if (!std::isfinite(config.numerics.gravity_timestep_eta) ||
+      config.numerics.gravity_timestep_eta <= 0.0 ||
+      config.numerics.gravity_timestep_eta > 1.0) {
+    throw ConfigError("numerics.gravity_timestep_eta must be finite and in (0, 1]");
+  }
   if (config.numerics.hierarchical_max_rung > 0 &&
       (config.mode.mode != SimulationMode::kCosmoCube || config.physics.enable_cooling ||
        config.physics.enable_star_formation || config.physics.enable_feedback ||
@@ -1621,6 +1657,12 @@ void validateConfig(const SimulationConfig& config) {
       config.output.snapshot_num_files > 1U) {
     throw ConfigError(
         "output.snapshot_num_files > 1 is only valid with snapshot_layout=aggregated");
+  }
+  if (config.output.restart_interval_steps < 0) {
+    throw ConfigError("output.restart_interval_steps must be >= 0; 0 keeps checkpoints coupled to snapshot events");
+  }
+  if (config.output.restart_interval_steps > 0 && !config.output.write_restarts) {
+    throw ConfigError("output.restart_interval_steps > 0 requires output.write_restarts = true");
   }
   if (config.parallel.mpi_ranks_expected <= 0) {
     throw ConfigError("parallel.mpi_ranks_expected must be positive");
@@ -1927,6 +1969,17 @@ void validateConfig(const SimulationConfig& config) {
         "treepm_adaptive_error_estimator=relative_monopole, treepm_gaussian_pair_lookup_enabled=true "
         "and leaf SIMD/full-residual lookup disabled");
   }
+  // Groups never cross a residual block, so sizes above the block size are
+  // meaningless; 0 keeps the legacy one-source-leaf grouping.
+  if (config.numerics.treepm_group_walk_target_size < 0 ||
+      config.numerics.treepm_group_walk_target_size > config.numerics.treepm_residual_block_size ||
+      config.numerics.treepm_group_walk_target_size == 1) {
+    throw ConfigError(
+        "numerics.treepm_group_walk_target_size must be 0 (one source leaf) or in [2, treepm_residual_block_size]");
+  }
+  if (config.numerics.treepm_group_walk_target_size > 0 && !config.numerics.treepm_group_walk_enabled) {
+    throw ConfigError("numerics.treepm_group_walk_target_size > 0 requires treepm_group_walk_enabled=true");
+  }
   if (!std::isfinite(config.numerics.treepm_tree_relative_force_tolerance) ||
       config.numerics.treepm_tree_relative_force_tolerance <= 0.0) {
     throw ConfigError(
@@ -1941,6 +1994,19 @@ void validateConfig(const SimulationConfig& config) {
     throw ConfigError(
         "numerics.treepm_update_cadence_steps must be exactly 1 in production: PM mesh reuse "
         "does not yet validate source, scale-factor, or decomposition epochs");
+  }
+  if (config.numerics.treepm_pm_force_gradient == TreePmForceGradient::kFiniteDifference4) {
+    const bool periodic_gravity =
+        config.mode.gravity_boundary == ModeGravityBoundary::kPeriodic ||
+        (config.mode.gravity_boundary == ModeGravityBoundary::kAuto &&
+         (config.mode.mode == SimulationMode::kCosmoCube || config.mode.mode == SimulationMode::kZoomIn));
+    if (!periodic_gravity || config.parallel.gpu_devices > 0 ||
+        config.numerics.treepm_pm_grid_nx < 4 || config.numerics.treepm_pm_grid_ny < 4 ||
+        config.numerics.treepm_pm_grid_nz < 4) {
+      throw ConfigError(
+          "numerics.treepm_pm_force_gradient=finite_difference_4 requires periodic host PM with "
+          ">= 4 cells per axis");
+    }
   }
   if (config.numerics.treepm_tree_exchange_batch_bytes == 0) {
     throw ConfigError("numerics.treepm_tree_exchange_batch_bytes must be > 0");
@@ -2386,6 +2452,7 @@ class NormalizedConfigStream {
          << frozen.config.numerics.hierarchical_coarse_rms_displacement_factor << '\n';
   stream << "hierarchical_encounter_timestep_enabled = "
          << (frozen.config.numerics.hierarchical_encounter_timestep_enabled ? "true" : "false") << '\n';
+  stream << "gravity_timestep_eta = " << frozen.config.numerics.gravity_timestep_eta << '\n';
   stream << "amr_max_level = " << frozen.config.numerics.amr_max_level << '\n';
   stream << "gravity_softening = " << frozen.config.numerics.gravity_softening_kpc_comoving << " kpc\n";
   auto emitOptionalSoftening = [&](std::string_view key, double value_kpc_comoving) {
@@ -2435,12 +2502,17 @@ class NormalizedConfigStream {
          << treePmCutoffNodePolicyToString(frozen.config.numerics.treepm_cutoff_node_policy) << '\n';
   stream << "treepm_group_walk_enabled = "
          << (frozen.config.numerics.treepm_group_walk_enabled ? "true" : "false") << '\n';
+  stream << "treepm_group_walk_target_size = " << frozen.config.numerics.treepm_group_walk_target_size << '\n';
   stream << "treepm_identical_source_tree_reuse_enabled = "
          << (frozen.config.numerics.treepm_identical_source_tree_reuse_enabled ? "true" : "false") << '\n';
   stream << "treepm_topology_refit_enabled = "
          << (frozen.config.numerics.treepm_topology_refit_enabled ? "true" : "false") << '\n';
   stream << "treepm_assignment_scheme = "
          << (frozen.config.numerics.treepm_assignment_scheme == TreePmAssignmentScheme::kCic ? "cic" : "tsc")
+         << '\n';
+  stream << "treepm_pm_force_gradient = "
+         << (frozen.config.numerics.treepm_pm_force_gradient == TreePmForceGradient::kFiniteDifference4
+                 ? "finite_difference_4" : "spectral")
          << '\n';
   stream << "treepm_enable_window_deconvolution = "
          << (frozen.config.numerics.treepm_enable_window_deconvolution ? "true" : "false") << '\n';
@@ -2594,6 +2666,9 @@ class NormalizedConfigStream {
   stream << "snapshot_num_files = "
          << frozen.config.output.snapshot_num_files << '\n';
   stream << "write_restarts = " << (frozen.config.output.write_restarts ? "true" : "false") << '\n';
+  stream << "restart_interval_steps = " << frozen.config.output.restart_interval_steps << '\n';
+  stream << "snapshot_verification = "
+         << snapshotVerificationPolicyLabel(frozen.config.output.snapshot_verification) << '\n';
   stream << "\n[parallel]\n";
   stream << "mpi_ranks_expected = " << frozen.config.parallel.mpi_ranks_expected << '\n';
   stream << "omp_threads = " << frozen.config.parallel.omp_threads << '\n';
@@ -3047,6 +3122,10 @@ class NormalizedConfigStream {
       requireString(entries, consumed, "numerics.hierarchical_encounter_timestep_enabled",
                     defaultFor("numerics.hierarchical_encounter_timestep_enabled")),
       "numerics.hierarchical_encounter_timestep_enabled");
+  frozen.config.numerics.gravity_timestep_eta = parseFloating(
+      requireString(entries, consumed, "numerics.gravity_timestep_eta",
+                    defaultFor("numerics.gravity_timestep_eta")),
+      "numerics.gravity_timestep_eta");
   frozen.config.numerics.amr_max_level = parseNumber<int>(
       requireString(entries, consumed, "numerics.amr_max_level", "10"), "numerics.amr_max_level");
   frozen.config.numerics.gravity_softening_kpc_comoving = parseLengthKpc(
@@ -3171,6 +3250,10 @@ class NormalizedConfigStream {
       requireString(entries, consumed, "numerics.treepm_group_walk_enabled",
                     defaultFor("numerics.treepm_group_walk_enabled")),
       "numerics.treepm_group_walk_enabled");
+  frozen.config.numerics.treepm_group_walk_target_size = parseNumber<int>(
+      requireString(entries, consumed, "numerics.treepm_group_walk_target_size",
+                    defaultFor("numerics.treepm_group_walk_target_size")),
+      "numerics.treepm_group_walk_target_size");
   frozen.config.numerics.treepm_identical_source_tree_reuse_enabled = parseBool(
       requireString(entries, consumed, "numerics.treepm_identical_source_tree_reuse_enabled",
                     defaultFor("numerics.treepm_identical_source_tree_reuse_enabled")),
@@ -3184,6 +3267,9 @@ class NormalizedConfigStream {
       consumed,
       "numerics.treepm_assignment_scheme",
       defaultFor("numerics.treepm_assignment_scheme")));
+  frozen.config.numerics.treepm_pm_force_gradient = parseTreePmForceGradient(requireString(
+      entries, consumed, "numerics.treepm_pm_force_gradient",
+      defaultFor("numerics.treepm_pm_force_gradient")));
   frozen.config.numerics.treepm_enable_window_deconvolution = parseBool(
       requireString(
           entries,
@@ -3512,6 +3598,13 @@ class NormalizedConfigStream {
       "output.snapshot_num_files");
   frozen.config.output.write_restarts = parseBool(
       requireString(entries, consumed, "output.write_restarts", "true"), "output.write_restarts");
+  frozen.config.output.restart_interval_steps = parseNumber<int>(
+      requireString(entries, consumed, "output.restart_interval_steps",
+                    defaultFor("output.restart_interval_steps")),
+      "output.restart_interval_steps");
+  frozen.config.output.snapshot_verification = parseSnapshotVerificationPolicy(
+      requireString(entries, consumed, "output.snapshot_verification",
+                    defaultFor("output.snapshot_verification")));
 
   frozen.config.parallel.mpi_ranks_expected = parseNumber<int>(
       requireString(entries, consumed, "parallel.mpi_ranks_expected", "1"),

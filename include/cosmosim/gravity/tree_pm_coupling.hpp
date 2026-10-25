@@ -61,6 +61,26 @@ struct alignas(64) TreePmTraversalCounters {
   std::uint64_t residual_lookup_targets = 0;
   // Targets selecting AVX2 leaf staging, not a count of vectorized pairs.
   std::uint64_t simd_leaf_targets = 0;
+  // Opt-in group walk effectiveness (local owned targets only). Groups and
+  // grouped targets count successful shared interaction lists; fallback
+  // targets were evaluated by the per-target walk although the group walk was
+  // active for the solve, split by first failing per-group condition.
+  std::uint64_t group_walk_groups = 0;
+  std::uint64_t group_walk_grouped_targets = 0;
+  std::uint64_t group_walk_target_group_size_max = 0;
+  std::uint64_t group_walk_fallback_targets = 0;
+  std::uint64_t group_walk_fallback_no_leaf = 0;
+  std::uint64_t group_walk_fallback_softening = 0;
+  std::uint64_t group_walk_fallback_history = 0;
+  std::uint64_t group_walk_fallback_geometry = 0;
+  // Per-target source-leaf culling: candidate leaves listed for a target,
+  // leaves rejected by the conservative periodic AABB-to-target distance, and
+  // source particles in the surviving leaves (the vectorized loop length).
+  std::uint64_t group_walk_candidate_leaves = 0;
+  std::uint64_t group_walk_culled_leaves = 0;
+  std::uint64_t group_walk_candidate_particles = 0;
+  // Largest per-worker interaction-list entry count observed (scratch high-water).
+  std::uint64_t group_walk_list_entries_max = 0;
   // Summed logical-block work time; no per-target clock reads.
   double elapsed_work_ms = 0.0;
   double block_work_ms_max = 0.0;
@@ -175,11 +195,50 @@ enum class TreePmCutoffNodePolicy : std::uint8_t {
 };
 
 // Per-worker interaction-list storage for the opt-in TreePM group walk.
+// Accepted source leaves are kept one entry per leaf (not merged) so each
+// target can cull leaves whose cell lies entirely beyond r_cut. The leaf
+// geometry lanes hold the leaf cell center as a minimum-image offset from the
+// group center and the leaf cell half width; they are bounded by the list
+// length (no O(N) copy) and reused across groups.
 struct TreePmGroupWalkWorkerScratch {
   std::vector<TreeLocalIndex> multipole_nodes;
   std::vector<TreeLocalIndex> range_begin;
   std::vector<TreeLocalIndex> range_end;
+  std::vector<double> leaf_offset_x;
+  std::vector<double> leaf_offset_y;
+  std::vector<double> leaf_offset_z;
+  std::vector<double> leaf_half_size;
 };
+
+// Why the requested group walk was not used for a solve. kActive means the
+// shared-list path ran; individual groups may still fall back (see
+// TreePmTraversalCounters::group_walk_fallback_*).
+enum class TreePmGroupWalkStatus : std::uint32_t {
+  kNotRequested = 0,
+  kActive = 1,
+  kNoLocalTree = 2,
+  kIncompatiblePolicy = 3,
+  kNonUniformSourceSoftening = 4,
+  kGaussianTableUnavailable = 5,
+  kCutoffOutsideTable = 6,
+  kSpatialWorkHistoryEnabled = 7,
+  kLookupScalingUnrepresentable = 8,
+};
+
+[[nodiscard]] inline const char* treePmGroupWalkStatusName(TreePmGroupWalkStatus status) noexcept {
+  switch (status) {
+    case TreePmGroupWalkStatus::kNotRequested: return "not_requested";
+    case TreePmGroupWalkStatus::kActive: return "active";
+    case TreePmGroupWalkStatus::kNoLocalTree: return "no_local_tree";
+    case TreePmGroupWalkStatus::kIncompatiblePolicy: return "incompatible_policy";
+    case TreePmGroupWalkStatus::kNonUniformSourceSoftening: return "non_uniform_source_softening";
+    case TreePmGroupWalkStatus::kGaussianTableUnavailable: return "gaussian_table_unavailable";
+    case TreePmGroupWalkStatus::kCutoffOutsideTable: return "cutoff_outside_table";
+    case TreePmGroupWalkStatus::kSpatialWorkHistoryEnabled: return "spatial_work_history_enabled";
+    case TreePmGroupWalkStatus::kLookupScalingUnrepresentable: return "lookup_scaling_unrepresentable";
+  }
+  return "unknown";
+}
 
 struct TreePmOptions {
   PmSolveOptions pm_options{};
@@ -195,6 +254,13 @@ struct TreePmOptions {
   // adaptive relative_monopole path with uniform softening and Gaussian pair
   // lookup; other cases use the per-target walk.
   bool group_walk_enabled = false;
+  // Target grouping for the group walk. 0 keeps the legacy grouping (the
+  // active targets of one source-tree leaf). N > 0 groups up to N consecutive
+  // tree-order targets inside one residual block, closing a group early when
+  // its AABB would exceed group_walk_max_extent_cutoff_fraction * r_cut on any
+  // axis, so groups stay spatially coherent independent of tree leaf size.
+  std::size_t group_walk_target_group_size = 0;
+  double group_walk_max_extent_cutoff_fraction = 0.5;
   // Opt-in until force qualification; affects direct leaf pairs only.
   bool gaussian_pair_lookup_enabled = false;
   bool full_residual_lookup_enabled = false;
@@ -256,6 +322,10 @@ struct TreePmDiagnostics {
   TreePmTraversalCounters incoming_traversal{};
   std::array<double, parallel::k_spatial_work_bin_count> spatial_work_per_target{};
   std::uint64_t spatial_work_history_solves = 0;
+  // Group-walk selection for this solve: requested flag and the
+  // TreePmGroupWalkStatus value (kActive when the shared-list path ran).
+  std::uint64_t group_walk_requested = 0;
+  std::uint64_t group_walk_status = 0;
   // Nonempty worker-region summaries for the current force only. Work time
   // is summed logical-block time, not an additive force-phase wall timer.
   std::uint64_t worker_region_count = 0;
@@ -288,6 +358,9 @@ struct TreePmDiagnostics {
   std::uint64_t domain_cache_miss_count = 0;
   std::uint64_t graph_cache_hit_count = 0;
   std::uint64_t graph_cache_miss_count = 0;
+  // Hits served by a cached symmetric graph whose peers strictly cover the
+  // current request set (subset reuse), included in graph_cache_hit_count.
+  std::uint64_t graph_cache_superset_hit_count = 0;
   std::uint64_t let_candidate_peer_count = 0;
   std::uint64_t let_exported_target_count = 0;
   std::uint64_t let_imported_target_count = 0;
@@ -299,6 +372,12 @@ struct TreePmDiagnostics {
   std::uint64_t let_known_workspace_high_water_bytes = 0;
   std::uint64_t communication_arena_capacity_bytes = 0;
   std::uint64_t communication_arena_logical_high_water_bytes = 0;
+  // Per-phase logical high-water (PM density, PM halo, PM interpolation, Tree
+  // exchange), capacity growth events at idle boundaries, and retained
+  // capacity never used by any phase on this rank.
+  std::array<std::uint64_t, 4> communication_arena_phase_high_water_bytes{};
+  std::uint64_t communication_arena_growth_events = 0;
+  std::uint64_t communication_arena_unused_bytes = 0;
   double exported_targets_per_requested_target = 0.0;
   double let_discovery_ms = 0.0;
   double let_graph_setup_ms = 0.0;
@@ -522,6 +601,7 @@ class TreePmCoordinator {
     std::uint64_t domain_cache_miss_count = 0;
     std::uint64_t graph_cache_hit_count = 0;
     std::uint64_t graph_cache_miss_count = 0;
+    std::uint64_t graph_cache_superset_hit_count = 0;
     std::uint64_t let_candidate_peer_count = 0;
     std::uint64_t let_exported_target_count = 0;
     std::uint64_t let_imported_target_count = 0;

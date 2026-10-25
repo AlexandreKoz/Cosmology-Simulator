@@ -698,7 +698,7 @@ enum class SchedulerElementFamily {
           {.softening_length_comoving_code = std::max(eps, 1.0e-12),
            .scale_free_acceleration_magnitude_code = amag,
            .scale_factor = gravity_scale_factor},
-          0.2);
+          config.numerics.gravity_timestep_eta);
       consider_dt(gravity_dt);
       scheduler.submitCandidateTimeStep(
           cell_index, cfl_dt, limits, core::TimeStepCandidateSource::kHydroCfl, "gas_cell_hydro_cfl");
@@ -742,7 +742,7 @@ enum class SchedulerElementFamily {
         {.softening_length_comoving_code = std::max(eps, 1.0e-12),
          .scale_free_acceleration_magnitude_code = amag,
          .scale_factor = gravity_scale_factor},
-        0.2);
+        config.numerics.gravity_timestep_eta);
     consider_dt(gravity_dt);
     scheduler.submitCandidateTimeStep(
         particle_index,
@@ -1179,18 +1179,18 @@ void TimeCoordinator::runRungZeroSegment(
         internal::requestedBoundaryForPendingOutput(pending_output);
     const bool console_snapshot_requested = pending_output.snapshot_due;
     const bool console_restart_requested = pending_output.checkpoint_due;
-    const std::uint64_t global_active_particle_count =
-        m_services.mpi_context.allreduceSumUint64(
-            static_cast<std::uint64_t>(active_particles.size()));
-    const std::uint64_t global_particle_count =
-        m_services.mpi_context.allreduceSumUint64(
-            static_cast<std::uint64_t>(state.particles.size()));
-    const std::uint64_t global_active_cell_count =
-        m_services.mpi_context.allreduceSumUint64(
-            static_cast<std::uint64_t>(active_cells.size()));
-    const std::uint64_t global_cell_count =
-        m_services.mpi_context.allreduceSumUint64(
-            static_cast<std::uint64_t>(state.cells.size()));
+    // One fused reduction for the four population counts (previously four
+    // sequential collectives per step); values and semantics are unchanged.
+    std::array<std::uint64_t, 4U> global_population_counts{
+        static_cast<std::uint64_t>(active_particles.size()),
+        static_cast<std::uint64_t>(state.particles.size()),
+        static_cast<std::uint64_t>(active_cells.size()),
+        static_cast<std::uint64_t>(state.cells.size())};
+    m_services.mpi_context.allreduceSumUint64sInPlace(global_population_counts);
+    const std::uint64_t global_active_particle_count = global_population_counts[0];
+    const std::uint64_t global_particle_count = global_population_counts[1];
+    const std::uint64_t global_active_cell_count = global_population_counts[2];
+    const std::uint64_t global_cell_count = global_population_counts[3];
     core::ActiveSetDescriptor active_set = core::makeSchedulerActiveSetDescriptor(
         particle_scheduler, state, active_particles, active_cells);
     active_set.has_global_synchronization_metadata = true;
@@ -1533,7 +1533,7 @@ void TimeCoordinator::runHierarchicalSegment(
     const auto nearest_pair_r2 = m_gravity.hierarchicalNearestPairR2();
     const auto softening = speciesSofteningByTag(config);
     const double eps = softening.epsilon_comoving_by_species[static_cast<std::size_t>(core::ParticleSpecies::kDarkMatter)];
-    constexpr double k_gravity_timestep_eta = 0.2;
+    const double gravity_timestep_eta = config.numerics.gravity_timestep_eta;
     // Softened-encounter criterion. The acceleration criterion
     // eta sqrt(eps a^3/|A|) is blind to a softened pair passing through
     // coincidence (|A| -> 0 at r -> 0). The pair's tidal rate
@@ -1568,10 +1568,10 @@ void TimeCoordinator::runHierarchicalSegment(
     const auto criterion = [&](std::uint32_t row) {
       double dt = core::computeComovingGravityTimeStep({.softening_length_comoving_code = std::max(eps, 1.0e-12),
           .scale_free_acceleration_magnitude_code = std::sqrt(ax[row] * ax[row] + ay[row] * ay[row] + az[row] * az[row]),
-          .scale_factor = integrator.current_scale_factor}, k_gravity_timestep_eta);
+          .scale_factor = integrator.current_scale_factor}, gravity_timestep_eta);
       if (encounter_criterion && std::isfinite(nearest_pair_r2[row]) && encounter_g_mass > 0.0) {
         const double d = nearest_pair_r2[row] + eps * eps;
-        dt = std::min(dt, k_gravity_timestep_eta * std::sqrt(a_cubed * d * std::sqrt(d) / encounter_g_mass));
+        dt = std::min(dt, gravity_timestep_eta * std::sqrt(a_cubed * d * std::sqrt(d) / encounter_g_mass));
       }
       if (growth_limited) {
         dt = std::min(dt, 2.0 * previous_quantum *

@@ -1,5 +1,15 @@
 # Repair open issues
 
+20261025 TreePM optimization campaign (source only; NOT compiled, NOT
+tested, owner validation required): opt-in finite-difference PM gradient,
+lazy `potential_k`, governed communication-arena growth, group-walk leaf
+culling/target sizing/telemetry (and repair: the group walk now also serves
+owned targets in distributed runs), LET graph subset reuse, fused diagnostic
+reductions, independent checkpoint cadence, structural snapshot verification
+and `numerics.gravity_timestep_eta`. See the
+[campaign record](repair/treepm_optimization_campaign_20261025.md) for the
+implementation matrix, risks and validation checklist.
+
 20261015 TreePM performance campaign: tree-ordered residual traversal
 (bitwise-identical forces), threaded FFTW, opt-in adaptive estimator and
 cutoff-node policy, opt-in hierarchical RMS coarse criterion and the B-10

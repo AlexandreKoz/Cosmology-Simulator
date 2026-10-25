@@ -1118,6 +1118,42 @@ SnapshotSetInspection inspectSnapshotSet(
 #endif
 }
 
+SnapshotMemberInspection inspectSnapshotMemberHdf5(
+    const std::filesystem::path& member_path,
+    const SnapshotReadOptions& options) {
+#if !COSMOSIM_ENABLE_HDF5
+  static_cast<void>(member_path); static_cast<void>(options);
+  throw std::runtime_error("COSMOSIM_ENABLE_HDF5=OFF: snapshot member inspection unavailable");
+#else
+  // Header/attribute metadata only: no particle dataset is read and no
+  // sibling member is opened.
+  const MemberHeader header = inspectMember(member_path, options);
+  SnapshotMemberInspection result;
+  result.file_kind = header.file_kind;
+  result.schema_name = header.schema;
+  result.schema_version = header.schema_version;
+  result.dialect = header.dialect;
+  result.num_files_per_snapshot = header.num_files;
+  result.member_index = header.member_index;
+  result.has_member_index = header.has_member_index;
+  result.local_part_count = header.local;
+  result.global_part_count = header.global;
+  result.scale_factor = header.time;
+  result.redshift = header.redshift;
+  result.box_size_x = header.box_x;
+  result.box_size_y = header.box_y;
+  result.box_size_z = header.box_z;
+  result.omega_matter = header.omega_matter;
+  result.omega_lambda = header.omega_lambda;
+  result.omega_baryon = header.omega_baryon;
+  result.hubble_param = header.hubble;
+  result.config_hash_hex = header.config_hash_hex;
+  result.generation_id = header.generation;
+  result.file_bytes = header.file_size;
+  return result;
+#endif
+}
+
 SnapshotReadResult readCosmoSimScienceSnapshotHdf5(
     const std::filesystem::path& input_path,
     const core::SimulationConfig& config,

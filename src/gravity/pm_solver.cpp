@@ -686,7 +686,9 @@ void validatePmCollectiveEntryConsensus(
       std::bit_cast<std::uint64_t>(options.gravitational_constant_code),
       static_cast<std::uint64_t>(options.assignment_scheme),
       options.enable_window_deconvolution ? 1U : 0U,
-      static_cast<std::uint64_t>(options.execution_policy),
+      // The gradient backend shares this lane so the fingerprint width stays fixed.
+      static_cast<std::uint64_t>(options.execution_policy) |
+          (static_cast<std::uint64_t>(options.force_gradient_backend) << 8U),
       static_cast<std::uint64_t>(options.data_residency),
       static_cast<std::uint64_t>(options.decomposition_mode),
       static_cast<std::uint64_t>(options.boundary_condition),
@@ -1392,6 +1394,24 @@ void validateOptions(const PmGridShape& shape, const PmSolveOptions& options) {
     throw std::invalid_argument(
         "execution_policy=cuda currently supports only boundary_condition=periodic in this build");
   }
+  switch (options.force_gradient_backend) {
+    case PmForceGradientBackend::kSpectral:
+      break;
+    case PmForceGradientBackend::kFiniteDifference4:
+      // The isolated/open and CUDA solvers keep their own gradient contracts.
+      if (options.boundary_condition != PmBoundaryCondition::kPeriodic ||
+          options.execution_policy != core::ExecutionPolicy::kHostSerial) {
+        throw std::invalid_argument(
+            "PM finite-difference force gradient supports only periodic host solves");
+      }
+      if (shape.nx < 4U || shape.ny < 4U || shape.nz < 4U) {
+        throw std::invalid_argument(
+            "PM finite-difference force gradient requires at least four cells per axis");
+      }
+      break;
+    default:
+      throw std::invalid_argument("PM solve has invalid force_gradient_backend");
+  }
   if (options.boundary_condition == PmBoundaryCondition::kIsolatedOpen &&
       options.enable_window_deconvolution) {
     throw std::invalid_argument("isolated PM currently does not support window deconvolution");
@@ -1505,7 +1525,13 @@ class PmSolver::Impl {
     parallel::PmSlabLayout layout{};
     std::vector<double> real;
     std::vector<std::complex<double>> fourier;
+    // Pristine phi_k copy for the spectral gradient backend only (complex-to-
+    // real transforms destroy their input). Allocated on the first spectral
+    // solve and retained; never allocated by kFiniteDifference4.
     std::vector<std::complex<double>> potential_k;
+    // kFiniteDifference4 distributed x halo planes: [left -2, left -1,
+    // right +1, right +2], each ny*nz doubles.
+    std::vector<double> fd_halo_planes;
     // M48-09 derives the Poisson operator from small per-axis metadata rather
     // than retaining one scalar per allocated spectral coefficient.
     std::vector<double> kx_by_ix;
@@ -1919,7 +1945,6 @@ class PmSolver::Impl {
       plan.transposed_begin_y = storage_layout.transposed_begin_y;
       plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
-      plan.potential_k.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
     }
 #endif
 #if COSMOSIM_ENABLE_MPI
@@ -1961,7 +1986,6 @@ class PmSolver::Impl {
       plan.real_z_stride = storage_layout.real_z_stride;
       plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
-      plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       configureFftwPlannerThreads();
       plan.forward_plan = fftw_plan_dft_r2c_3d(
           static_cast<int>(m_shape.nx),
@@ -1988,7 +2012,6 @@ class PmSolver::Impl {
     }
     plan.real.assign(storage_layout.real_element_count, 0.0);
     plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
-    plan.potential_k.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
 #endif
 
     plan.logical_local_complex_cells = plan.spectral_transposed
@@ -2033,7 +2056,21 @@ class PmSolver::Impl {
 
   [[nodiscard]] std::span<double> realGrid() { return activePlan().real; }
   [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return activePlan().fourier; }
-  [[nodiscard]] std::span<std::complex<double>> potentialScratch() { return activePlan().potential_k; }
+  // Spectral-gradient phi_k copy, sized to the backend Fourier allocation on
+  // first use and retained for later spectral solves.
+  [[nodiscard]] std::span<std::complex<double>> potentialScratch() {
+    auto& plan = activePlan();
+    if (plan.potential_k.size() != plan.fourier.size()) {
+      plan.potential_k.assign(plan.fourier.size(), std::complex<double>(0.0, 0.0));
+    }
+    return plan.potential_k;
+  }
+  [[nodiscard]] std::span<double> finiteDifferenceHaloPlanes(std::size_t plane_values) {
+    auto& plan = activePlan();
+    const std::size_t required = checkedProduct(4U, plane_values, "PM finite-difference halo planes");
+    if (plan.fd_halo_planes.size() != required) plan.fd_halo_planes.assign(required, 0.0);
+    return plan.fd_halo_planes;
+  }
 
   void invalidatePeriodicDensityForGrid(const PmGridStorage* grid) noexcept {
     for (auto& [_, plan] : m_plan_cache) {
@@ -2737,10 +2774,11 @@ class PmSolver::Impl {
         accumulate(current, capacity, resources.real);
         accumulate(current, capacity, resources.fourier);
         accumulate(current, capacity, resources.potential_k);
+        accumulate(current, capacity, resources.fd_halo_planes);
       }
       emit(core::MemorySubsystem::kPmMesh, core::MemoryLifetime::kPersistent,
            "pm_solver.plan_cache_owned_arrays", current, capacity, capacity,
-           "owned FFT real + Fourier working + preserved potential spectrum; no full Poisson-kernel lane");
+           "owned FFT real + Fourier working + preserved potential spectrum (spectral gradient backend only) + finite-difference x halo planes (finite-difference backend, distributed only); no full Poisson-kernel lane");
     }
 
     {
@@ -2879,7 +2917,8 @@ bool PmGridShape::isValid() const {
 PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
     PmGridShape shape,
     const parallel::PmSlabLayout& layout,
-    core::PmDecompositionMode decomposition_mode) {
+    core::PmDecompositionMode decomposition_mode,
+    PmForceGradientBackend force_gradient_backend) {
   const PmPlanLocalStorageLayout storage_layout =
       determinePmPlanLocalStorageLayout(
           shape, layout, decomposition_mode, false);
@@ -2901,7 +2940,9 @@ PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
       "PM plan-memory real bytes");
 
   estimate.complex_spectral_array_bytes = checked_bytes(
-      checkedProduct(2U, storage_layout.allocated_local_complex_cells,
+      checkedProduct(
+          force_gradient_backend == PmForceGradientBackend::kSpectral ? 2U : 1U,
+          storage_layout.allocated_local_complex_cells,
                      "PM plan-memory complex spectral arrays"),
       sizeof(std::complex<double>),
       "PM plan-memory complex spectral bytes");
@@ -2933,6 +2974,17 @@ PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
       estimate.real_array_bytes,
       spectral_bytes,
       "PM plan-memory total byte sum");
+  // Finite-difference gradients exchange two x planes per side with the
+  // neighboring slab ranks; the four halo planes are retained per plan.
+  if (force_gradient_backend == PmForceGradientBackend::kFiniteDifference4 && layout.world_size > 1) {
+    estimate.finite_difference_halo_bytes = checked_bytes(
+        checkedProduct(4U, checkedProduct(shape.ny, shape.nz, "PM finite-difference halo plane"),
+                       "PM finite-difference halo planes"),
+        sizeof(double), "PM finite-difference halo bytes");
+    estimate.total_owned_bytes = checked_add_bytes(
+        estimate.total_owned_bytes, estimate.finite_difference_halo_bytes,
+        "PM plan-memory total byte sum");
+  }
   return estimate;
 }
 
@@ -4164,7 +4216,6 @@ void PmSolver::solvePoissonPeriodicImpl(
   auto& plan = m_impl->planForLayout(grid.slabLayout(), options.decomposition_mode);
   auto real = m_impl->realGrid();
   auto fourier = m_impl->fourierGrid();
-  auto potential_k = m_impl->potentialScratch();
 
   const bool fft_backed_density_ready =
       m_impl->periodicDensityReadyFor(plan, grid);
@@ -4252,6 +4303,139 @@ void PmSolver::solvePoissonPeriodicImpl(
     profile->poisson_ms += std::chrono::duration<double, std::milli>(poisson_stop - poisson_start).count();
   }
 
+  if (options.force_gradient_backend == PmForceGradientBackend::kFiniteDifference4) {
+    // One inverse FFT of phi_k into the plan real array, then a fourth-order
+    // centered difference F = -grad(phi) on the periodic mesh. The phi_k copy
+    // (potential_k) is never needed. See PmForceGradientBackend.
+    const auto grad_start = std::chrono::steady_clock::now();
+    const double fft_time = m_impl->inverseFft();
+    if (profile != nullptr) {
+      profile->fft_inverse_ms += fft_time;
+      if (plan.spectral_transposed) profile->fft_transpose_ms += fft_time;
+    }
+    const auto phi = std::span<const double>(m_impl->realGrid());
+#if COSMOSIM_ENABLE_FFTW
+    const double normalization = 1.0 / static_cast<double>(m_shape.cellCount());
+#else
+    const double normalization = 1.0;  // the naive inverse DFT is normalized
+#endif
+    const std::size_t nx = m_shape.nx, ny = m_shape.ny, nz = m_shape.nz;
+    const std::size_t local_nx = grid.slabLayout().local_nx();
+    const std::size_t stride = plan.real_z_stride;
+    const std::size_t plane_values = ny * nz;
+    const bool full_domain = !plan.is_distributed;
+    std::span<double> halo;
+    if (!full_domain) {
+#if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
+      // Every rank must own two x planes so the +-2 stencil reaches only the
+      // immediate slab neighbours. The check is collective and uniform.
+      unsigned long long local_planes = static_cast<unsigned long long>(local_nx);
+      unsigned long long minimum_planes = 0ULL;
+      requirePmMpiSuccess(MPI_Allreduce(&local_planes, &minimum_planes, 1, MPI_UNSIGNED_LONG_LONG,
+                                        MPI_MIN, MPI_COMM_WORLD),
+                          "PM finite-difference slab-depth consensus");
+      if (minimum_planes < 2ULL) {
+        throw std::invalid_argument(
+            "PM finite-difference force gradient requires every MPI rank to own at least two x planes");
+      }
+      if (plane_values > static_cast<std::size_t>(std::numeric_limits<int>::max() / 2)) {
+        throw std::overflow_error("PM finite-difference halo exchange exceeds MPI int count");
+      }
+      halo = m_impl->finiteDifferenceHaloPlanes(plane_values);
+      std::vector<double> send_planes(2U * plane_values);
+      const int world_size = grid.slabLayout().world_size;
+      const int world_rank = grid.slabLayout().world_rank;
+      const int left = (world_rank + world_size - 1) % world_size;
+      const int right = (world_rank + 1) % world_size;
+      const auto pack = [&](std::size_t first_local_plane) {
+        for (std::size_t p = 0; p < 2U; ++p) {
+          for (std::size_t iy = 0; iy < ny; ++iy) {
+            const std::size_t src = ((first_local_plane + p) * ny + iy) * stride;
+            std::copy_n(phi.begin() + static_cast<std::ptrdiff_t>(src), nz,
+                        send_planes.begin() + static_cast<std::ptrdiff_t>(p * plane_values + iy * nz));
+          }
+        }
+      };
+      const int count = static_cast<int>(2U * plane_values);
+      // Last two planes go right and arrive as the right rank's left halo.
+      pack(local_nx - 2U);
+      requirePmMpiSuccess(MPI_Sendrecv(send_planes.data(), count, MPI_DOUBLE, right, 7101,
+                                       halo.data(), count, MPI_DOUBLE, left, 7101,
+                                       MPI_COMM_WORLD, MPI_STATUS_IGNORE),
+                          "PM finite-difference left halo exchange");
+      // First two planes go left and arrive as the left rank's right halo.
+      pack(0U);
+      requirePmMpiSuccess(MPI_Sendrecv(send_planes.data(), count, MPI_DOUBLE, left, 7102,
+                                       halo.data() + 2U * plane_values, count, MPI_DOUBLE, right, 7102,
+                                       MPI_COMM_WORLD, MPI_STATUS_IGNORE),
+                          "PM finite-difference right halo exchange");
+      if (profile != nullptr) {
+        profile->bytes_moved += 4U * plane_values * sizeof(double);
+      }
+#else
+      throw std::logic_error("distributed PM finite-difference gradient requires FFTW-MPI");
+#endif
+    }
+    // Plane pointer for local x offset t in [-2, local_nx + 1]; rows have
+    // stride `stride` inside the FFT array and nz inside the halo planes.
+    const auto plane_row = [&](std::ptrdiff_t t, std::size_t iy) -> const double* {
+      const auto n_local = static_cast<std::ptrdiff_t>(local_nx);
+      if (t >= 0 && t < n_local) {
+        return phi.data() + (static_cast<std::size_t>(t) * ny + iy) * stride;
+      }
+      if (full_domain) {
+        const auto wrapped = static_cast<std::size_t>((t % n_local + n_local) % n_local);
+        return phi.data() + (wrapped * ny + iy) * stride;
+      }
+      const std::size_t halo_plane = t < 0 ? static_cast<std::size_t>(t + 2) : static_cast<std::size_t>(t - n_local) + 2U;
+      return halo.data() + halo_plane * plane_values + iy * nz;
+    };
+    const BoxLengths fd_lengths = effectiveBoxLengths(options);
+    const double scale_x = -normalization * static_cast<double>(nx) / (12.0 * fd_lengths.lx);
+    const double scale_y = -normalization * static_cast<double>(ny) / (12.0 * fd_lengths.ly);
+    const double scale_z = -normalization * static_cast<double>(nz) / (12.0 * fd_lengths.lz);
+    if (materialize_potential) grid.ensurePotentialStorage();
+    const std::span<double> potential_lane = materialize_potential ? grid.potential() : std::span<double>{};
+    const std::array<std::span<double>, 3U> force_lanes{grid.force_x(), grid.force_y(), grid.force_z()};
+#if COSMOSIM_HAVE_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (std::size_t local_ix = 0; local_ix < local_nx; ++local_ix) {
+      const std::size_t global_ix = grid.slabLayout().globalXFromLocal(local_ix);
+      const auto lx = static_cast<std::ptrdiff_t>(local_ix);
+      for (std::size_t iy = 0; iy < ny; ++iy) {
+        const double* row = plane_row(lx, iy);
+        const double* xm2 = plane_row(lx - 2, iy);
+        const double* xm1 = plane_row(lx - 1, iy);
+        const double* xp1 = plane_row(lx + 1, iy);
+        const double* xp2 = plane_row(lx + 2, iy);
+        const double* ym2 = plane_row(lx, (iy + 2U * ny - 2U) % ny);
+        const double* ym1 = plane_row(lx, (iy + ny - 1U) % ny);
+        const double* yp1 = plane_row(lx, (iy + 1U) % ny);
+        const double* yp2 = plane_row(lx, (iy + 2U) % ny);
+        const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
+        for (std::size_t iz = 0; iz < nz; ++iz) {
+          const std::size_t zm2 = (iz + 2U * nz - 2U) % nz, zm1 = (iz + nz - 1U) % nz;
+          const std::size_t zp1 = (iz + 1U) % nz, zp2 = (iz + 2U) % nz;
+          force_lanes[0][compact_base + iz] =
+              scale_x * (8.0 * (xp1[iz] - xm1[iz]) - (xp2[iz] - xm2[iz]));
+          force_lanes[1][compact_base + iz] =
+              scale_y * (8.0 * (yp1[iz] - ym1[iz]) - (yp2[iz] - ym2[iz]));
+          force_lanes[2][compact_base + iz] =
+              scale_z * (8.0 * (row[zp1] - row[zm1]) - (row[zp2] - row[zm2]));
+          if (!potential_lane.empty()) potential_lane[compact_base + iz] = row[iz] * normalization;
+        }
+      }
+    }
+    if (profile != nullptr) {
+      profile->gradient_ms += std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - grad_start).count();
+      profile->bytes_moved += bytesForGridSweep(m_shape.cellCount()) * (materialize_potential ? 5U : 4U);
+    }
+    return;
+  }
+
+  auto potential_k = m_impl->potentialScratch();
   std::copy(fourier.begin(), fourier.end(), potential_k.begin());
 
   auto inverse_current_spectrum_into = [this, profile, &plan, &grid](std::span<double> dst, int axis = -1) {

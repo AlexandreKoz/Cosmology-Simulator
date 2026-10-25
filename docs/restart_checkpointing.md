@@ -534,3 +534,13 @@ normalized representation and 4 MiB original serialized provenance; it allocates
 no per-particle state. See the [repair handoff](repair/treepm_p1p5_qualification_and_test_reliability_repair_20261010.md) for positive
 production resume tests and refusal fixtures. Qualification is NOT RUN — deferred
 by user.
+
+## Independent checkpoint cadence (2026-10-25, untested)
+
+`output.restart_interval_steps = N > 0` writes checkpoints every `N`
+completed global steps independently of science snapshots; `0` keeps the
+legacy snapshot-coupled policy. The next checkpoint index is derived as the
+first multiple of `N` after the restart-persisted step index, so resumed and
+uninterrupted runs share one checkpoint timeline without a schema change.
+Checkpoints are still written only at restart-safe synchronization
+boundaries, and streaming write-time verification is unchanged.

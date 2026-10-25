@@ -210,6 +210,32 @@ struct SnapshotSetInspection {
   bool complete = false;
 };
 
+// Header-only identity of one snapshot member file. Used by the structural
+// write-time verification policy; reads no particle datasets.
+struct SnapshotMemberInspection {
+  std::string file_kind;
+  std::string schema_name;
+  std::uint32_t schema_version = 0;
+  SnapshotDialect dialect = SnapshotDialect::kAuto;
+  std::uint32_t num_files_per_snapshot = 0;
+  std::uint32_t member_index = 0;
+  bool has_member_index = false;
+  std::array<std::uint64_t, 6> local_part_count{};
+  std::array<std::uint64_t, 6> global_part_count{};
+  double scale_factor = 1.0;
+  double redshift = 0.0;
+  double box_size_x = 0.0;
+  double box_size_y = 0.0;
+  double box_size_z = 0.0;
+  double omega_matter = 0.0;
+  double omega_lambda = 0.0;
+  double omega_baryon = 0.0;
+  double hubble_param = 0.0;
+  std::string config_hash_hex;
+  std::string generation_id;
+  std::uint64_t file_bytes = 0;
+};
+
 struct SnapshotValidationReport {
   bool valid = false;
   SnapshotSetInspection inspection;
@@ -239,6 +265,10 @@ void writeScienceSnapshotHdf5(
 
 [[nodiscard]] SnapshotSetInspection inspectSnapshotSet(
     const std::filesystem::path& input_path,
+    const SnapshotReadOptions& options = {});
+
+[[nodiscard]] SnapshotMemberInspection inspectSnapshotMemberHdf5(
+    const std::filesystem::path& member_path,
     const SnapshotReadOptions& options = {});
 
 [[nodiscard]] SnapshotValidationReport validateSnapshotSetHdf5(

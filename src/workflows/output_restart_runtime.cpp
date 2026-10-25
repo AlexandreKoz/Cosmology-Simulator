@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
@@ -29,6 +30,7 @@
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/gravity/pm_solver.hpp"
 #include "cosmosim/gravity/tree_pm_coupling.hpp"
+#include "cosmosim/io/io_contract.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/io/snapshot_hdf5.hpp"
 #include "cosmosim/parallel/distributed_memory.hpp"
@@ -590,13 +592,19 @@ bool maybeWriteOutputs(
     FailureCoordinator(services).rethrowCollectiveFailure(
         local_snapshot_write_failure, "science snapshot write");
 
+    // Structural verification (non-collective members only) reads header
+    // metadata, so it is charged like the bounded partition readback rather
+    // than a second materialized simulation state.
+    const bool structural_member_verification = !collective_single_file &&
+        config.output.snapshot_verification == core::SnapshotVerificationPolicy::kStructural;
     core::MemoryReservation snapshot_readback_reservation;
     std::exception_ptr snapshot_readback_admission_failure;
     try {
       snapshot_readback_reservation = reserveOutputStaging(
           services,
-          collective_single_file ? snapshotPartitionVerificationPeakBytes()
-                                 : simulationOwnedCapacityBytes(state),
+          (collective_single_file || structural_member_verification)
+              ? snapshotPartitionVerificationPeakBytes()
+              : simulationOwnedCapacityBytes(state),
           collective_single_file ? "io.snapshot.partition_readback"
                                  : "io.snapshot.readback");
     } catch (...) {
@@ -605,6 +613,7 @@ bool maybeWriteOutputs(
     FailureCoordinator(services).rethrowCollectiveFailure(
         snapshot_readback_admission_failure, "science snapshot readback memory admission");
 
+    const auto snapshot_verification_begin = std::chrono::steady_clock::now();
     std::exception_ptr local_snapshot_readback_failure;
     std::string local_verification_detail;
     try {
@@ -614,6 +623,48 @@ bool maybeWriteOutputs(
             partial_single_path, snapshot_payload, snapshot_policy);
         report.snapshot_roundtrip_ok = true;
         local_verification_detail = "distributed_rank_partition_exact_readback";
+      } else if (structural_member_verification) {
+        // Schema, file kind, header cosmology/time, provenance hash and
+        // per-type counts. The SHA-256 member sidecar and root completion
+        // marker/independent set validation below remain mandatory.
+        const io::SnapshotMemberInspection member =
+            io::inspectSnapshotMemberHdf5(report.snapshot_path);
+        const auto expected_scale_factor = state.metadata.scale_factor;
+        const auto equal = [](double lhs, double rhs) {
+          const double scale = std::max({1.0, std::abs(lhs), std::abs(rhs)});
+          return std::isfinite(lhs) && std::isfinite(rhs) &&
+              std::abs(lhs - rhs) <= 32.0 * std::numeric_limits<double>::epsilon() * scale;
+        };
+        std::string mismatch;
+        if (member.schema_name != io::gadgetArepoSchemaMap().schema_name ||
+            member.schema_version != io::gadgetArepoSchemaMap().schema_version) {
+          mismatch = "schema identity";
+        } else if (member.file_kind != io::sharedIoContractNames().science_snapshot_file_kind) {
+          mismatch = "file kind";
+        } else if (member.config_hash_hex != snapshot_provenance.config_hash_hex) {
+          mismatch = "provenance config hash";
+        } else if (member.generation_id != generation_id) {
+          mismatch = "generation id";
+        } else if (member.local_part_count != local_counts ||
+                   member.global_part_count != global_counts ||
+                   member.num_files_per_snapshot != physical_file_count ||
+                   member.member_index != snapshot_payload.set_member.member_index) {
+          mismatch = "member/global particle counts or member index";
+        } else if (!equal(member.scale_factor, expected_scale_factor) ||
+                   !equal(member.box_size_x, config.cosmology.box_size_x_mpc_comoving) ||
+                   !equal(member.box_size_y, config.cosmology.box_size_y_mpc_comoving) ||
+                   !equal(member.box_size_z, config.cosmology.box_size_z_mpc_comoving) ||
+                   !equal(member.omega_matter, config.cosmology.omega_matter) ||
+                   !equal(member.omega_lambda, config.cosmology.omega_lambda) ||
+                   !equal(member.hubble_param, config.cosmology.hubble_param)) {
+          mismatch = "Header cosmology/time metadata";
+        }
+        report.snapshot_roundtrip_ok = mismatch.empty();
+        local_verification_detail = "member_structural_header_verification";
+        if (!report.snapshot_roundtrip_ok) {
+          throw std::runtime_error(
+              "snapshot structural verification failed: " + mismatch);
+        }
       } else {
         io::SnapshotReadOptions local_read_options;
         local_read_options.require_complete_chui_set = false;
@@ -636,6 +687,11 @@ bool maybeWriteOutputs(
     }
     FailureCoordinator(services).rethrowCollectiveFailure(
         local_snapshot_readback_failure, "science snapshot readback");
+    profiler.counters().addCount("io.snapshot.verification_us", static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - snapshot_verification_begin).count()));
+    profiler.counters().addCount(structural_member_verification
+        ? "io.snapshot.structural_verifications" : "io.snapshot.full_verifications");
 
     std::exception_ptr completion_failure;
     if (services.mpi_context.isRoot()) {
@@ -687,7 +743,9 @@ bool maybeWriteOutputs(
         .step_index = integrator_state.step_index,
         .simulation_time_code = integrator_state.current_time_code,
         .scale_factor = integrator_state.current_scale_factor,
-        .message = "science snapshot written, scientifically read back, and transactionally published",
+        .message = structural_member_verification
+            ? "science snapshot written, structurally verified, checksummed, and transactionally published"
+            : "science snapshot written, scientifically read back, and transactionally published",
         .payload = {{"science_path", report.snapshot_path.string()},
                     {"set_path", report.snapshot_set_path.string()},
                     {"generation_id", generation_id},
@@ -699,6 +757,7 @@ bool maybeWriteOutputs(
           integrator_state.step_index, report.snapshot_path,
           report.snapshot_set_path, physical_file_count);
     }
+    profiler.counters().addCount("io.snapshot.writes");
     output_flushed = true;
   }
 
@@ -894,6 +953,7 @@ bool maybeWriteOutputs(
                     {"verification_workspace_high_water_bytes", std::to_string(restart_verification.workspace_high_water_bytes)},
                     {"verification_bytes_read", std::to_string(restart_verification.verified_bytes)}},
     });
+    profiler.counters().addCount("io.restart.writes");
     output_flushed = true;
   }
   return output_flushed;
@@ -1115,7 +1175,29 @@ PendingOutputBoundary initializeOutputCadence(
     throw std::runtime_error(
         "restart contains an active code-time output cadence that the current configuration disables");
   }
+
+  if (options.write_outputs && config.output.write_restarts &&
+      config.output.restart_interval_steps > 0) {
+    pending.restart_interval_steps =
+        static_cast<std::uint64_t>(config.output.restart_interval_steps);
+    pending.next_restart_step_index = nextRestartStepIndexAfter(
+        integrator_state.step_index, pending.restart_interval_steps);
+  }
   return pending;
+}
+
+std::uint64_t nextRestartStepIndexAfter(
+    std::uint64_t step_index, std::uint64_t interval_steps) {
+  if (interval_steps == 0U) {
+    throw std::invalid_argument("checkpoint step cadence requires a positive interval");
+  }
+  const std::uint64_t completed_intervals = step_index / interval_steps;
+  if (completed_intervals == std::numeric_limits<std::uint64_t>::max() ||
+      completed_intervals + 1U >
+          std::numeric_limits<std::uint64_t>::max() / interval_steps) {
+    throw std::overflow_error("checkpoint step cadence could not represent its next event");
+  }
+  return (completed_intervals + 1U) * interval_steps;
 }
 
 [[nodiscard]] bool timelineTimesEqual(double lhs, double rhs) {
@@ -1158,13 +1240,22 @@ void latchOutputRequestForCompletedStep(
       next_step_index >= pending.next_snapshot_step_index;
   const bool time_event_due = pending.snapshot_interval_time_code > 0.0 &&
       timelineTimesEqual(next_time_code, pending.next_snapshot_time_code);
-  if (!step_event_due && !time_event_due) {
-    return;
+  const bool independent_restart_cadence = pending.restart_interval_steps > 0U;
+  const bool restart_event_due = independent_restart_cadence &&
+      next_step_index >= pending.next_restart_step_index;
+  if (step_event_due || time_event_due) {
+    pending.snapshot_due = true;
+    if (!independent_restart_cadence) {
+      // Legacy policy: each science snapshot event also writes a checkpoint.
+      pending.checkpoint_due = pending.checkpoint_due || config.output.write_restarts;
+    }
+    pending.step_event_due = pending.step_event_due || step_event_due;
+    pending.time_event_due = pending.time_event_due || time_event_due;
   }
-  pending.snapshot_due = true;
-  pending.checkpoint_due = pending.checkpoint_due || config.output.write_restarts;
-  pending.step_event_due = pending.step_event_due || step_event_due;
-  pending.time_event_due = pending.time_event_due || time_event_due;
+  if (restart_event_due) {
+    pending.checkpoint_due = true;
+    pending.restart_step_event_due = true;
+  }
 }
 
 [[nodiscard]] core::StepBoundaryKind requestedBoundaryForPendingOutput(const PendingOutputBoundary& pending) {
@@ -1313,6 +1404,11 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
     m_pending_output.checkpoint_due = false;
     m_pending_output.step_event_due = false;
     m_pending_output.time_event_due = false;
+    if (m_pending_output.restart_step_event_due) {
+      m_pending_output.next_restart_step_index = nextRestartStepIndexAfter(
+          context.integrator_state.step_index, m_pending_output.restart_interval_steps);
+      m_pending_output.restart_step_event_due = false;
+    }
     m_pending_output.next_snapshot_step_index =
         persisted_next_snapshot_step_index;
     m_pending_output.next_snapshot_time_code =

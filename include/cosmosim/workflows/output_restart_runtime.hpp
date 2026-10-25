@@ -36,7 +36,18 @@ struct PendingOutputBoundary {
   double snapshot_interval_time_code = 0.0;
   double next_snapshot_time_code = 0.0;
   double restart_resume_dt_time_code = 0.0;
+  // Independent checkpoint cadence (output.restart_interval_steps > 0).
+  // Zero interval keeps the legacy snapshot-coupled checkpoint policy. The
+  // next index is derived, not persisted: the first multiple of the interval
+  // strictly after the last completed step.
+  bool restart_step_event_due = false;
+  std::uint64_t restart_interval_steps = 0;
+  std::uint64_t next_restart_step_index = 0;
 };
+
+// First multiple of interval_steps strictly greater than step_index.
+[[nodiscard]] std::uint64_t nextRestartStepIndexAfter(
+    std::uint64_t step_index, std::uint64_t interval_steps);
 
 [[nodiscard]] PendingOutputBoundary initializeOutputCadence(
     const core::SimulationConfig& config,

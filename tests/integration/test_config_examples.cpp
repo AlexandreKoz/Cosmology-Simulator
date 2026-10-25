@@ -136,5 +136,23 @@ int main() {
     assert(!n.treepm_leaf_simd_enabled && !n.treepm_full_residual_lookup_enabled);
     (void)n;
   }
+  {
+    // Unqualified DMO performance profile (docs/tree_pm_coupling.md). Every
+    // performance choice is explicit in the deck, never a changed default.
+    const auto perf = cosmosim::core::loadFrozenConfigFromFile(
+        source_dir / "configs/performance/dmo_128_pm256_performance_unqualified.param.txt");
+    const auto& n = perf.config.numerics;
+    assert(n.treepm_pm_grid_nx == 256 && n.treepm_pm_grid_ny == 256 && n.treepm_pm_grid_nz == 256);
+    assert(n.treepm_group_walk_enabled && n.treepm_group_walk_target_size == 32);
+    assert(n.treepm_tree_max_leaf_size == 8);
+    assert(n.treepm_tree_relative_force_tolerance == 0.0025);
+    assert(n.gravity_timestep_eta == 0.2);
+    assert(!perf.config.parallel.decomposition_spatial_work_enabled);
+    assert(perf.config.analysis.run_health_interval_steps == 8);
+    assert(perf.config.output.restart_interval_steps == 1024);
+    assert(perf.config.output.snapshot_verification ==
+           cosmosim::core::SnapshotVerificationPolicy::kStructural);
+    (void)n;
+  }
   return 0;
 }

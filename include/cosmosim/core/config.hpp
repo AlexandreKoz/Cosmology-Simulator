@@ -32,6 +32,13 @@ enum class TreePmAssignmentScheme {
   kTsc,
 };
 
+enum class TreePmForceGradient {
+  // Reference: three spectral derivatives (one inverse FFT per axis).
+  kSpectral,
+  // Opt-in, unqualified: one inverse FFT plus a 4th-order centered difference.
+  kFiniteDifference4,
+};
+
 enum class TreePmOpeningCriterion {
   kGeometric,
   kComDistance,
@@ -250,6 +257,12 @@ struct NumericsConfig {
   // (G m_max)) from each row's nearest direct pair; bounds the timestep where
   // the acceleration criterion sees |a| -> 0 during a pair crossing.
   bool hierarchical_encounter_timestep_enabled = true;
+  // Dimensionless accuracy coefficient of the gravitational timestep
+  // criterion dt = eta sqrt(eps a^3 / |A|) (scale-free comoving acceleration A)
+  // and of the softened-encounter rung bound dt <= eta sqrt(a^3/T).  Note this
+  // is not AREPO's ErrTolIntAccuracy, whose criterion is sqrt(2 eta eps/|a|).
+  // 0.2 is the historical hardcoded compatibility value.
+  double gravity_timestep_eta = 0.2;
   int amr_max_level = 10;
   double gravity_softening_kpc_comoving = 1.0;
   double gravity_softening_gas_kpc_comoving = -1.0;
@@ -284,9 +297,14 @@ struct NumericsConfig {
       TreePmAdaptiveErrorEstimator::kResidualDerivative;
   TreePmCutoffNodePolicy treepm_cutoff_node_policy = TreePmCutoffNodePolicy::kContain;
   bool treepm_group_walk_enabled = false;
+  // 0 keeps legacy group-walk grouping (active targets of one source leaf);
+  // N in [2, treepm_residual_block_size] groups up to N tree-order targets,
+  // decoupled from treepm_tree_max_leaf_size.
+  int treepm_group_walk_target_size = 0;
   bool treepm_identical_source_tree_reuse_enabled = false;
   bool treepm_topology_refit_enabled = false;
   TreePmAssignmentScheme treepm_assignment_scheme = TreePmAssignmentScheme::kTsc;
+  TreePmForceGradient treepm_pm_force_gradient = TreePmForceGradient::kSpectral;
   bool treepm_enable_window_deconvolution = true;
   int treepm_update_cadence_steps = 1;
   // Explicitly test/diagnostic-only. Production workflows fail closed when
@@ -415,6 +433,18 @@ enum class ScienceSnapshotLayout : std::uint8_t {
   kSharded = 3,
 };
 
+// Write-time verification of a non-collective science snapshot member.
+// kFullReadback materializes the member and compares every field against the
+// authoritative state (strict validation). kStructural verifies schema,
+// file kind, header cosmology/time, provenance hash and per-type counts from
+// header metadata only; the root-rank SHA-256 completion marker and the
+// independent snapshot-set validation still run in both modes. Collective
+// single-file snapshots always use the bounded rank-partition readback.
+enum class SnapshotVerificationPolicy : std::uint8_t {
+  kFullReadback = 0,
+  kStructural = 1,
+};
+
 struct OutputConfig {
   std::string run_name = "cosmosim_run";
   std::string output_directory = "outputs";
@@ -429,6 +459,14 @@ struct OutputConfig {
   // world size so future aggregated science I/O is not rank-count coupled.
   std::uint32_t snapshot_num_files = 0U;
   bool write_restarts = true;
+  // 0 retains the legacy coupling: with write_restarts=true every science
+  // snapshot event also writes a checkpoint. N > 0 selects an independent
+  // checkpoint cadence every N completed global steps (coarse blocks under
+  // hierarchical KDK); snapshot events then no longer imply checkpoints.
+  // The next checkpoint index is derived from the restart-persisted step
+  // index, so resumed and uninterrupted runs share one checkpoint timeline.
+  int restart_interval_steps = 0;
+  SnapshotVerificationPolicy snapshot_verification = SnapshotVerificationPolicy::kFullReadback;
 };
 
 

@@ -374,7 +374,7 @@ At a closed coarse boundary, every particle receives a freshly synchronized
 Tree+PM solve. The coarse duration is at most `2^M * global_min_gravity_dt`,
 further clipped by cosmological limits, explicit workflow dt, next code-time
 output event, and endpoint. The existing gravity criterion uses
-`eta*sqrt(eps/(|A|/a^3))` with its current eta 0.2. The quantum is coarse dt /
+`eta*sqrt(eps/(|A|/a^3))` with `eta = numerics.gravity_timestep_eta` (default 0.2). The quantum is coarse dt /
 `2^M`. Each bin `b` is the largest permitted power of two no greater than its
 particle criterion, with interval `quantum*2^b`, `b=0..M`, `M<=12`.
 Assignments and quantum are frozen inside the block. Changes occur only after
@@ -518,7 +518,7 @@ dt = min( eta sqrt(eps a^3 / |A|),                       acceleration
           eta sqrt(a^3 (r_nn^2 + eps^2)^{3/2} / (G m_max)) )  encounter
 ```
 
-with `eta = 0.2`, comoving scale-free `A` and `G m/(r^2+eps^2)^{3/2}` (physical
+with `eta = numerics.gravity_timestep_eta` (default 0.2), comoving scale-free `A` and `G m/(r^2+eps^2)^{3/2}` (physical
 values divide by `a^3`), and `m_max` the global maximum particle mass
 (conservative for unequal masses). At coincidence the encounter term is the
 softened two-body dynamical time `eta sqrt(eps^3 a^3/(G m))`; beyond

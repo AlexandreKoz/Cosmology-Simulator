@@ -1,0 +1,107 @@
+# DMO TreePM performance profile (128^3 particles, 256^3 PM, z=24 -> z=0).
+#
+# REQUIRES SCIENTIFIC QUALIFICATION. This deck combines the audited
+# performance-oriented TreePM settings (adaptive relative_monopole MAC,
+# alpha = 0.0025, maximum opening angle 1.0, com_distance cutoff nodes,
+# group walk with 32-target groups, Gaussian pair lookup, leaf size 8) with
+# reduced diagnostic/I-O overhead (run-health every 8 steps, independent
+# checkpoint cadence, structural snapshot verification). None of these
+# choices is a default; compare forces and z=0 statistics against a strict
+# reference run (docs/validation_plan.md) before using results.
+#
+# The IC path names the 128^3 / 10 Mpc/h z=24 GADGET/AREPO IC used by the
+# owner-side audit workload; point ic_file at the actual file before use, and
+# set gravity_softening to the value of the matched AREPO comparison run.
+# Launch: OMP_NUM_THREADS=<threads> ./chui run configs/performance/dmo_128_pm256_performance_unqualified.param.txt
+schema_version = 1
+
+[units]
+length_unit = mpc
+mass_unit = msun
+velocity_unit = km_s
+coordinate_frame = comoving
+
+[mode]
+mode = cosmo_cube
+ic_file = ../ics/chui_ic_128_10mpch_z24.hdf5
+ic_convention = gadget_arepo_bridge_v1
+ic_bridge_source_length_unit_to_si = 3.0856775814913673e22
+ic_bridge_source_mass_unit_to_si = 1.98847e40
+ic_bridge_source_velocity_unit_to_si = 1000
+ic_bridge_coordinate_frame = comoving
+ic_bridge_velocity_convention = gadget_arepo_stored_peculiar
+ic_bridge_length_hubble_exponent = -1
+ic_bridge_length_scale_factor_exponent = 0
+ic_bridge_mass_hubble_exponent = -1
+ic_bridge_mass_scale_factor_exponent = 0
+ic_bridge_velocity_hubble_exponent = 0
+ic_bridge_velocity_scale_factor_exponent = 0
+ic_chunk_particle_count = 65536
+ic_staging_particle_count = 65536
+
+[cosmology]
+omega_matter = 0.3099
+omega_lambda = 0.6901
+omega_baryon = 0.0488911
+hubble_param = 0.67742
+sigma8 = 0.808992
+scalar_index_ns = 0.96822
+box_size = 14.761890702961235 mpc
+
+[numerics]
+a_begin = 0.04
+z_begin = 24
+a_end = 1
+integrator_time_variable = scale_factor
+max_global_steps = 1000000
+hierarchical_max_rung = 0
+gravity_solver = treepm
+gravity_softening = 3 kpc
+gravity_timestep_eta = 0.2
+treepm_pm_grid = 256
+treepm_asmth_cells = 1.25
+treepm_rcut_cells = 6.25
+treepm_assignment_scheme = tsc
+treepm_enable_window_deconvolution = true
+treepm_tree_opening_criterion = com_distance
+treepm_tree_opening_theta = 0.7
+treepm_tree_relative_force_tolerance = 0.0025
+treepm_adaptive_acceptance_enabled = true
+treepm_adaptive_maximum_opening_angle = 1.0
+treepm_adaptive_error_estimator = relative_monopole
+treepm_cutoff_node_policy = com_distance
+treepm_group_walk_enabled = true
+treepm_group_walk_target_size = 32
+treepm_full_mac_diagnostics = false
+treepm_gaussian_pair_lookup_enabled = true
+treepm_full_residual_lookup_enabled = false
+treepm_leaf_simd_enabled = false
+treepm_radial_coefficients_enabled = true
+treepm_identical_source_tree_reuse_enabled = false
+treepm_topology_refit_enabled = false
+treepm_residual_block_size = 64
+treepm_tree_max_leaf_size = 8
+
+[physics]
+enable_cooling = false
+enable_star_formation = false
+enable_feedback = false
+enable_stellar_evolution = false
+enable_black_hole_agn = false
+enable_tracers = false
+enable_metal_diffusion = false
+
+[analysis]
+run_health_interval_steps = 8
+
+[parallel]
+mpi_ranks_expected = 1
+omp_threads = 4
+decomposition_spatial_work_enabled = false
+
+[output]
+run_name = dmo_128_pm256_performance_unqualified
+snapshot_interval_steps = 256
+write_restarts = true
+restart_interval_steps = 1024
+snapshot_verification = structural
