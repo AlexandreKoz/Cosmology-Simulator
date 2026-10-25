@@ -1487,6 +1487,40 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
   CHUI_REQUIRE(aggregated.config.output.snapshot_layout ==
          cosmosim::core::ScienceSnapshotLayout::kAggregated);
   CHUI_REQUIRE(aggregated.config.output.snapshot_num_files == 8U);
+
+  // Independent checkpoint cadence and snapshot verification policy. Legacy
+  // defaults keep checkpoints coupled to snapshots with full readback.
+  CHUI_REQUIRE(aggregated.config.output.restart_interval_steps == 0);
+  CHUI_REQUIRE(aggregated.config.output.snapshot_verification ==
+         cosmosim::core::SnapshotVerificationPolicy::kFullReadback);
+  CHUI_REQUIRE(aggregated.normalized_text.find("restart_interval_steps = 0") != std::string::npos);
+  CHUI_REQUIRE(aggregated.normalized_text.find("snapshot_verification = full_readback") !=
+         std::string::npos);
+  const auto independent = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[output]\n"
+      "restart_interval_steps = 16\n"
+      "snapshot_verification = structural\n",
+      "independent_checkpoint_cadence");
+  CHUI_REQUIRE(independent.config.output.restart_interval_steps == 16);
+  CHUI_REQUIRE(independent.config.output.snapshot_verification ==
+         cosmosim::core::SnapshotVerificationPolicy::kStructural);
+  CHUI_REQUIRE(cosmosim::core::loadFrozenConfigFromString(
+      independent.normalized_text, "independent_checkpoint_roundtrip").normalized_text ==
+      independent.normalized_text);
+  for (const char* invalid : {
+           "restart_interval_steps = -1\n",
+           "restart_interval_steps = 8\nwrite_restarts = false\n",
+           "snapshot_verification = none\n"}) {
+    bool rejected = false;
+    try {
+      (void)cosmosim::core::loadFrozenConfigFromString(
+          std::string("[mode]\nmode = zoom_in\n[output]\n") + invalid,
+          "invalid_independent_checkpoint_cadence");
+    } catch (const cosmosim::core::ConfigError&) {
+      rejected = true;
+    }
+    CHUI_REQUIRE(rejected);
+  }
 }
 
 }  // namespace
@@ -1573,6 +1607,19 @@ void testTreePmProductionTuningRoundTrip() {
         std::string(error.what()).find("treepm_group_walk_enabled") != std::string::npos;
   }
   CHUI_REQUIRE(group_without_prerequisites_rejected);
+  // Decoupled target grouping: legacy 0 default, [2, residual block] range,
+  // only meaningful with the group walk enabled.
+  CHUI_REQUIRE(grouped.config.numerics.treepm_group_walk_target_size == 0);
+  {
+    const auto sized = loadFrozenConfigFromString(
+        withNumericsValue(grouped.normalized_text, "treepm_group_walk_target_size", "32"), "group_target_size");
+    CHUI_REQUIRE(sized.config.numerics.treepm_group_walk_target_size == 32);
+    CHUI_REQUIRE(loadFrozenConfigFromString(sized.normalized_text, "group_target_size_replay").normalized_text ==
+        sized.normalized_text);
+    for (const auto value : {"-1", "1", "65", "many"})
+      requireNumericsRejected(grouped.normalized_text, "treepm_group_walk_target_size", value);
+    requireNumericsRejected(baseline.normalized_text, "treepm_group_walk_target_size", "16");
+  }
 
   // Hierarchical coarse displacement limiter: legacy default, RMS alternative.
   CHUI_REQUIRE(baseline.config.numerics.hierarchical_coarse_displacement_criterion ==
@@ -1589,6 +1636,19 @@ void testTreePmProductionTuningRoundTrip() {
     CHUI_REQUIRE(loadFrozenConfigFromString(no_encounter.normalized_text, "encounter_replay").normalized_text ==
         no_encounter.normalized_text);
     requireNumericsRejected(baseline.normalized_text, "hierarchical_encounter_timestep_enabled", "maybe");
+  }
+  // Gravity timestep accuracy coefficient: historical 0.2 default, typed
+  // finite (0, 1] range, normalized round trip.
+  CHUI_REQUIRE(baseline.config.numerics.gravity_timestep_eta == 0.2);
+  CHUI_REQUIRE(baseline.normalized_text.find("gravity_timestep_eta = 0.2") != std::string::npos);
+  {
+    const auto tighter = loadFrozenConfigFromString(
+        withNumericsValue(baseline.normalized_text, "gravity_timestep_eta", "0.025"), "eta_tight");
+    CHUI_REQUIRE(tighter.config.numerics.gravity_timestep_eta == 0.025);
+    CHUI_REQUIRE(loadFrozenConfigFromString(tighter.normalized_text, "eta_replay").normalized_text ==
+        tighter.normalized_text);
+    for (const auto value : {"0", "-0.2", "1.5", "nan", "inf"})
+      requireNumericsRejected(baseline.normalized_text, "gravity_timestep_eta", value);
   }
   auto rms_text = withNumericsValue(baseline.normalized_text,
       "hierarchical_coarse_displacement_criterion", "rms_split_scale");

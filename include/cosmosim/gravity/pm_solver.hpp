@@ -79,6 +79,23 @@ enum class PmBoundaryCondition {
   kIsolatedOpen,
 };
 
+// Real-space PM force from the periodic potential spectrum phi_k.
+// kSpectral (reference, default): F_a = IFFT(-i k_a phi_k) per axis, three
+//   inverse FFTs; keeps a pristine phi_k copy (PlanResources::potential_k)
+//   because complex-to-real FFTW transforms destroy their input.
+// kFiniteDifference4 (opt-in, unqualified): one inverse FFT of phi_k, then the
+//   fourth-order centered difference
+//     F_a(i) = -[8(phi_{i+1} - phi_{i-1}) - (phi_{i+2} - phi_{i-2})] / (12 h_a)
+//   on the periodic mesh (h_a = L_a/n_a; two x halo planes exchanged with
+//   the neighboring slab ranks). Never allocates potential_k. Its transfer
+//   function is sin-like below the spectral i k_a, so forces near the mesh
+//   scale are weaker than the reference; requires owner force validation.
+//   Periodic host solves only; every distributed rank must own >= 2 x planes.
+enum class PmForceGradientBackend : std::uint8_t {
+  kSpectral = 0,
+  kFiniteDifference4 = 1,
+};
+
 struct PmGridShape {
   std::size_t nx = 0;
   std::size_t ny = 0;
@@ -98,6 +115,8 @@ struct PmPlanResourcesMemoryEstimate {
   // remains for source compatibility and is always zero.
   std::uint64_t scalar_spectral_array_bytes = 0U;
   std::uint64_t spectral_axis_metadata_bytes = 0U;
+  // kFiniteDifference4 on distributed slabs: four retained x halo planes.
+  std::uint64_t finite_difference_halo_bytes = 0U;
   std::uint64_t total_owned_bytes = 0U;
   std::uint64_t logical_local_complex_cells = 0U;
   std::uint64_t allocated_local_complex_cells = 0U;
@@ -107,7 +126,8 @@ struct PmPlanResourcesMemoryEstimate {
 [[nodiscard]] PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
     PmGridShape shape,
     const parallel::PmSlabLayout& layout,
-    core::PmDecompositionMode decomposition_mode);
+    core::PmDecompositionMode decomposition_mode,
+    PmForceGradientBackend force_gradient_backend = PmForceGradientBackend::kSpectral);
 
 struct PmGlobalCell {
   std::size_t x = 0;
@@ -221,6 +241,7 @@ struct PmSolveOptions {
   // The implementation is correct inside this envelope but is not a scalable
   // distributed isolated PM solver.
   std::uint64_t isolated_open_root_workspace_limit_bytes = 256ULL * 1024ULL * 1024ULL;
+  PmForceGradientBackend force_gradient_backend = PmForceGradientBackend::kSpectral;
 };
 
 struct PmProfileEvent {

@@ -90,6 +90,8 @@ struct GravityMemoryEstimateInput {
   // already-accounted FFT real owner. Generic/isolated compatibility paths
   // leave this false and retain compact PmGridStorage density.
   bool periodic_fft_backed_density = false;
+  // kFiniteDifference4 retains no phi_k copy (one complex spectral array).
+  PmForceGradientBackend pm_force_gradient_backend = PmForceGradientBackend::kSpectral;
   bool relative_force_mac_enabled = false;
   bool hierarchical_kdk_enabled = false;
   bool gaussian_pair_lookup_enabled = false;

@@ -27,8 +27,15 @@ namespace cosmosim::gravity::internal {
 //   inside an accepted node), and under kContainNode a node must lie inside
 //   r_cut of every group point.
 //
-// Accepted leaves contribute contiguous tree-order source ranges that are
-// evaluated with a branch-free pair loop suited to compiler vectorization.
+// Accepted leaves are listed one entry per leaf with the leaf cell geometry
+// (minimum-image center offset from the group center plus half width). Each
+// target then culls leaves whose cell lies entirely beyond r_cut by the exact
+// per-axis periodic distance max(0, |minimg(c - p)| - h), which bounds every
+// source-target separation in that leaf from below. Surviving leaves that are
+// contiguous in tree order are coalesced into one range evaluated with a
+// branch-free pair loop suited to compiler vectorization. Culling only skips
+// pairs the kernel would mask (r2 > r_cut^2); forces differ from the unculled
+// list at roundoff level through summation order only.
 
 struct TreePmGroupBox {
   std::array<double, 3> center{};
@@ -41,7 +48,17 @@ inline void clearTreePmGroupInteractionList(TreePmGroupInteractionList& list) no
   list.multipole_nodes.clear();
   list.range_begin.clear();
   list.range_end.clear();
+  list.leaf_offset_x.clear();
+  list.leaf_offset_y.clear();
+  list.leaf_offset_z.clear();
+  list.leaf_half_size.clear();
 }
+
+// Leaf culling threshold. A leaf is rejected for a target only when its cell's
+// squared distance exceeds r_cut^2 by this relative margin, so rounding in the
+// cell-offset arithmetic can never drop a pair the pair kernel would keep
+// (r2 <= r_cut^2). Pairs inside the margin are still masked exactly by the kernel.
+inline constexpr double k_tree_pm_group_leaf_cull_slack = 1.0 + 1.0e-9;
 
 struct TreePmGroupWalkParameters {
   double cutoff_radius2 = 0.0;
@@ -93,14 +110,14 @@ inline void buildTreePmGroupInteractionList(
       ++counters.accepted_nodes;
       const TreeLocalIndex begin = nodes.particle_begin[node];
       const TreeLocalIndex end = begin + static_cast<TreeLocalIndex>(nodes.particle_count[node]);
-      // Depth-first octant order visits Morton-contiguous leaves together;
-      // merging touching ranges gives fewer, longer vectorized pair loops.
-      if (!out.range_end.empty() && out.range_end.back() == begin) {
-        out.range_end.back() = end;
-      } else {
-        out.range_begin.push_back(begin);
-        out.range_end.push_back(end);
-      }
+      // One entry per leaf keeps the geometry needed for per-target culling;
+      // touching ranges are coalesced per target after culling instead.
+      out.range_begin.push_back(begin);
+      out.range_end.push_back(end);
+      out.leaf_offset_x.push_back(dc[0]);
+      out.leaf_offset_y.push_back(dc[1]);
+      out.leaf_offset_z.push_back(dc[2]);
+      out.leaf_half_size.push_back(h);
       continue;
     }
     bool accept = gap2 > 0.0 && (!p.contain_cutoff || far2 <= p.cutoff_radius2);
@@ -205,6 +222,63 @@ inline void accumulateTreePmGroupPairs(
   ay += sy;
   az += sz;
   pairs += counted;
+}
+
+struct TreePmGroupLeafCullCounts {
+  std::uint64_t candidate_leaves = 0;
+  std::uint64_t culled_leaves = 0;
+  std::uint64_t candidate_particles = 0;
+};
+
+// Evaluates the list's source leaves on one target with per-leaf culling.
+// target_offset is the target's minimum-image offset from the group center
+// used to build the list (|component| <= L/2), so one conditional shift of
+// (leaf_offset - target_offset) is the minimum image of (leaf center - target).
+// No square root is taken; the comparison is on squared distances.
+inline void accumulateTreePmGroupCulledLeaves(
+    const TreePmGroupPairKernel& k, const TreePmGroupInteractionList& list,
+    const std::array<double, 3>& target_offset, double px, double py, double pz,
+    double& ax, double& ay, double& az, std::uint64_t& pairs, double& nearest_pair_r2,
+    TreePmGroupLeafCullCounts& counts) noexcept {
+  const double lx = k.length[0], ly = k.length[1], lz = k.length[2];
+  const double hx = 0.5 * lx, hy = 0.5 * ly, hz = 0.5 * lz;
+  const double cull_radius2 = k.cutoff_radius2 * k_tree_pm_group_leaf_cull_slack;
+  const auto wrap = [](double d, double length, double half) noexcept {
+    return d > half ? d - length : (d < -half ? d + length : d);
+  };
+  const std::size_t leaf_count = list.range_begin.size();
+  std::size_t run_begin = 0U, run_end = 0U;
+  bool run_open = false;
+  std::uint64_t culled = 0U, candidates = 0U;
+  for (std::size_t leaf = 0; leaf < leaf_count; ++leaf) {
+    const double h = list.leaf_half_size[leaf];
+    const double gx = std::max(0.0, std::abs(wrap(list.leaf_offset_x[leaf] - target_offset[0], lx, hx)) - h);
+    const double gy = std::max(0.0, std::abs(wrap(list.leaf_offset_y[leaf] - target_offset[1], ly, hy)) - h);
+    const double gz = std::max(0.0, std::abs(wrap(list.leaf_offset_z[leaf] - target_offset[2], lz, hz)) - h);
+    if (gx * gx + gy * gy + gz * gz > cull_radius2) {
+      ++culled;
+      continue;
+    }
+    const std::size_t begin = list.range_begin[leaf];
+    const std::size_t end = list.range_end[leaf];
+    candidates += end - begin;
+    if (run_open && run_end == begin) {
+      run_end = end;
+      continue;
+    }
+    if (run_open) {
+      accumulateTreePmGroupPairs(k, px, py, pz, run_begin, run_end, ax, ay, az, pairs, nearest_pair_r2);
+    }
+    run_begin = begin;
+    run_end = end;
+    run_open = true;
+  }
+  if (run_open) {
+    accumulateTreePmGroupPairs(k, px, py, pz, run_begin, run_end, ax, ay, az, pairs, nearest_pair_r2);
+  }
+  counts.candidate_leaves += leaf_count;
+  counts.culled_leaves += culled;
+  counts.candidate_particles += candidates;
 }
 
 }  // namespace cosmosim::gravity::internal

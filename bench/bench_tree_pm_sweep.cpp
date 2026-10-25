@@ -32,6 +32,7 @@ struct Arguments {
   double maximum_angle = 0.25;
   double alpha = 0.005;
   bool relative_monopole = false, com_distance_cutoff = false, group_walk = false;
+  std::size_t group_target_size = 0;
   bool full_residual=false, simd=false, radial=false, reuse=false, refit=false;
   std::string kernel="analytic";
   int ewald_level = 0;
@@ -78,6 +79,7 @@ Arguments parseArguments(int argc, char** argv) {
     else if (key == "--cutoff-node-policy" && (value=="contain" || value=="com_distance"))
       a.com_distance_cutoff=value=="com_distance";
     else if (key == "--group-walk" && (value=="on" || value=="off")) a.group_walk=value=="on";
+    else if (key == "--group-target-size") a.group_target_size=parseSizeValue(value);
     else if (key == "--reuse" && (value=="on" || value=="off")) a.reuse=value=="on";
     else if (key == "--refit" && (value=="on" || value=="off")) a.refit=value=="on";
     else if (key == "--epsilon") a.epsilon=parseRealValue(value);
@@ -266,6 +268,7 @@ int run(const Arguments& a) {
       cosmosim::gravity::TreePmCutoffNodePolicy::kComDistance :
       cosmosim::gravity::TreePmCutoffNodePolicy::kContainNode;
   options.group_walk_enabled=a.group_walk;
+  options.group_walk_target_group_size=a.group_target_size;
   options.split_policy=cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(a.asmth,a.rcut,
       std::cbrt((a.box_x/a.mesh)*(a.box_y/a.mesh)*(a.box_z/a.mesh)));
   options.gaussian_pair_lookup_enabled=a.lookup;options.full_mac_diagnostics=a.forensic;
@@ -321,6 +324,11 @@ int run(const Arguments& a) {
       <<",\"residual_lookup_targets\":"<<c.residual_lookup_targets
       <<",\"simd_leaf_targets\":"<<c.simd_leaf_targets
       <<",\"skipped_geometry\":"<<c.skipped_geometry_evaluations
+      <<",\"group_walk_status\":\""<<cosmosim::gravity::treePmGroupWalkStatusName(static_cast<cosmosim::gravity::TreePmGroupWalkStatus>(d.group_walk_status))<<"\""
+      <<",\"group_walk_groups\":"<<c.group_walk_groups<<",\"group_walk_grouped_targets\":"<<c.group_walk_grouped_targets
+      <<",\"group_walk_fallback_targets\":"<<c.group_walk_fallback_targets
+      <<",\"group_walk_candidate_leaves\":"<<c.group_walk_candidate_leaves<<",\"group_walk_culled_leaves\":"<<c.group_walk_culled_leaves
+      <<",\"group_walk_candidate_particles\":"<<c.group_walk_candidate_particles
       <<",\"tree_build_ms\":"<<profile.tree_profile.build_ms<<",\"multipole_ms\":"<<profile.tree_profile.multipole_ms
       <<",\"traversal_ms\":"<<profile.tree_profile.traversal_ms<<",\"pairs\":"<<c.direct_pair_evaluations
       <<",\"nodes\":"<<c.visited_nodes<<",\"opened\":"<<c.opened_nodes<<",\"multipoles\":"<<c.accepted_internal_multipoles

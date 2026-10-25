@@ -427,7 +427,8 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
       local_pm_cells, pm_grid_components * sizeof(double),
       "gravity PM owned estimate overflow");
   const PmPlanResourcesMemoryEstimate pm_plan_memory =
-      estimatePmPlanResourcesMemory(input.pm_shape, pm_layout, input.decomposition_mode);
+      estimatePmPlanResourcesMemory(input.pm_shape, pm_layout, input.decomposition_mode,
+                                    input.pm_force_gradient_backend);
   const std::uint64_t zoom_cells = input.zoom_enabled
       ? gridCells(input.zoom_pm_shape, "gravity zoom PM estimate overflow")
       : 0U;

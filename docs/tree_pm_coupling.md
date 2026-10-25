@@ -992,3 +992,21 @@ No force-history floor is fabricated. Existing `alpha=0.005`, maximum angle
 `0.25`, strict envelope, softening, and cutoff containment remain enforced.
 Quadrupoles retain analytic derivative-consistent radial terms and the full
 second-moment trace; the pair table never supplies multipole derivatives.
+
+## Group-walk leaf culling, target sizing and telemetry (2026-10-25, untested)
+
+Group interaction lists now keep one entry per accepted source leaf with its
+cell center (minimum-image offset from the group center) and half width. Each
+target rejects a leaf when `sum_a max(0, |minimg(c_a - p_a)| - h)^2 >
+r_cut^2 (1 + 1e-9)`, a conservative lower bound on every pair separation in
+that leaf; surviving tree-contiguous leaves are re-coalesced for the
+vectorized pair kernel. `numerics.treepm_group_walk_target_size` (0 = legacy
+one-leaf groups) groups up to N tree-order targets within one residual block
+and an AABB extent of `0.5 r_cut`. Owned targets use the group walk in both
+the local-only and the distributed (LET-overlapped) residual paths; incoming
+remote targets keep the per-target walk. `gravity.treepm_let` events report
+`group_walk_status`, groups, grouped/fallback targets by reason, candidate and
+culled leaves and candidate particles. The PM long-range force may use the
+opt-in `numerics.treepm_pm_force_gradient = finite_difference_4` backend
+(see `docs/configuration.md`). Record:
+[campaign 2026-10-25](repair/treepm_optimization_campaign_20261025.md).

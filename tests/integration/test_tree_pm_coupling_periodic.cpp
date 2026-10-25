@@ -297,6 +297,86 @@ void testPmPlanRetainedStorageMatchesAllocation() {
   }
 }
 
+// 20261025 optimization campaign: authored, NOT RUN — deferred to maintainer.
+// Finite-difference PM gradient backend on one Fourier mode along each axis.
+// For rho = 1 + A cos(k x) the spectral backend is exact and the fourth-order
+// stencil multiplies the force by T(kh) = (8 sin(kh) - sin(2kh)) / (6 kh).
+// The FD solve must reproduce T(kh) x spectral (slab halos included when
+// MPI ranks > 1) and must never allocate the spectral phi_k copy.
+void testPmFiniteDifferenceGradientBackend() {
+  int ranks = 1, rank = 0;
+#if COSMOSIM_ENABLE_MPI
+  MPI_Comm_size(MPI_COMM_WORLD, &ranks);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+#endif
+#if !COSMOSIM_ENABLE_FFTW
+  if (ranks > 1) return;
+#endif
+  using namespace cosmosim::gravity;
+  constexpr std::size_t n = 16U;
+  if (static_cast<std::size_t>(ranks) * 2U > n) return;  // every rank needs two x planes
+  const PmGridShape shape{n, n, n};
+  const auto layout = cosmosim::parallel::makePmSlabLayout(n, n, n, ranks, rank);
+  constexpr double pi = 3.14159265358979323846;
+  for (int axis = 0; axis < 3; ++axis) {
+    const auto fill = [&](PmGridStorage& grid) {
+      grid.ensureDensityStorage();
+      auto density = grid.density();
+      for (std::size_t lx = 0; lx < layout.local_nx(); ++lx) {
+        const std::size_t gx = layout.globalXFromLocal(lx);
+        for (std::size_t iy = 0; iy < n; ++iy) {
+          for (std::size_t iz = 0; iz < n; ++iz) {
+            const std::size_t coordinate = axis == 0 ? gx : (axis == 1 ? iy : iz);
+            density[grid.linearIndex(gx, iy, iz)] =
+                1.0 + 0.1 * std::cos(2.0 * pi * static_cast<double>(coordinate) / static_cast<double>(n));
+          }
+        }
+      }
+    };
+    PmSolveOptions options;
+    options.box_size_mpc_comoving = 1.0;
+    PmGridStorage spectral_grid(shape, layout);
+    PmSolver spectral_solver(shape);
+    fill(spectral_grid);
+    spectral_solver.solvePoissonPeriodicForcesOnly(spectral_grid, options);
+    options.force_gradient_backend = PmForceGradientBackend::kFiniteDifference4;
+    PmGridStorage fd_grid(shape, layout);
+    PmSolver fd_solver(shape);
+    fill(fd_grid);
+    fd_solver.solvePoissonPeriodicForcesOnly(fd_grid, options);
+    const double kh = 2.0 * pi / static_cast<double>(n);
+    const double transfer = (8.0 * std::sin(kh) - std::sin(2.0 * kh)) / (6.0 * kh);
+    const std::array<std::span<const double>, 3> spectral{
+        std::as_const(spectral_grid).force_x(), std::as_const(spectral_grid).force_y(),
+        std::as_const(spectral_grid).force_z()};
+    const std::array<std::span<const double>, 3> fd{
+        std::as_const(fd_grid).force_x(), std::as_const(fd_grid).force_y(), std::as_const(fd_grid).force_z()};
+    double scale = 0.0;
+    for (const double value : spectral[static_cast<std::size_t>(axis)]) scale = std::max(scale, std::abs(value));
+    requireOrThrow(scale > 0.0, "single-mode spectral PM force vanished");
+    for (std::size_t component = 0; component < 3U; ++component) {
+      for (std::size_t i = 0; i < spectral[component].size(); ++i) {
+        const double expected = transfer * spectral[component][i];
+        requireOrThrow(std::abs(fd[component][i] - expected) <= 1.0e-9 * scale,
+            "finite-difference PM force differs from T(kh) x spectral force");
+      }
+    }
+    cosmosim::core::MemoryReportBuilder builder;
+    fd_solver.appendMemoryReport(builder);
+    const auto report = std::move(builder).finish();
+    const auto estimate = estimatePmPlanResourcesMemory(
+        shape, layout, cosmosim::core::PmDecompositionMode::kSlab, PmForceGradientBackend::kFiniteDifference4);
+    for (const auto& entry : report.entries) {
+      if (entry.label != "pm_solver.plan_cache_owned_arrays") continue;
+      requireOrThrow(entry.current_size_bytes ==
+          estimate.real_array_bytes + estimate.complex_spectral_array_bytes + estimate.finite_difference_halo_bytes,
+          "finite-difference PM plan retained a spectral phi_k copy or misreported halo planes");
+    }
+    fd_solver.shutdownBackendResources();
+    spectral_solver.shutdownBackendResources();
+  }
+}
+
 void testShortRangeSurfaceRejectsPmRequests() {
 #if COSMOSIM_ENABLE_MPI
   int world_size = 1; MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -2051,6 +2131,98 @@ void testBoundedLeafAccelerationReuseAndFallback() {
   requireOrThrow(roomy.snapshot().committed_bytes==0U,"cache eviction retained a commitment");
 }
 
+// 20261025 optimization campaign: authored, NOT RUN — deferred to maintainer.
+// Group walk with per-target source-leaf culling and decoupled target groups.
+// With a vanishing maximum opening angle no node passes the MAC, so both the
+// group walk and the per-target walk reduce to the exact Gaussian-table direct
+// residual within r_cut. Clusters straddle the periodic seams and a corner, so
+// culling must use minimum-image leaf geometry. Forces agree to roundoff
+// (summation order differs), the in-cutoff pair sets are identical, and the
+// culling must reject some leaves.
+void testGroupWalkLeafCullingMatchesPerTargetWalk() {
+#if COSMOSIM_ENABLE_MPI
+  int world_size=1; MPI_Comm_size(MPI_COMM_WORLD,&world_size);
+  if (world_size != 1) return;
+#endif
+  using namespace cosmosim::gravity;
+  constexpr std::size_t clusters=4U, per_cluster=96U, n=clusters*per_cluster;
+  const std::array<std::array<double,3>,clusters> centers{{
+      {0.01,0.5,0.5}, {0.995,0.99,0.005}, {0.5,0.5,0.5}, {0.3,0.7,0.2}}};
+  std::vector<double> x(n),y(n),z(n),mass(n,1.0);
+  std::vector<TreeLocalIndex> active(n);
+  std::uint64_t state=0x9e3779b97f4a7c15ULL;
+  const auto uniform=[&state]() {
+    state=state*6364136223846793005ULL+1442695040888963407ULL;
+    return static_cast<double>(state>>11U)*(1.0/9007199254740992.0);
+  };
+  const auto wrap=[](double v) { v-=std::floor(v); return v>=1.0 ? 0.0 : v; };
+  for (std::size_t i=0;i<n;++i) {
+    const auto& c=centers[i/per_cluster];
+    active[i]=static_cast<TreeLocalIndex>(i);
+    // Alternate a dense core (groups fill to the requested size) with a
+    // halo wider than r_cut (so some listed leaves are culled per target).
+    const double spread=(i%2U==0U) ? 0.02 : 0.3;
+    x[i]=wrap(c[0]+spread*(uniform()-0.5));
+    y[i]=wrap(c[1]+spread*(uniform()-0.5));
+    z[i]=wrap(c[2]+spread*(uniform()-0.5));
+  }
+  TreePmOptions options;
+  options.pm_options.box_size_x_mpc_comoving=1.0;
+  options.pm_options.box_size_y_mpc_comoving=1.0;
+  options.pm_options.box_size_z_mpc_comoving=1.0;
+  options.tree_options.softening.epsilon_comoving=.002;
+  options.tree_options.max_leaf_size=8U;
+  options.tree_options.relative_force_tolerance=1.0e-3;
+  options.split_policy=makeTreePmSplitPolicyFromMeshSpacing(1.25,6.25,.03125);
+  options.short_range_only=true;
+  options.acceptance_policy=TreePmAcceptancePolicy::kAdaptiveRelative;
+  options.adaptive_error_estimator=TreePmAdaptiveErrorEstimator::kRelativeMonopole;
+  options.adaptive_maximum_opening_angle=1.0e-6;
+  options.gaussian_pair_lookup_enabled=true;
+  options.source_generation=GravitySourceGeneration{1U}; options.source_layout_generation=1U;
+  const std::vector<double> previous(n,1.0);
+  const PmGridShape shape{32,32,32};
+  TreePmDiagnostics reference_d;
+  const auto reference=solveTreePm(x,y,z,mass,shape,options,&reference_d,nullptr,previous,ForceEvaluation::kShortRangeOnly);
+  requireOrThrow(reference_d.group_walk_status==static_cast<std::uint64_t>(TreePmGroupWalkStatus::kNotRequested),
+      "per-target reference reported a group walk");
+  options.group_walk_enabled=true;
+  for (const std::size_t group_size : {std::size_t{0U}, std::size_t{32U}}) {
+    options.group_walk_target_group_size=group_size;
+    TreePmDiagnostics d;
+    const auto grouped=solveTreePm(x,y,z,mass,shape,options,&d,nullptr,previous,ForceEvaluation::kShortRangeOnly);
+    const auto& c=d.local_traversal;
+    requireOrThrow(d.group_walk_requested==1U &&
+        d.group_walk_status==static_cast<std::uint64_t>(TreePmGroupWalkStatus::kActive), "group walk not active");
+    requireOrThrow(c.group_walk_grouped_targets==n && c.group_walk_fallback_targets==0U,
+        "eligible targets fell back to the per-target walk");
+    requireOrThrow(c.group_walk_culled_leaves>0U && c.group_walk_culled_leaves<c.group_walk_candidate_leaves,
+        "per-target leaf culling never rejected (or rejected every) source leaf");
+    requireOrThrow(c.group_walk_candidate_particles>=c.direct_pair_evaluations,
+        "culling dropped a source the pair kernel evaluated");
+    requireOrThrow(c.direct_pair_evaluations==reference_d.local_traversal.direct_pair_evaluations,
+        "leaf culling changed the in-cutoff direct pair set");
+    if (group_size!=0U) {
+      requireOrThrow(c.group_walk_target_group_size_max<=group_size,"target group exceeded the configured size");
+      requireOrThrow(c.group_walk_target_group_size_max>options.tree_options.max_leaf_size,
+          "target grouping is still bounded by the source leaf size");
+    }
+    requireEquivalentForces(grouped,reference,1.0e-9,"culled group walk versus per-target walk");
+  }
+  // Missing acceleration history forces a counted per-target fallback with
+  // unchanged forces.
+  options.group_walk_target_group_size=32U;
+  TreePmDiagnostics fallback_d;
+  const auto fallback=solveTreePm(x,y,z,mass,shape,options,&fallback_d,nullptr,{},ForceEvaluation::kShortRangeOnly);
+  requireOrThrow(fallback_d.local_traversal.group_walk_fallback_history==n &&
+      fallback_d.local_traversal.group_walk_fallback_targets==n &&
+      fallback_d.local_traversal.group_walk_groups==0U, "history fallback was not attributed");
+  TreePmDiagnostics geometric_d;
+  options.group_walk_enabled=false;
+  const auto geometric=solveTreePm(x,y,z,mass,shape,options,&geometric_d,nullptr,{},ForceEvaluation::kShortRangeOnly);
+  requireEquivalentForces(fallback,geometric,0.0,"history fallback must be the per-target walk");
+}
+
 }  // namespace
 
 int main() {
@@ -2059,8 +2231,10 @@ int main() {
 #endif
   try {
   testPmPlanRetainedStorageMatchesAllocation();
+  testPmFiniteDifferenceGradientBackend();
   testShortRangeSurfaceRejectsPmRequests();
   testBoundedLeafAccelerationReuseAndFallback();
+  testGroupWalkLeafCullingMatchesPerTargetWalk();
   testForceComparatorRejectsNonfiniteComponents();
   testCoincidentPairVectorIsZeroWithFiniteSoftening();
   testRecoveryDirectPairsCutoffThreadsAndMemory();

@@ -445,6 +445,8 @@ Tracers:
   - `aggregated` reserves a future fixed-file-count topology and currently fails closed at runtime.
 - `snapshot_num_files` (default `0`, automatic; values greater than one are accepted only with `snapshot_layout = aggregated` and do not currently activate an unimplemented backend)
 - `write_restarts`
+- `restart_interval_steps` (default `0`: checkpoints follow snapshot events; `N > 0`: independent checkpoint cadence)
+- `snapshot_verification` (`full_readback` default, or `structural`)
 
 At least one snapshot interval must be positive. Code-time cadence is part of the
 normalized config and its next ordered event is restart-authoritative in restart
@@ -645,7 +647,7 @@ dump. No new parser or budget authority is introduced. **Validation pending.**
 | `numerics.treepm_group_walk_enabled` | `false` | Opt-in group walk (one tree walk per leaf of targets, vectorized pair loop); requires `treepm_adaptive_acceptance_enabled = true`, `treepm_adaptive_error_estimator = relative_monopole`, `treepm_gaussian_pair_lookup_enabled = true`, leaf SIMD and full-residual lookup off. See `docs/tree_pm_coupling.md`. |
 | `numerics.hierarchical_coarse_displacement_criterion` | `max_speed_mesh` | `max_speed_mesh` (previous behavior: fastest particle with the largest total acceleration may move at most one PM cell/split length per coarse block) or `rms_split_scale` (mass-weighted RMS speed may move `factor x min(r_s, mean interparticle spacing)`). Hierarchical KDK only. |
 | `numerics.hierarchical_coarse_rms_displacement_factor` | `0.25` | Finite `(0,1]`; used only by `rms_split_scale`. |
-| `numerics.hierarchical_encounter_timestep_enabled` | `true` | Hierarchical KDK only. Adds the softened-encounter rung criterion `dt <= 0.2 sqrt(a^3 (r_nn^2+eps^2)^{3/2} / (G m_max))`, `r_nn` the nearest direct-pair separation from the synchronized Tree solve. `false` restores the acceleration-only rung criterion. See `docs/time_integration.md`. |
+| `numerics.hierarchical_encounter_timestep_enabled` | `true` | Hierarchical KDK only. Adds the softened-encounter rung criterion `dt <= eta sqrt(a^3 (r_nn^2+eps^2)^{3/2} / (G m_max))` (`eta = numerics.gravity_timestep_eta`, default 0.2), `r_nn` the nearest direct-pair separation from the synchronized Tree solve. `false` restores the acceleration-only rung criterion. See `docs/time_integration.md`. |
 | `numerics.treepm_identical_source_tree_reuse_enabled` | `false` | Exact generation/count/build/frame/ownership/row-identity match required. |
 | `numerics.treepm_topology_refit_enabled` | `false` | Certify every source inside its original leaf cell, fixed unwrap frame and row membership; rebuild on rejection. |
 | `parallel.decomposition_spatial_work_enabled` | `false` | Fixed periodic `cosmo_cube`, 64 bounded SFC bins; reference feedback retained when false. |
@@ -713,3 +715,28 @@ execution contract, but reverse-octant traversal changes accumulation order
 relative to earlier revisions. Compare older checksums with numerical tolerances.
 No production mesh, leaf-capacity, OpenMP scheduling, acceptance, or hierarchical
 rung default changes. `hierarchical_max_rung=0` remains the safe global-KDK default.
+
+## October 25 2026 optimization campaign keys (unqualified; NOT compiled or tested)
+
+All keys use the existing `.param.txt` typed freeze, validation and normalized
+dump. Every default reproduces the previous behavior; every faster policy is
+opt-in. See the [campaign record](repair/treepm_optimization_campaign_20261025.md).
+
+| Key | Default | Authority / constraints |
+| --- | --- | --- |
+| `numerics.gravity_timestep_eta` | `0.2` | Finite `(0,1]`. Coefficient `eta` of the gravity criterion `dt = eta sqrt(eps a^3 / |A|)` (scale-free comoving `A`) used by the global KDK particle and gas-cell candidates and by the hierarchical rung criterion, and of the softened-encounter bound `dt <= eta sqrt(a^3 (r_nn^2+eps^2)^{3/2}/(G m_max))`. `0.2` is the value previously hardcoded in `time_coordinator.cpp`. This is **not** AREPO's `ErrTolIntAccuracy` (AREPO uses `sqrt(2 eta eps/|a|)`; equal step for `eta_CHUI = sqrt(2 eta_AREPO)`). The hydro CFL coefficient and source-term limits are unchanged. |
+| `numerics.treepm_group_walk_target_size` | `0` | `0` keeps the legacy group (active targets of one source leaf). `N` in `[2, treepm_residual_block_size]` groups up to `N` consecutive tree-order targets inside one residual block, closed early when the group AABB would exceed `0.5 r_cut` on any axis. Requires `treepm_group_walk_enabled = true`. |
+| `numerics.treepm_pm_force_gradient` | `spectral` | `spectral` (reference: three inverse FFTs of `-i k phi_k`) or `finite_difference_4` (one inverse FFT plus the fourth-order centered difference `-[8(phi_{i+1}-phi_{i-1})-(phi_{i+2}-phi_{i-2})]/(12h)`; no retained `phi_k` copy). Periodic host PM only, `>= 4` cells per axis, every MPI rank must own two `x` planes. Forces near the mesh scale are weaker by `T(kh) = (8 sin kh - sin 2kh)/(6kh)`; requires owner force validation. |
+| `output.restart_interval_steps` | `0` | `0` keeps checkpoints coupled to snapshot events (legacy `write_restarts` behavior). `N > 0` writes a checkpoint every `N` completed global steps (coarse blocks under hierarchical KDK) and snapshot events no longer imply checkpoints. Requires `write_restarts = true`. The next checkpoint is derived from the restart-persisted step index (no restart schema change). |
+| `output.snapshot_verification` | `full_readback` | `full_readback` (materialize and compare every field) or `structural` (header-only: schema, file kind, provenance config hash, generation id, member/global per-type counts, header time/cosmology). Applies to non-collective members; collective single-file snapshots always use the bounded rank-partition readback. The SHA-256 member sidecar, completion marker and root snapshot-set validation run in both modes. |
+
+The new keys change normalized text and therefore config hashes even when
+defaults are selected. Existing restarts written before this change no longer
+match the current normalized text and fail closed at resume; the narrow v23
+migration projection does not cover these keys. No snapshot or restart schema
+is changed.
+
+A complete performance-oriented profile that combines these keys with the
+audited TreePM settings is
+`configs/performance/dmo_128_pm256_performance_unqualified.param.txt`; it is
+explicitly marked as requiring scientific qualification.

@@ -98,6 +98,14 @@ class GravityCommunicationArena final {
   GravityCommunicationArena(GravityCommunicationArena&&) = delete;
   GravityCommunicationArena& operator=(GravityCommunicationArena&&) = delete;
 
+  // Configures (first call) or grows the backing allocation. Growth is legal
+  // only at an idle phase boundary: no lease is active, so every PMR container
+  // and MPI operation that used the old storage has already been destroyed or
+  // completed (Lease contract). The replacement is governed, allocated and
+  // committed before the old storage is released (strong exception
+  // guarantee: on failure the previous capacity stays intact and usable).
+  // Requests at or below the current capacity are no-ops; the arena never
+  // shrinks implicitly, so high-water telemetry stays comparable.
   void configure(std::uint64_t bytes) {
     if (bytes == 0U) {
       throw std::invalid_argument("gravity communication arena capacity must be nonzero");
@@ -105,17 +113,16 @@ class GravityCommunicationArena final {
     if (m_phase != Phase::kIdle) {
       throw std::logic_error("cannot configure gravity communication arena while a lease is active");
     }
-    if (m_capacity_bytes != 0U) {
-      if (bytes > m_capacity_bytes) {
-        throw std::logic_error(
-            "gravity communication arena cannot grow after first allocation; configure the maximum source-derived phase requirement before first use");
-      }
+    if (bytes <= m_capacity_bytes) {
       return;
     }
     if (bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
       throw std::length_error("gravity communication arena exceeds size_t capacity");
     }
-
+    const bool growth = m_capacity_bytes != 0U;
+    // The full new capacity is reserved while the old reservation is still
+    // held: during the transition both allocations are physically resident,
+    // and the old reservation is released by the move-assignment below.
     core::MemoryReservation reservation =
         m_governor == nullptr
             ? core::MemoryReservation{}
@@ -128,10 +135,14 @@ class GravityCommunicationArena final {
     if (reservation.pending()) {
       reservation.commit();
     }
-    m_storage = std::move(storage);
+    // No-throw from here: the resource is destroyed before its storage.
     m_resource = std::move(resource);
+    m_storage = std::move(storage);
     m_reservation = std::move(reservation);
     m_capacity_bytes = bytes;
+    if (growth) {
+      ++m_growth_events;
+    }
   }
 
   [[nodiscard]] Lease begin(Phase phase) {
@@ -186,6 +197,23 @@ class GravityCommunicationArena final {
         : 0U;
   }
 
+  // Number of capacity increases after the first configuration.
+  [[nodiscard]] std::uint64_t growthEvents() const noexcept { return m_growth_events; }
+
+  // Largest logical usage recorded by any phase.
+  [[nodiscard]] std::uint64_t maxLogicalHighWater() const noexcept {
+    std::uint64_t result = 0U;
+    for (const auto bytes : m_logical_high_water_bytes) result = bytes > result ? bytes : result;
+    return result;
+  }
+
+  // Retained capacity never used by any recorded phase (the bounded-traffic
+  // slack of the source-derived ceiling on this rank).
+  [[nodiscard]] std::uint64_t unusedCapacityBytes() const noexcept {
+    const std::uint64_t used = maxLogicalHighWater();
+    return m_capacity_bytes > used ? m_capacity_bytes - used : 0U;
+  }
+
  private:
   [[nodiscard]] std::pmr::memory_resource* resourceFor(Phase phase) {
     if (m_phase != phase || m_resource == nullptr) {
@@ -228,6 +256,7 @@ class GravityCommunicationArena final {
   std::unique_ptr<std::byte[]> m_storage;
   std::unique_ptr<std::pmr::monotonic_buffer_resource> m_resource;
   std::uint64_t m_capacity_bytes = 0U;
+  std::uint64_t m_growth_events = 0U;
   Phase m_phase = Phase::kIdle;
   std::array<std::uint64_t, static_cast<std::size_t>(Phase::kCount)>
       m_logical_high_water_bytes{};

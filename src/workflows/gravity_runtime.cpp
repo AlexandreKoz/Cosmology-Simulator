@@ -377,6 +377,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
         m_gravitational_constant_code;
     m_tree_pm_options.pm_options.assignment_scheme =
         toPmAssignmentScheme(config.numerics.treepm_assignment_scheme);
+    m_tree_pm_options.pm_options.force_gradient_backend =
+        config.numerics.treepm_pm_force_gradient == core::TreePmForceGradient::kFiniteDifference4
+        ? gravity::PmForceGradientBackend::kFiniteDifference4
+        : gravity::PmForceGradientBackend::kSpectral;
     m_tree_pm_options.pm_options.enable_window_deconvolution =
         config.numerics.treepm_enable_window_deconvolution;
     m_tree_pm_options.pm_options.decomposition_mode = config.numerics.treepm_pm_decomposition_mode;
@@ -436,6 +440,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
         ? gravity::TreePmCutoffNodePolicy::kComDistance
         : gravity::TreePmCutoffNodePolicy::kContainNode;
     m_tree_pm_options.group_walk_enabled = config.numerics.treepm_group_walk_enabled;
+    m_tree_pm_options.group_walk_target_group_size =
+        static_cast<std::size_t>(config.numerics.treepm_group_walk_target_size);
     m_tree_pm_options.tree_options.gravitational_constant_code =
         m_gravitational_constant_code;
     m_tree_pm_options.tree_options.softening.kernel = gravity::TreeSofteningKernel::kPlummer;
@@ -1126,6 +1132,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
                     m_tree_pm_options.pm_options.boundary_condition ==
                         gravity::PmBoundaryCondition::kPeriodic &&
                     !m_runtime_topology.usesCuda(),
+                .pm_force_gradient_backend = m_tree_pm_options.pm_options.force_gradient_backend,
                 .relative_force_mac_enabled =
                     (m_tree_pm_options.acceptance_policy == gravity::TreePmAcceptancePolicy::kAdaptiveRelative ||
                  m_tree_pm_options.tree_options.opening_criterion ==
@@ -1520,6 +1527,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
                 m_tree_pm_options.pm_options.boundary_condition ==
                     gravity::PmBoundaryCondition::kPeriodic &&
                 !m_runtime_topology.usesCuda(),
+            .pm_force_gradient_backend = m_tree_pm_options.pm_options.force_gradient_backend,
             .relative_force_mac_enabled =
                 (m_tree_pm_options.acceptance_policy == gravity::TreePmAcceptancePolicy::kAdaptiveRelative ||
              m_tree_pm_options.tree_options.opening_criterion ==
@@ -2242,6 +2250,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
                               "x" + std::to_string(m_pm_grid_shape.nz)},
                       {"pm_assignment_scheme", m_pm_assignment_scheme},
                       {"pm_window_deconvolution", m_config.numerics.treepm_enable_window_deconvolution ? "true" : "false"},
+                      {"pm_force_gradient", m_config.numerics.treepm_pm_force_gradient ==
+                              core::TreePmForceGradient::kFiniteDifference4 ? "finite_difference_4" : "spectral"},
                       {"asmth_cells", formatRuntimeDouble(m_config.numerics.treepm_asmth_cells)},
                       {"rcut_cells", formatRuntimeDouble(m_config.numerics.treepm_rcut_cells)},
                       {"tree_opening_criterion", treePmOpeningCriterionName(
@@ -2315,6 +2325,22 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"leaf_simd_requested", m_tree_pm_options.leaf_simd_enabled ? "true" : "false"},
               {"residual_lookup_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.residual_lookup_targets)},
               {"simd_leaf_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.simd_leaf_targets)},
+              {"group_walk_requested", m_last_tree_pm_diagnostics.group_walk_requested != 0U ? "true" : "false"},
+              {"group_walk_status", gravity::treePmGroupWalkStatusName(
+                  static_cast<gravity::TreePmGroupWalkStatus>(m_last_tree_pm_diagnostics.group_walk_status))},
+              {"group_walk_target_size", std::to_string(m_tree_pm_options.group_walk_target_group_size)},
+              {"group_walk_groups", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_groups)},
+              {"group_walk_grouped_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_grouped_targets)},
+              {"group_walk_target_group_size_max", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_target_group_size_max)},
+              {"group_walk_fallback_targets", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_fallback_targets)},
+              {"group_walk_fallback_no_leaf", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_fallback_no_leaf)},
+              {"group_walk_fallback_softening", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_fallback_softening)},
+              {"group_walk_fallback_history", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_fallback_history)},
+              {"group_walk_fallback_geometry", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_fallback_geometry)},
+              {"group_walk_candidate_leaves", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_candidate_leaves)},
+              {"group_walk_culled_leaves", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_culled_leaves)},
+              {"group_walk_candidate_particles", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_candidate_particles)},
+              {"group_walk_list_entries_max", std::to_string(m_last_tree_pm_diagnostics.local_traversal.group_walk_list_entries_max)},
               {"skipped_geometry_evaluations", std::to_string(m_last_tree_pm_diagnostics.local_traversal.skipped_geometry_evaluations)},
               {"residual_block_size", std::to_string(m_tree_pm_options.residual_block_size)},
               {"tree_max_leaf_size", std::to_string(m_tree_pm_options.tree_options.max_leaf_size)},
@@ -2440,6 +2466,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"domain_cache_misses", std::to_string(m_last_tree_pm_diagnostics.domain_cache_miss_count)},
               {"graph_cache_hits", std::to_string(m_last_tree_pm_diagnostics.graph_cache_hit_count)},
               {"graph_cache_misses", std::to_string(m_last_tree_pm_diagnostics.graph_cache_miss_count)},
+              {"graph_cache_superset_hits", std::to_string(m_last_tree_pm_diagnostics.graph_cache_superset_hit_count)},
               {"let_candidate_peer_count", std::to_string(m_last_tree_pm_diagnostics.let_candidate_peer_count)},
               {"communicating_peer_count", std::to_string(m_last_tree_pm_diagnostics.communicating_peer_count)},
               {"let_exported_target_count", std::to_string(m_last_tree_pm_diagnostics.let_exported_target_count)},
@@ -2453,6 +2480,12 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   m_last_tree_pm_diagnostics.let_known_workspace_high_water_bytes)},
               {"communication_arena_capacity_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_capacity_bytes)},
               {"communication_arena_logical_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_logical_high_water_bytes)},
+              {"communication_arena_pm_density_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_phase_high_water_bytes[0])},
+              {"communication_arena_pm_halo_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_phase_high_water_bytes[1])},
+              {"communication_arena_pm_interpolation_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_phase_high_water_bytes[2])},
+              {"communication_arena_tree_exchange_high_water_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_phase_high_water_bytes[3])},
+              {"communication_arena_growth_events", std::to_string(m_last_tree_pm_diagnostics.communication_arena_growth_events)},
+              {"communication_arena_unused_bytes", std::to_string(m_last_tree_pm_diagnostics.communication_arena_unused_bytes)},
               {"exported_targets_per_requested_target", formatRuntimeDouble(m_last_tree_pm_diagnostics.exported_targets_per_requested_target)},
               {"let_discovery_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_discovery_ms)},
               {"let_graph_setup_ms", formatRuntimeDouble(m_last_tree_pm_diagnostics.let_graph_setup_ms)},
