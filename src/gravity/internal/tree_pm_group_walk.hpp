@@ -158,7 +158,10 @@ struct TreePmGroupPairKernel {
   const double* x = nullptr;
   const double* y = nullptr;
   const double* z = nullptr;
+  // Per-source tree-order masses, or nullptr for a uniform source population
+  // whose species-wide mass is uniform_mass (no per-source mass lane).
   const double* mass = nullptr;
+  double uniform_mass = 0.0;
   std::array<double, 3> length{};
   double epsilon2 = 0.0;
   double cutoff_radius2 = 0.0;
@@ -179,7 +182,8 @@ struct TreePmGroupPairKernel {
 // min-combined with the squared separation of every evaluated pair; the
 // group path cannot tell an exactly coincident distinct source from the
 // target itself, so r2 == 0 is excluded there (the per-target walk keeps it).
-inline void accumulateTreePmGroupPairs(
+template <bool UniformMass>
+inline void accumulateTreePmGroupPairsImpl(
     const TreePmGroupPairKernel& k, double px, double py, double pz,
     std::size_t begin, std::size_t end,
     double& ax, double& ay, double& az, std::uint64_t& pairs,
@@ -210,7 +214,8 @@ inline void accumulateTreePmGroupPairs(
         k.inverse_8a_cubed;
     const double d = r2 + k.epsilon2;
     const double softened = 1.0 / (d * std::sqrt(d));
-    const double factor = inside ? (softened - coefficient_long) * k.gravitational_constant * k.mass[j] : 0.0;
+    const double source_mass = UniformMass ? k.uniform_mass : k.mass[j];
+    const double factor = inside ? (softened - coefficient_long) * k.gravitational_constant * source_mass : 0.0;
     sx += factor * dx;
     sy += factor * dy;
     sz += factor * dz;
@@ -222,6 +227,46 @@ inline void accumulateTreePmGroupPairs(
   ay += sy;
   az += sz;
   pairs += counted;
+}
+
+// Dispatches on the mass representation. Both variants evaluate the same
+// per-pair expression (factor * mass), so a uniform population reproduces the
+// per-source-lane result bitwise.
+inline void accumulateTreePmGroupPairs(
+    const TreePmGroupPairKernel& k, double px, double py, double pz,
+    std::size_t begin, std::size_t end,
+    double& ax, double& ay, double& az, std::uint64_t& pairs,
+    double& nearest_pair_r2) noexcept {
+  if (k.mass == nullptr) {
+    accumulateTreePmGroupPairsImpl<true>(k, px, py, pz, begin, end, ax, ay, az, pairs, nearest_pair_r2);
+  } else {
+    accumulateTreePmGroupPairsImpl<false>(k, px, py, pz, begin, end, ax, ay, az, pairs, nearest_pair_r2);
+  }
+}
+
+// 63-bit Morton key of a periodic position on a cubic grouping lattice of
+// spacing `cell` (21 bits per axis). Used to order incoming remote LET targets
+// so consecutive targets form spatially coherent groups.
+[[nodiscard]] inline std::uint64_t treePmGroupMortonKey(
+    const std::array<double, 3>& position, const std::array<double, 3>& length, double cell) noexcept {
+  const auto spread = [](std::uint64_t v) noexcept {
+    v &= 0x1FFFFFULL;
+    v = (v | (v << 32U)) & 0x1F00000000FFFFULL;
+    v = (v | (v << 16U)) & 0x1F0000FF0000FFULL;
+    v = (v | (v << 8U)) & 0x100F00F00F00F00FULL;
+    v = (v | (v << 4U)) & 0x10C30C30C30C30C3ULL;
+    v = (v | (v << 2U)) & 0x1249249249249249ULL;
+    return v;
+  };
+  std::uint64_t key = 0U;
+  for (std::size_t axis = 0; axis < 3U; ++axis) {
+    double p = position[axis];
+    if (length[axis] > 0.0) p -= length[axis] * std::floor(p / length[axis]);
+    const double q = cell > 0.0 && std::isfinite(p) ? std::floor(p / cell) : 0.0;
+    const auto lattice = static_cast<std::uint64_t>(std::clamp(q, 0.0, 2097151.0));
+    key |= spread(lattice) << axis;
+  }
+  return key;
 }
 
 struct TreePmGroupLeafCullCounts {

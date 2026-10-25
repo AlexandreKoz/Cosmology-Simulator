@@ -197,6 +197,12 @@ class TreeGravitySolver {
   // Morton keys; keys describe a full build, never current refitted positions.
   [[nodiscard]] const TreeMortonOrdering& ordering() const;
   [[nodiscard]] TreeBuildGeneration treeBuildGeneration() const noexcept;
+  // Identity of the node topology and leaf permutation (sorted_particle_index,
+  // node particle ranges, child slots). Advances on every full build only; a
+  // certified motion refit (refitWithinOriginalLeafCells) and identical-source
+  // reuse keep it. 0 means no valid topology. Caches derived purely from
+  // topology (leaf-of-position, row-to-tree-position maps) key on this value.
+  [[nodiscard]] std::uint64_t topologyGeneration() const noexcept;
   [[nodiscard]] bool canReuseIdenticalSource(
       std::size_t source_count, GravitySourceGeneration generation,
       const TreeGravityOptions& options) const noexcept;
@@ -264,6 +270,8 @@ class TreeGravitySolver {
   std::size_t m_build_source_count = 0;
   GravitySourceGeneration m_build_source_generation{};
   TreeBuildGeneration m_tree_build_generation{};
+  std::uint64_t m_topology_generation = 0U;
+  std::uint64_t m_topology_generation_counter = 0U;
   std::size_t m_node_capacity_high_water = 0U;
   std::uint32_t m_max_depth = 0U;
   std::uint64_t m_build_source_fingerprint = 0;

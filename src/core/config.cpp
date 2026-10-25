@@ -673,6 +673,15 @@ parseInitialConditionMissingFieldPolicy(
       "' (supported: cic, tsc)");
 }
 
+[[nodiscard]] TreePmPmReusePolicy parseTreePmPmReusePolicy(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "exact") return TreePmPmReusePolicy::kExactSourceState;
+  if (lower == "stale_within_cadence") return TreePmPmReusePolicy::kStaleWithinCadence;
+  throw ConfigError(
+      "key 'numerics.treepm_pm_reuse_policy': invalid value '" + value +
+      "' (supported: exact, stale_within_cadence)");
+}
+
 [[nodiscard]] TreePmForceGradient parseTreePmForceGradient(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "spectral") return TreePmForceGradient::kSpectral;
@@ -1284,6 +1293,7 @@ struct ConfigKeySpec {
       {"numerics.treepm_pm_force_gradient", "spectral"},
       {"numerics.treepm_enable_window_deconvolution", "true"},
       {"numerics.treepm_update_cadence_steps", "1"},
+      {"numerics.treepm_pm_reuse_policy", "exact"},
       {"numerics.treepm_allow_diagnostic_naive_dft", "false"},
       {"numerics.treepm_pm_decomposition_mode", "slab"},
       {"numerics.treepm_tree_exchange_batch_bytes", "4194304"},
@@ -1390,6 +1400,7 @@ struct ConfigKeySpec {
       {"output.snapshot_num_files", "0"},
       {"output.write_restarts", "true"},
       {"output.restart_interval_steps", "0"},
+      {"output.restart_interval_time_code", "0.0"},
       {"output.snapshot_verification", "full_readback"},
       {"parallel.mpi_ranks_expected", "1"},
       {"parallel.omp_threads", "1"},
@@ -1663,6 +1674,13 @@ void validateConfig(const SimulationConfig& config) {
   }
   if (config.output.restart_interval_steps > 0 && !config.output.write_restarts) {
     throw ConfigError("output.restart_interval_steps > 0 requires output.write_restarts = true");
+  }
+  if (!std::isfinite(config.output.restart_interval_time_code) ||
+      config.output.restart_interval_time_code < 0.0) {
+    throw ConfigError("output.restart_interval_time_code must be finite and >= 0");
+  }
+  if (config.output.restart_interval_time_code > 0.0 && !config.output.write_restarts) {
+    throw ConfigError("output.restart_interval_time_code > 0 requires output.write_restarts = true");
   }
   if (config.parallel.mpi_ranks_expected <= 0) {
     throw ConfigError("parallel.mpi_ranks_expected must be positive");
@@ -1990,10 +2008,22 @@ void validateConfig(const SimulationConfig& config) {
     throw ConfigError(
         "numerics.treepm_tree_relative_force_acceleration_floor must be finite and > 0");
   }
-  if (config.numerics.treepm_update_cadence_steps != 1) {
+  // Exact reuse never admits a field built from another source state, so the
+  // reference policy keeps cadence 1. The experimental stale-window policy
+  // validates decomposition epoch, mesh, split and field version and reuses the
+  // field for at most cadence-1 later global KDK force evaluations.
+  if (config.numerics.treepm_pm_reuse_policy == TreePmPmReusePolicy::kExactSourceState &&
+      config.numerics.treepm_update_cadence_steps != 1) {
     throw ConfigError(
-        "numerics.treepm_update_cadence_steps must be exactly 1 in production: PM mesh reuse "
-        "does not yet validate source, scale-factor, or decomposition epochs");
+        "numerics.treepm_update_cadence_steps must be exactly 1 with treepm_pm_reuse_policy=exact; "
+        "select treepm_pm_reuse_policy=stale_within_cadence for experimental PM reuse");
+  }
+  if (config.numerics.treepm_pm_reuse_policy == TreePmPmReusePolicy::kStaleWithinCadence &&
+      (config.numerics.treepm_update_cadence_steps < 2 || config.numerics.treepm_update_cadence_steps > 64 ||
+       config.numerics.hierarchical_max_rung != 0)) {
+    throw ConfigError(
+        "numerics.treepm_pm_reuse_policy=stale_within_cadence requires treepm_update_cadence_steps in [2,64] "
+        "and global KDK (hierarchical_max_rung=0; hierarchical KDK already applies PM at coarse endpoints)");
   }
   if (config.numerics.treepm_pm_force_gradient == TreePmForceGradient::kFiniteDifference4) {
     const bool periodic_gravity =
@@ -2517,6 +2547,10 @@ class NormalizedConfigStream {
   stream << "treepm_enable_window_deconvolution = "
          << (frozen.config.numerics.treepm_enable_window_deconvolution ? "true" : "false") << '\n';
   stream << "treepm_update_cadence_steps = " << frozen.config.numerics.treepm_update_cadence_steps << '\n';
+  stream << "treepm_pm_reuse_policy = "
+         << (frozen.config.numerics.treepm_pm_reuse_policy == TreePmPmReusePolicy::kStaleWithinCadence
+                 ? "stale_within_cadence" : "exact")
+         << '\n';
   stream << "treepm_allow_diagnostic_naive_dft = "
          << (frozen.config.numerics.treepm_allow_diagnostic_naive_dft ? "true" : "false") << '\n';
   stream << "treepm_pm_decomposition_mode = "
@@ -2667,6 +2701,7 @@ class NormalizedConfigStream {
          << frozen.config.output.snapshot_num_files << '\n';
   stream << "write_restarts = " << (frozen.config.output.write_restarts ? "true" : "false") << '\n';
   stream << "restart_interval_steps = " << frozen.config.output.restart_interval_steps << '\n';
+  stream << "restart_interval_time_code = " << frozen.config.output.restart_interval_time_code << '\n';
   stream << "snapshot_verification = "
          << snapshotVerificationPolicyLabel(frozen.config.output.snapshot_verification) << '\n';
   stream << "\n[parallel]\n";
@@ -3284,6 +3319,9 @@ class NormalizedConfigStream {
           "numerics.treepm_update_cadence_steps",
           defaultFor("numerics.treepm_update_cadence_steps")),
       "numerics.treepm_update_cadence_steps");
+  frozen.config.numerics.treepm_pm_reuse_policy = parseTreePmPmReusePolicy(requireString(
+      entries, consumed, "numerics.treepm_pm_reuse_policy",
+      defaultFor("numerics.treepm_pm_reuse_policy")));
   frozen.config.numerics.treepm_allow_diagnostic_naive_dft = parseBool(
       requireString(
           entries,
@@ -3602,6 +3640,10 @@ class NormalizedConfigStream {
       requireString(entries, consumed, "output.restart_interval_steps",
                     defaultFor("output.restart_interval_steps")),
       "output.restart_interval_steps");
+  frozen.config.output.restart_interval_time_code = parseFloating(
+      requireString(entries, consumed, "output.restart_interval_time_code",
+                    defaultFor("output.restart_interval_time_code")),
+      "output.restart_interval_time_code");
   frozen.config.output.snapshot_verification = parseSnapshotVerificationPolicy(
       requireString(entries, consumed, "output.snapshot_verification",
                     defaultFor("output.snapshot_verification")));

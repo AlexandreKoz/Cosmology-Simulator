@@ -39,6 +39,18 @@ enum class TreePmForceGradient {
   kFiniteDifference4,
 };
 
+// Long-range PM field reuse between refreshes (numerics.treepm_pm_reuse_policy).
+// kExactSourceState (reference): a field is reused only for the identical
+//   source state it was built from; treepm_update_cadence_steps must be 1.
+// kStaleWithinCadence (experimental, unqualified): with cadence N > 1, the
+//   field built at a refresh step is interpolated at current target positions
+//   for the next N-1 global KDK force evaluations (first-order in N dt in the
+//   long-range force); decomposition epoch, mesh and split must be unchanged.
+enum class TreePmPmReusePolicy {
+  kExactSourceState,
+  kStaleWithinCadence,
+};
+
 enum class TreePmOpeningCriterion {
   kGeometric,
   kComDistance,
@@ -307,6 +319,7 @@ struct NumericsConfig {
   TreePmForceGradient treepm_pm_force_gradient = TreePmForceGradient::kSpectral;
   bool treepm_enable_window_deconvolution = true;
   int treepm_update_cadence_steps = 1;
+  TreePmPmReusePolicy treepm_pm_reuse_policy = TreePmPmReusePolicy::kExactSourceState;
   // Explicitly test/diagnostic-only. Production workflows fail closed when
   // TreePM is requested without a production FFT backend.
   bool treepm_allow_diagnostic_naive_dft = false;
@@ -466,6 +479,12 @@ struct OutputConfig {
   // The next checkpoint index is derived from the restart-persisted step
   // index, so resumed and uninterrupted runs share one checkpoint timeline.
   int restart_interval_steps = 0;
+  // Zero disables. Positive: checkpoint at the first restart-safe boundary at
+  // or after each multiple of this code-time interval from t_code_begin
+  // (no step clipping; checkpoints are not science products). Combines with
+  // restart_interval_steps (either triggers) and implies the independent
+  // checkpoint policy.
+  double restart_interval_time_code = 0.0;
   SnapshotVerificationPolicy snapshot_verification = SnapshotVerificationPolicy::kFullReadback;
 };
 

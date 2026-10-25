@@ -43,6 +43,13 @@ struct PendingOutputBoundary {
   bool restart_step_event_due = false;
   std::uint64_t restart_interval_steps = 0;
   std::uint64_t next_restart_step_index = 0;
+  // Independent code-time checkpoint cadence (output.restart_interval_time_code
+  // > 0): due at the first completed step ending at or after the event; the
+  // next event is the first interval multiple strictly after the flush time,
+  // derived from restart-persisted time on resume (no schema field).
+  bool restart_time_event_due = false;
+  double restart_interval_time_code = 0.0;
+  double next_restart_time_code = 0.0;
 };
 
 // First multiple of interval_steps strictly greater than step_index.

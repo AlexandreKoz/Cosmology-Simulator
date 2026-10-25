@@ -98,3 +98,42 @@ match this checkout.
 6. Hierarchical workflow tests (eta wiring, graph reuse on fine ticks).
 7. Benchmarks: `bench_tree_pm_sweep --group-walk on --group-target-size 32`
    and the performance deck versus a strict reference run and AREPO.
+
+## Round 2 (full-authorization directive) — IMPLEMENTED — NOT COMPILED — NOT TESTED
+
+Round 2 supersedes the round-1 rows above where they say "not implemented"
+(in-place FFT, PM reuse, compaction, fine-tick work).
+
+| Item | Files | What was done | Status |
+| --- | --- | --- | --- |
+| Fine-tick rank consensus | `distributed_memory.*`, `gravity_runtime.cpp` | `allreduceMinUint64sInPlace`; `RankConsensusBatch` verifies all equality/minimum facts in one MIN allreduce over `[v…, ~v…]`. Gravity entry (cache compatibility, sync-event presence, source generation) is one collective; all PM decision facts (stage, reason, opportunity, refresh vote, field version, last refresh, built step, scale bits) one more, after the last entry. Process-memory preflight: 5 reductions → 2. | Implemented |
+| Topology/state generations | `tree_gravity.*`, `tree_pm_coupling.*`, `gravity_memory.cpp` | `topologyGeneration()` (full builds only; refit keeps it). Row→tree-position map and group-walk leaf map cached by generation; stable two-pass radix sort for ≥ 4096 visit targets. | Implemented |
+| In-place FFTW | `pm_solver.cpp`, `gravity_memory.*`, tests | `real` array removed; `realView()` aliases the padded complex array (`2(nz/2+1)` row stride) for serial and MPI plans; estimator `real_array_bytes = 0`, `real_view_aliases_complex = true`. Saves `N` doubles (serial) / `2A` doubles (MPI). | Implemented |
+| Workload-aware routing | `pm_solver.*`, `tree_pm_coupling.cpp` | Remote x-plane record maxima per peer and per round; reserves `send = round max`, `receive = (P−1)·M`, capped by the configured model. Plans computed before arena configure (one MAX allreduce `[count, M, failure]`), consumed once, key-checked. | Implemented |
+| Remote group walk | `tree_pm_coupling.cpp`, `internal/tree_pm_group_walk.hpp` | Incoming LET targets Morton-sorted per peer and grouped through the shared evaluator; per-target fallback. | Implemented |
+| PM reuse (experimental) | `config.*`, `gravity_runtime.cpp`, `tree_pm_coupling.cpp`, `output_restart_runtime.cpp` | `numerics.treepm_pm_reuse_policy = stale_within_cadence`; `exact` is the reference. Checkpoints aligned to refresh opportunities. | Implemented, unqualified |
+| Time checkpoint cadence | `config.*`, `output_restart_runtime.*`, tests | `output.restart_interval_time_code`; no schema change. | Implemented |
+| Compaction | `tree_pm_coupling.*`, `internal/tree_pm_group_walk.hpp` | Uniform-mass populations release the tree-order mass lane (`N` doubles); kernels take a scalar inside the identical per-pair expression. Precision/ID narrowing of authoritative state was **not** done: it changes physics/persistence and needs qualification data the owner has not provided. | Partially implemented |
+
+### Round 2 risks
+
+* In-place FFT: any remaining code that assumes an unpadded real row stride
+  is now wrong; all known consumers were converted to the strided view.
+* Routing plans: a plan key mismatch throws `logic_error` (fail-closed); an
+  under-measured workload would otherwise overflow a bounded reserve.
+* Consensus batching changes failure messages and the point at which a
+  divergence is detected (after all entries rather than per entry).
+* Stale PM reuse is force-inexact by design; not valid with hierarchical rungs.
+* Remote group walk changes MAC decisions for grouped remote targets (group
+  AABB), exactly as the owned-target group walk does.
+
+### Round 2 validation additions
+
+1. `unit_config_parser` (reuse policy, time cadence), `unit_output_cadence`
+   (`testIndependentTimeCheckpointCadence`), `unit_tree_gravity` and PM storage
+   tests (padded layout).
+2. PM FFTW serial and MPI (2/4 ranks) force comparison against the previous
+   commit: in-place FFT must be bitwise or roundoff-identical.
+3. MPI TreePM with group walk on: remote-target forces versus per-target walk.
+4. Routing: skewed particle distributions (all particles on one slab owner).
+5. Stale reuse: force error versus field age; restart equivalence.

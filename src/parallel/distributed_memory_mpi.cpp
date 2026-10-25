@@ -190,6 +190,23 @@ std::uint64_t MpiContext::allreduceMinUint64(std::uint64_t local_value) const {
   return local_value;
 }
 
+void MpiContext::allreduceMinUint64sInPlace(std::span<std::uint64_t> values) const {
+#if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
+  if (m_is_enabled && !values.empty()) {
+    if (values.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::overflow_error("MPI uint64-vector MIN reduction exceeds int count range");
+    }
+    if (MPI_Allreduce(
+            MPI_IN_PLACE, values.data(), static_cast<int>(values.size()),
+            MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD) != MPI_SUCCESS) {
+      throw std::runtime_error("MPI_Allreduce failed for uint64 MIN consensus vector");
+    }
+  }
+#else
+  (void)values;
+#endif
+}
+
 std::uint64_t MpiContext::allreduceXorUint64(std::uint64_t local_value) const {
 #if defined(COSMOSIM_ENABLE_MPI) && COSMOSIM_ENABLE_MPI
   if (m_is_enabled) {

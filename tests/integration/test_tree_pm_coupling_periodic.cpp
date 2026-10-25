@@ -272,8 +272,9 @@ void testPmPlanRetainedStorageMatchesAllocation() {
     requireOrThrow(estimate.used_backend_allocation_query == (ranks > 1),
         "active distributed PM estimate did not query backend allocation geometry");
     const auto allocated = estimate.allocated_local_complex_cells;
-    const auto real_elements = ranks == 1 ? 10U * 7U * 9U : 2U * allocated;
-    const auto arrays = real_elements * sizeof(double) + 2U * allocated * sizeof(std::complex<double>);
+    // In-place layout: the padded real view aliases fourier; a spectral solve
+    // owns fourier plus the retained potential_k copy.
+    const auto arrays = 2U * allocated * sizeof(std::complex<double>);
     constexpr auto axes = 2U * (10U + 7U + 5U) * sizeof(double);
     cosmosim::core::MemoryReportBuilder builder;
     solver.appendMemoryReport(builder);

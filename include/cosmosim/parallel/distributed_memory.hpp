@@ -1064,6 +1064,9 @@ class MpiContext {
   [[nodiscard]] std::uint64_t exclusiveScanSumUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceMaxUint64(std::uint64_t local_value) const;
   [[nodiscard]] std::uint64_t allreduceMinUint64(std::uint64_t local_value) const;
+  // Element-wise MIN over a uint64 vector in one collective. Callers encode a
+  // MAX lane as ~value (min of complements is the complement of the max).
+  void allreduceMinUint64sInPlace(std::span<std::uint64_t> values) const;
   [[nodiscard]] std::uint64_t allreduceXorUint64(std::uint64_t local_value) const;
 
   // Collective preflight gate used after any rank-local preparation that can
