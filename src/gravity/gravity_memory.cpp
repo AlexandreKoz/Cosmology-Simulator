@@ -634,10 +634,15 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
    // the row -> tree-position map, and the tree-order target visit list.
    const std::uint64_t treepm_tree_order_bytes = checkedAdd(
        // +1 uint32 per source: optional group-walk leaf map (conservatively always counted).
+       // The mass lane is also always counted, although uniform-mass
+       // populations release it at runtime (upper bound, not a prediction).
        checkedMul(input.local_source_count, 4U * sizeof(double) + 2U * sizeof(std::uint32_t),
            "TreePM tree-ordered source lane estimate overflow"),
-       checkedMul(input.local_target_count, sizeof(std::uint32_t),
-           "TreePM target visit order estimate overflow"),
+       // Visit order plus the equal-size stable radix scratch and a fixed
+       // 65537-bucket histogram (used for >= 4096 targets).
+       checkedAdd(checkedMul(input.local_target_count, 2U * sizeof(std::uint32_t),
+                             "TreePM target visit order estimate overflow"),
+                  65537U * sizeof(std::size_t), "TreePM target visit radix estimate overflow"),
        "TreePM tree-order locality estimate overflow");
    addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
                "gravity.estimate.treepm_tree_ordered_source_lanes", treepm_tree_order_bytes,

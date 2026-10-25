@@ -284,6 +284,11 @@ struct TreePmOptions {
   // force, without interpolating or reusing a stale PM field. Long-range kicks
   // have separate synchronized endpoint authority in hierarchical KDK.
   bool short_range_only = false;
+  // Experimental PM reuse (core::TreePmPmReusePolicy::kStaleWithinCadence):
+  // admit a long-range field built from an earlier source generation / force
+  // epoch, provided field version, decomposition epoch, build scale factor,
+  // mesh, split and boundary all match. False keeps exact-state reuse only.
+  bool allow_stale_long_range_field = false;
   bool enable_zoom_long_range_correction = false;
   PmGridShape zoom_focused_pm_shape{};
   std::span<const std::uint8_t> source_is_high_res;
@@ -361,6 +366,10 @@ struct TreePmDiagnostics {
   // Hits served by a cached symmetric graph whose peers strictly cover the
   // current request set (subset reuse), included in graph_cache_hit_count.
   std::uint64_t graph_cache_superset_hit_count = 0;
+  // Group-walk leaf map rebuilt (new tree topology) versus reused across a
+  // certified refit or identical-source reuse, for this solve.
+  std::uint64_t topology_cache_rebuilds = 0;
+  std::uint64_t topology_cache_reuses = 0;
   std::uint64_t let_candidate_peer_count = 0;
   std::uint64_t let_exported_target_count = 0;
   std::uint64_t let_imported_target_count = 0;
@@ -378,6 +387,12 @@ struct TreePmDiagnostics {
   std::array<std::uint64_t, 4> communication_arena_phase_high_water_bytes{};
   std::uint64_t communication_arena_growth_events = 0;
   std::uint64_t communication_arena_unused_bytes = 0;
+  // Workload-planned PM routing phase arena bytes versus the configured
+  // worst-case ceiling (send+receive) for density and interpolation.
+  std::uint64_t pm_density_routing_planned_bytes = 0;
+  std::uint64_t pm_interpolation_routing_planned_bytes = 0;
+  std::uint64_t pm_density_routing_ceiling_bytes = 0;
+  std::uint64_t pm_interpolation_routing_ceiling_bytes = 0;
   double exported_targets_per_requested_target = 0.0;
   double let_discovery_ms = 0.0;
   double let_graph_setup_ms = 0.0;
@@ -602,6 +617,8 @@ class TreePmCoordinator {
     std::uint64_t graph_cache_hit_count = 0;
     std::uint64_t graph_cache_miss_count = 0;
     std::uint64_t graph_cache_superset_hit_count = 0;
+    std::uint64_t topology_cache_rebuilds = 0;
+    std::uint64_t topology_cache_reuses = 0;
     std::uint64_t let_candidate_peer_count = 0;
     std::uint64_t let_exported_target_count = 0;
     std::uint64_t let_imported_target_count = 0;
@@ -671,11 +688,26 @@ class TreePmCoordinator {
   std::vector<double> m_tree_ordered_source_x_comoving;
   std::vector<double> m_tree_ordered_source_y_comoving;
   std::vector<double> m_tree_ordered_source_z_comoving;
+  // Empty (capacity released) when every source carries the same mass; the
+  // kernels then read m_tree_ordered_source_uniform_mass_code instead.
   std::vector<double> m_tree_ordered_source_mass_code;
+  bool m_tree_ordered_source_mass_uniform = false;
+  double m_tree_ordered_source_uniform_mass_code = 0.0;
   std::vector<std::uint32_t> m_tree_order_position_by_row;
   std::vector<std::uint32_t> m_target_visit_order;
+  // Stable two-pass radix sort scratch for large target visit orders.
+  std::vector<std::uint32_t> m_target_visit_scratch;
+  std::vector<std::size_t> m_target_visit_histogram;
+  // Remote group walk: Morton-ordered incoming LET target slots (per peer batch).
+  std::vector<std::uint32_t> m_incoming_group_order;
+  std::vector<std::uint64_t> m_incoming_group_keys;
   // Group walk: tree-order position -> containing leaf, and per-worker lists.
   std::vector<TreeLocalIndex> m_leaf_of_tree_position;
+  // Topology-derived maps survive certified refits: they are rebuilt only when
+  // TreeGravitySolver::topologyGeneration() or the ordered extent changes.
+  std::uint64_t m_leaf_map_topology_generation = 0U;
+  std::uint64_t m_order_map_topology_generation = 0U;
+  std::size_t m_order_map_extent = 0U;
   std::vector<TreePmGroupWalkWorkerScratch> m_worker_group_scratch;
 
   // Zoom correction is optional and owns compact lanes only while the selected
@@ -690,6 +722,9 @@ class TreePmCoordinator {
   // communication phases. Logical protocol storage is phase-local and
   // arena-backed; persistent topology/cache state remains outside it.
   GravityCommunicationArena m_communication_arena;
+  // Last planned PM routing phase bytes: density, interpolation, and the
+  // configured (P-1) x per-peer ceilings they replaced.
+  std::array<std::uint64_t, 4> m_last_routing_plan_bytes{};
   std::uint64_t m_tree_exchange_logical_high_water_bytes = 0U;
 
   // Contiguous OpenMP residual DFS slots: worker_count * (1 + 7 * max_depth)

@@ -1183,6 +1183,14 @@ PendingOutputBoundary initializeOutputCadence(
     pending.next_restart_step_index = nextRestartStepIndexAfter(
         integrator_state.step_index, pending.restart_interval_steps);
   }
+  if (options.write_outputs && config.output.write_restarts &&
+      config.output.restart_interval_time_code > 0.0) {
+    pending.restart_interval_time_code = config.output.restart_interval_time_code;
+    pending.next_restart_time_code = nextOrderedTimeEvent(
+        config.numerics.t_code_begin,
+        integrator_state.current_time_code,
+        config.output.restart_interval_time_code);
+  }
   return pending;
 }
 
@@ -1240,9 +1248,15 @@ void latchOutputRequestForCompletedStep(
       next_step_index >= pending.next_snapshot_step_index;
   const bool time_event_due = pending.snapshot_interval_time_code > 0.0 &&
       timelineTimesEqual(next_time_code, pending.next_snapshot_time_code);
-  const bool independent_restart_cadence = pending.restart_interval_steps > 0U;
-  const bool restart_event_due = independent_restart_cadence &&
+  const bool independent_restart_cadence =
+      pending.restart_interval_steps > 0U || pending.restart_interval_time_code > 0.0;
+  const bool restart_step_due = pending.restart_interval_steps > 0U &&
       next_step_index >= pending.next_restart_step_index;
+  // No clipping: the first completed step ending at or after the event.
+  const bool restart_time_due = pending.restart_interval_time_code > 0.0 &&
+      (next_time_code >= pending.next_restart_time_code ||
+       timelineTimesEqual(next_time_code, pending.next_restart_time_code));
+  const bool restart_event_due = restart_step_due || restart_time_due;
   if (step_event_due || time_event_due) {
     pending.snapshot_due = true;
     if (!independent_restart_cadence) {
@@ -1254,7 +1268,8 @@ void latchOutputRequestForCompletedStep(
   }
   if (restart_event_due) {
     pending.checkpoint_due = true;
-    pending.restart_step_event_due = true;
+    pending.restart_step_event_due = pending.restart_step_event_due || restart_step_due;
+    pending.restart_time_event_due = pending.restart_time_event_due || restart_time_due;
   }
 }
 
@@ -1376,6 +1391,18 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
   }
 
   const bool snapshot_requested = m_pending_output.snapshot_due;
+  // Experimental stale-window PM reuse (cadence > 1): a resumed run rebuilds
+  // the long-range field at its first force opportunity, so a checkpoint is
+  // written only where an uninterrupted run would refresh at that same
+  // opportunity; otherwise it stays pending to the next aligned boundary.
+  const auto& pm_sync = context.integrator_state.pm_sync_state;
+  const bool checkpoint_pm_aligned = pm_sync.cadenceSteps() <= 1U ||
+      !context.integrator_state.pm_long_range_field_valid ||
+      (pm_sync.gravityKickOpportunity() + 1U - pm_sync.lastRefreshOpportunity()) >= pm_sync.cadenceSteps();
+  const bool checkpoint_now = m_pending_output.checkpoint_due && checkpoint_pm_aligned;
+  if (m_pending_output.checkpoint_due && !checkpoint_now) {
+    m_profiler.counters().addCount("io.restart.deferred_for_pm_cadence");
+  }
   const bool output_flushed = maybeWriteOutputs(
       m_frozen_config,
       m_config,
@@ -1390,7 +1417,7 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
       m_profiler,
       m_write_outputs_enabled,
       m_pending_output.snapshot_due,
-      m_pending_output.checkpoint_due,
+      checkpoint_now,
       m_pending_output.snapshot_interval_steps,
       persisted_next_snapshot_step_index,
       m_pending_output.snapshot_interval_time_code,
@@ -1401,13 +1428,22 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
       m_last_committed_snapshot_step_index = context.integrator_state.step_index;
     }
     m_pending_output.snapshot_due = false;
-    m_pending_output.checkpoint_due = false;
     m_pending_output.step_event_due = false;
     m_pending_output.time_event_due = false;
-    if (m_pending_output.restart_step_event_due) {
-      m_pending_output.next_restart_step_index = nextRestartStepIndexAfter(
-          context.integrator_state.step_index, m_pending_output.restart_interval_steps);
-      m_pending_output.restart_step_event_due = false;
+    if (checkpoint_now) {
+      m_pending_output.checkpoint_due = false;
+      if (m_pending_output.restart_step_event_due) {
+        m_pending_output.next_restart_step_index = nextRestartStepIndexAfter(
+            context.integrator_state.step_index, m_pending_output.restart_interval_steps);
+        m_pending_output.restart_step_event_due = false;
+      }
+      if (m_pending_output.restart_time_event_due) {
+        m_pending_output.next_restart_time_code = nextOrderedTimeEvent(
+            m_config.numerics.t_code_begin,
+            context.integrator_state.current_time_code,
+            m_pending_output.restart_interval_time_code);
+        m_pending_output.restart_time_event_due = false;
+      }
     }
     m_pending_output.next_snapshot_step_index =
         persisted_next_snapshot_step_index;

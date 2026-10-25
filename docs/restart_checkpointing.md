@@ -544,3 +544,17 @@ first multiple of `N` after the restart-persisted step index, so resumed and
 uninterrupted runs share one checkpoint timeline without a schema change.
 Checkpoints are still written only at restart-safe synchronization
 boundaries, and streaming write-time verification is unchanged.
+
+## Code-time checkpoint cadence and PM-aligned deferral (2026-10-25 round 2, untested)
+
+`output.restart_interval_time_code = T > 0` adds a code-time checkpoint
+cadence: a checkpoint is due at the first completed global step ending at or
+after the next event, and after the write the next event is the first
+multiple of `T` (from `numerics.time_begin_code`) strictly after the current
+time. The event is derived from restart-persisted time, so no restart schema
+field was added; step and time cadences may be combined. With the
+experimental `numerics.treepm_pm_reuse_policy = stale_within_cadence`, a due
+checkpoint is deferred (counter `io.restart.deferred_for_pm_cadence`) until
+the step immediately preceding a PM refresh opportunity, so a resumed run
+refreshes the long-range field at the same step as the uninterrupted run;
+the pending flags clear only when a checkpoint is actually written.

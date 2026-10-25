@@ -530,6 +530,7 @@ void validateTreePmPreflight(
   mix(options.identical_source_tree_reuse_enabled ? 1U : 0U);
   mix(options.topology_refit_enabled ? 1U : 0U);
   mix(options.short_range_only ? 1U : 0U);
+  mix(options.allow_stale_long_range_field ? 1U : 0U);
   mix(options.spatial_work_history_enabled ? 1U : 0U);
   mix(options.gaussian_pair_lookup_enabled ? 1U : 0U);
   mix(options.full_residual_lookup_enabled ? 1U : 0U);
@@ -2089,6 +2090,10 @@ core::MemoryReport TreePmCoordinator::memoryReport() const {
    add_tree_scratch("treepm.tree_ordered_source_mass_code", m_tree_ordered_source_mass_code);
    add_tree_scratch("treepm.tree_order_position_by_row", m_tree_order_position_by_row);
    add_tree_scratch("treepm.target_visit_order", m_target_visit_order);
+   add_tree_scratch("treepm.target_visit_radix_scratch", m_target_visit_scratch);
+   add_tree_scratch("treepm.target_visit_radix_histogram", m_target_visit_histogram);
+   add_tree_scratch("treepm.incoming_group_order", m_incoming_group_order);
+   add_tree_scratch("treepm.incoming_group_morton_keys", m_incoming_group_keys);
    add_tree_scratch("treepm.group_walk_leaf_of_tree_position", m_leaf_of_tree_position);
    {
      std::uint64_t group_bytes = 0U;
@@ -2468,9 +2473,17 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
   // scale factor, and mesh options are unchanged. Interpolation is routed to
   // the fixed slab owners for the caller's current target decomposition.
   const auto cache_matches_request = [&]() {
+    // Exact reuse: identical source state and force epoch. Stale-window reuse
+    // (experimental): any earlier source state of the same integrator field
+    // version; the integrator bounds the window by its cadence. The mesh is
+    // owned by the fixed PM slab layout, so particle re-decomposition does not
+    // invalidate it (interpolation routes targets to the slab owners).
+    const bool source_state_admitted = options.allow_stale_long_range_field
+        ? true
+        : (m_long_range_field_validity.source_generation == options.source_generation &&
+           m_long_range_field_validity.last_force_epoch == options.force_epoch);
     return m_long_range_field_validity.valid &&
-        m_long_range_field_validity.source_generation == options.source_generation &&
-        m_long_range_field_validity.last_force_epoch == options.force_epoch &&
+        source_state_admitted &&
         m_long_range_field_validity.pm_field_version == options.pm_field_version &&
         m_long_range_field_validity.scale_factor == pm_options.scale_factor &&
         m_long_range_field_validity.gravitational_constant_code == pm_options.gravitational_constant_code &&
@@ -2510,11 +2523,45 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
         "TreePM long-range reuse requested without a compatible PM field");
   }
 
+  // PM force-target view shared by workload planning and interpolation.
+  const bool pm_targets_explicit = !accumulator.target_pos_x_comoving.empty();
+  const auto make_pm_force_target_view = [&]() {
+    return PmSolver::PmForceTargetView{
+        .active_particle_index = accumulator.active_particle_index,
+        .pos_x_comoving = pm_targets_explicit ? accumulator.target_pos_x_comoving : pos_x_comoving,
+        .pos_y_comoving = pm_targets_explicit ? accumulator.target_pos_y_comoving : pos_y_comoving,
+        .pos_z_comoving = pm_targets_explicit ? accumulator.target_pos_z_comoving : pos_z_comoving,
+        .accel_x_comoving = accumulator.accel_x_comoving,
+        .accel_y_comoving = accumulator.accel_y_comoving,
+        .accel_z_comoving = accumulator.accel_z_comoving,
+        .coordinate_layout = pm_targets_explicit
+            ? PmSolver::PmForceCoordinateLayout::kCompactActive
+            : PmSolver::PmForceCoordinateLayout::kIndexedSource,
+        .output_layout = PmSolver::PmForceOutputLayout::kCompactActive,
+        .coordinate_source_index = pm_targets_explicit
+            ? std::span<const TreeLocalIndex>{}
+            : accumulator.active_particle_index,
+    };
+  };
+
   // Configure the one production communication backing allocation before any
-  // distributed gravity protocol can borrow it. The capacity is the maximum
-  // source-derived live set of the sequential PM-density, halo-staging,
-  // interpolation, and short-range Tree exchange phases.
+  // distributed gravity protocol can borrow it. Tree-exchange and halo-staging
+  // requirements stay source-derived; the PM density and interpolation phases
+  // are sized from a collectively agreed routing workload plan (one MAX
+  // reduction each, replacing the routing calls' own max-count reductions)
+  // instead of the configured (P-1) x per-peer ceiling. The arena only grows,
+  // at this idle boundary, so retained capacity tracks the largest workload.
   if (tree_pm_uses_distributed_payload_communication) {
+    PmSolver::PmRoutingWorkloadPlan density_plan{};
+    PmSolver::PmRoutingWorkloadPlan interpolation_plan{};
+    if (perform_long_range_refresh && pm_options.execution_policy != core::ExecutionPolicy::kCuda) {
+      density_plan = m_pm_solver.planDensityRouting(
+          m_grid, pos_x_comoving, pos_y_comoving, pos_z_comoving, mass_code, pm_options);
+    }
+    if (!options.short_range_only) {
+      interpolation_plan = m_pm_solver.planForceInterpolationRouting(
+          m_grid, make_pm_force_target_view(), pm_options);
+    }
     std::exception_ptr arena_configuration_failure;
     try {
       const GravityCommunicationArenaMemoryEstimate arena_estimate =
@@ -2525,7 +2572,16 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
                   .pm_exchange_batch_bytes = pm_options.routing_exchange_batch_bytes,
                   .tree_exchange_batch_bytes = options.tree_exchange_batch_bytes,
               });
-      m_communication_arena.configure(arena_estimate.required_capacity_bytes);
+      const std::uint64_t required = std::max({
+          arena_estimate.tree_exchange_required_bytes,
+          arena_estimate.pm_halo_staging_required_bytes,
+          density_plan.phase_arena_bytes,
+          interpolation_plan.phase_arena_bytes,
+          std::uint64_t{1U}});
+      m_communication_arena.configure(required);
+      m_last_routing_plan_bytes = {density_plan.phase_arena_bytes, interpolation_plan.phase_arena_bytes,
+                                   density_plan.configured_ceiling_bytes,
+                                   interpolation_plan.configured_ceiling_bytes};
     } catch (...) {
       arena_configuration_failure = std::current_exception();
     }
@@ -2804,25 +2860,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
       GravityCommunicationArena::Phase::kPmInterpolation, [&] {
     m_pm_solver.interpolateForces(
         m_grid,
-        PmSolver::PmForceTargetView{
-            .active_particle_index = accumulator.active_particle_index,
-            .pos_x_comoving = has_explicit_target_positions
-                ? accumulator.target_pos_x_comoving : pos_x_comoving,
-            .pos_y_comoving = has_explicit_target_positions
-                ? accumulator.target_pos_y_comoving : pos_y_comoving,
-            .pos_z_comoving = has_explicit_target_positions
-                ? accumulator.target_pos_z_comoving : pos_z_comoving,
-            .accel_x_comoving = accumulator.accel_x_comoving,
-            .accel_y_comoving = accumulator.accel_y_comoving,
-            .accel_z_comoving = accumulator.accel_z_comoving,
-            .coordinate_layout = has_explicit_target_positions
-                ? PmSolver::PmForceCoordinateLayout::kCompactActive
-                : PmSolver::PmForceCoordinateLayout::kIndexedSource,
-            .output_layout = PmSolver::PmForceOutputLayout::kCompactActive,
-            .coordinate_source_index = has_explicit_target_positions
-                ? std::span<const TreeLocalIndex>{}
-                : accumulator.active_particle_index,
-        },
+        make_pm_force_target_view(),
         pm_options,
         profile != nullptr ? &profile->pm_profile : nullptr);
       });
@@ -3270,6 +3308,10 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     }
     diagnostics->communication_arena_growth_events = m_communication_arena.growthEvents();
     diagnostics->communication_arena_unused_bytes = m_communication_arena.unusedCapacityBytes();
+    diagnostics->pm_density_routing_planned_bytes = m_last_routing_plan_bytes[0];
+    diagnostics->pm_interpolation_routing_planned_bytes = m_last_routing_plan_bytes[1];
+    diagnostics->pm_density_routing_ceiling_bytes = m_last_routing_plan_bytes[2];
+    diagnostics->pm_interpolation_routing_ceiling_bytes = m_last_routing_plan_bytes[3];
     diagnostics->exported_targets_per_requested_target =
         m_last_residual_stats.remote_targets_with_requests > 0U
         ? static_cast<double>(m_last_residual_stats.let_exported_target_count) /
@@ -3364,6 +3406,8 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->graph_cache_hit_count = m_last_residual_stats.graph_cache_hit_count;
     diagnostics->graph_cache_miss_count = m_last_residual_stats.graph_cache_miss_count;
     diagnostics->graph_cache_superset_hit_count = m_last_residual_stats.graph_cache_superset_hit_count;
+    diagnostics->topology_cache_rebuilds = m_last_residual_stats.topology_cache_rebuilds;
+    diagnostics->topology_cache_reuses = m_last_residual_stats.topology_cache_reuses;
     diagnostics->let_candidate_peer_count = m_last_residual_stats.let_candidate_peer_count;
     diagnostics->let_exported_target_count = m_last_residual_stats.let_exported_target_count;
     diagnostics->let_imported_target_count = m_last_residual_stats.let_imported_target_count;
@@ -3682,7 +3726,30 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     m_tree_ordered_source_x_comoving.resize(ordered_count);
     m_tree_ordered_source_y_comoving.resize(ordered_count);
     m_tree_ordered_source_z_comoving.resize(ordered_count);
-    m_tree_ordered_source_mass_code.resize(ordered_count);
+    // Uniform-mass populations (DMO) carry no per-source mass lane: the
+    // species-wide value is passed to the kernels as a scalar and multiplied
+    // in the same per-pair expression, so results are bitwise unchanged.
+    // Detection is an early-exit O(N) scan over the authoritative mass lane.
+    m_tree_ordered_source_mass_uniform = ordered_count != 0U && !mass_code.empty();
+    m_tree_ordered_source_uniform_mass_code = m_tree_ordered_source_mass_uniform ? mass_code[0] : 0.0;
+    for (std::size_t row = 1; row < mass_code.size() && m_tree_ordered_source_mass_uniform; ++row) {
+      m_tree_ordered_source_mass_uniform = mass_code[row] == m_tree_ordered_source_uniform_mass_code;
+    }
+    if (m_tree_ordered_source_mass_uniform) {
+      m_tree_ordered_source_mass_code.clear();
+      m_tree_ordered_source_mass_code.shrink_to_fit();
+    } else {
+      m_tree_ordered_source_mass_code.resize(ordered_count);
+    }
+    const bool gather_mass = !m_tree_ordered_source_mass_uniform;
+    // The row -> tree-position map depends only on the leaf permutation, so
+    // it is rewritten only after a full build (topology generation change);
+    // certified refits and identical-source reuse keep it.
+    const std::uint64_t topology_generation = m_tree_solver.topologyGeneration();
+    const bool order_map_current = topology_generation != 0U &&
+        m_order_map_topology_generation == topology_generation &&
+        m_order_map_extent == ordered_count &&
+        m_tree_order_position_by_row.size() == ordered_count;
     m_tree_order_position_by_row.resize(ordered_count);
     const auto* order = ordering.sorted_particle_index.data();
 #if COSMOSIM_HAVE_OPENMP
@@ -3693,22 +3760,48 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       m_tree_ordered_source_x_comoving[static_cast<std::size_t>(i)] = pos_x_comoving[row];
       m_tree_ordered_source_y_comoving[static_cast<std::size_t>(i)] = pos_y_comoving[row];
       m_tree_ordered_source_z_comoving[static_cast<std::size_t>(i)] = pos_z_comoving[row];
-      m_tree_ordered_source_mass_code[static_cast<std::size_t>(i)] = mass_code[row];
-      m_tree_order_position_by_row[row] = static_cast<std::uint32_t>(i);
+      if (gather_mass) m_tree_ordered_source_mass_code[static_cast<std::size_t>(i)] = mass_code[row];
+      if (!order_map_current) m_tree_order_position_by_row[row] = static_cast<std::uint32_t>(i);
     }
+    m_order_map_topology_generation = topology_generation;
+    m_order_map_extent = ordered_count;
     // Visit local targets in tree order so consecutive targets in a block
     // share node and leaf cache lines. Each active slot still has exactly one
     // writer and its own unchanged walk, so per-target forces are unaffected.
+    // Stable LSD radix sort on the 32-bit tree position (two 16-bit passes,
+    // O(T)) replaces the O(T log T) comparison sort for large target sets;
+    // non-local targets carry key UINT32_MAX and keep their relative order,
+    // exactly as the stable comparison sort ordered them.
     m_target_visit_order.resize(target_count);
     std::iota(m_target_visit_order.begin(), m_target_visit_order.end(), 0U);
     if (nodes.size() != 0U) {
-      const auto visit_key = [&](std::uint32_t active_i) -> std::uint64_t {
+      const auto visit_key = [&](std::uint32_t active_i) -> std::uint32_t {
         const auto row = accumulator.active_particle_index[active_i];
         return row < ordered_count ? m_tree_order_position_by_row[row]
-                                   : std::numeric_limits<std::uint64_t>::max();
+                                   : std::numeric_limits<std::uint32_t>::max();
       };
-      std::stable_sort(m_target_visit_order.begin(), m_target_visit_order.end(),
-          [&](std::uint32_t lhs, std::uint32_t rhs) { return visit_key(lhs) < visit_key(rhs); });
+      constexpr std::size_t k_radix_threshold = 4096U;
+      if (target_count < k_radix_threshold) {
+        std::stable_sort(m_target_visit_order.begin(), m_target_visit_order.end(),
+            [&](std::uint32_t lhs, std::uint32_t rhs) { return visit_key(lhs) < visit_key(rhs); });
+      } else {
+        m_target_visit_scratch.resize(target_count);
+        auto& histogram = m_target_visit_histogram;
+        histogram.resize(65537U);
+        for (const unsigned shift : {0U, 16U}) {
+          std::fill(histogram.begin(), histogram.end(), std::size_t{0U});
+          for (const std::uint32_t slot : m_target_visit_order) {
+            ++histogram[((visit_key(slot) >> shift) & 0xFFFFU) + 1U];
+          }
+          for (std::size_t bucket = 1U; bucket < histogram.size(); ++bucket) {
+            histogram[bucket] += histogram[bucket - 1U];
+          }
+          for (const std::uint32_t slot : m_target_visit_order) {
+            m_target_visit_scratch[histogram[(visit_key(slot) >> shift) & 0xFFFFU]++] = slot;
+          }
+          m_target_visit_order.swap(m_target_visit_scratch);
+        }
+      }
     }
     // Group walk eligibility (see tree_pm_group_walk.hpp). The Gaussian table
     // must cover every in-cutoff pair: t = (r_cut / 2 r_s)^2 < 64.
@@ -3737,20 +3830,30 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       group_walk_status = TreePmGroupWalkStatus::kCutoffOutsideTable;
     }
     // Owned targets use the group walk in both the local-only and the
-    // distributed (LET-overlapped) paths; incoming remote targets keep the
-    // per-target walk.
+    // distributed (LET-overlapped) paths; incoming remote LET targets are
+    // Morton-ordered per peer batch and grouped the same way.
     group_walk_active = group_walk_status == TreePmGroupWalkStatus::kActive;
     m_last_residual_stats.traversal_summary.group_walk_requested = options.group_walk_enabled ? 1U : 0U;
     m_last_residual_stats.traversal_summary.group_walk_status = static_cast<std::uint64_t>(group_walk_status);
     if (group_walk_active) {
-      m_leaf_of_tree_position.assign(ordered_count, kInvalidTreeLocalIndex);
-      for (std::size_t node = 0; node < nodes.size(); ++node) {
-        if (nodes.child_count[node] != 0U) continue;
-        const std::size_t begin = nodes.particle_begin[node];
-        const std::size_t end = begin + nodes.particle_count[node];
-        for (std::size_t position = begin; position < end && position < ordered_count; ++position) {
-          m_leaf_of_tree_position[position] = static_cast<TreeLocalIndex>(node);
+      // Leaf membership is topology: unchanged by certified refits.
+      const bool leaf_map_current = topology_generation != 0U &&
+          m_leaf_map_topology_generation == topology_generation &&
+          m_leaf_of_tree_position.size() == ordered_count;
+      if (!leaf_map_current) {
+        m_leaf_of_tree_position.assign(ordered_count, kInvalidTreeLocalIndex);
+        for (std::size_t node = 0; node < nodes.size(); ++node) {
+          if (nodes.child_count[node] != 0U) continue;
+          const std::size_t begin = nodes.particle_begin[node];
+          const std::size_t end = begin + nodes.particle_count[node];
+          for (std::size_t position = begin; position < end && position < ordered_count; ++position) {
+            m_leaf_of_tree_position[position] = static_cast<TreeLocalIndex>(node);
+          }
         }
+        m_leaf_map_topology_generation = topology_generation;
+        ++m_last_residual_stats.topology_cache_rebuilds;
+      } else {
+        ++m_last_residual_stats.topology_cache_reuses;
       }
       if (m_worker_group_scratch.size() < worker_count) m_worker_group_scratch.resize(worker_count);
     }
@@ -3881,7 +3984,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   const double* const ordered_x = m_tree_ordered_source_x_comoving.data();
   const double* const ordered_y = m_tree_ordered_source_y_comoving.data();
   const double* const ordered_z = m_tree_ordered_source_z_comoving.data();
-  const double* const ordered_mass = m_tree_ordered_source_mass_code.data();
+  // nullptr when the source population has uniform mass (see the gather).
+  const double* const ordered_mass =
+      m_tree_ordered_source_mass_uniform ? nullptr : m_tree_ordered_source_mass_code.data();
+  const double uniform_source_mass = m_tree_ordered_source_uniform_mass_code;
   std::uint64_t incoming_evaluated_target_count = 0;
   int observed_openmp_workers = 1;
   auto evaluateTargetAgainstLocalTree = [&](
@@ -4018,7 +4124,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                 lane.dx[i] = source_metric[0](ordered_x[ordered]-px);
                 lane.dy[i] = source_metric[1](ordered_y[ordered]-py);
                 lane.dz[i] = source_metric[2](ordered_z[ordered]-pz);
-                lane.mass[i] = ordered_mass[ordered]; lane.epsilon2[i] = epsilon2;
+                lane.mass[i] = ordered_mass != nullptr ? ordered_mass[ordered] : uniform_source_mass; lane.epsilon2[i] = epsilon2;
               }
               internal::treePmLeafGeometry(lane, leaf_avx2, gaussian_table != nullptr && residual_table == nullptr);
               for (std::size_t i = 0; i < count; ++i) {
@@ -4089,7 +4195,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               residual_inv_r3 = treePmSoftenedShortRangeInvR3Unchecked(sr2, pair_epsilon, split_scale);
             }
             const double residual_factor = residual_inv_r3 * options.tree_options.gravitational_constant_code;
-            const double source_mass = ordered_mass[sorted_i];
+            const double source_mass = ordered_mass != nullptr ? ordered_mass[sorted_i] : uniform_source_mass;
             ax += residual_factor * source_mass * sx;
             ay += residual_factor * source_mass * sy;
             az += residual_factor * source_mass * sz;
@@ -4147,6 +4253,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         source_softening.uniform_epsilon_comoving, source_softening.uniform_epsilon_comoving);
     group_kernel = internal::TreePmGroupPairKernel{
         .x = ordered_x, .y = ordered_y, .z = ordered_z, .mass = ordered_mass,
+        .uniform_mass = uniform_source_mass,
         .length = {box_lengths.lx, box_lengths.ly, box_lengths.lz},
         .epsilon2 = pair_epsilon * pair_epsilon,
         .cutoff_radius2 = cutoff_radius2_comoving,
@@ -4168,33 +4275,40 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   // accumulated through the shared list; any other value is returned before
   // accumulation and names the first condition that forced per-target walks.
   enum class GroupEvaluation : std::uint8_t { kEvaluated, kSoftening, kHistory, kGeometry };
-  const auto evaluate_group = [&](std::size_t visit_begin, std::size_t visit_end,
-                                  ResidualTraversalCounters& counters, BoundedTreeStack& stack,
-                                  TreePmGroupWalkWorkerScratch& scratch, double& sum_sq) -> GroupEvaluation {
+  // One group target as seen by the shared-list evaluator: position, target
+  // softening and previous total-acceleration magnitude (NaN when absent).
+  struct GroupTargetSample {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double epsilon = 0.0;
+    double previous_acceleration = std::numeric_limits<double>::quiet_NaN();
+  };
+  // Generic shared-list evaluation for `count` targets. sample(i) returns the
+  // i-th target; emit(i, ax, ay, az, nearest_pair_r2) receives its residual.
+  // Used by owned targets (visit order) and incoming remote LET targets.
+  const auto evaluate_target_group = [&](std::size_t count, const auto& sample, const auto& emit,
+                                         ResidualTraversalCounters& counters, BoundedTreeStack& stack,
+                                         TreePmGroupWalkWorkerScratch& scratch, double& sum_sq) -> GroupEvaluation {
     const double uniform_epsilon = source_softening.uniform_epsilon_comoving;
     const std::array<double, 3> lengths{box_lengths.lx, box_lengths.ly, box_lengths.lz};
     double minimum_acceleration = std::numeric_limits<double>::infinity();
     std::array<double, 3> reference{}, low{}, high{};
-    for (std::size_t visit = visit_begin; visit < visit_end; ++visit) {
-      const std::size_t active_i = m_target_visit_order[visit];
-      const TreeLocalIndex row = accumulator.active_particle_index[active_i];
-      if (targetSofteningEpsilonUnchecked(active_i, row, validated_target_softening) != uniform_epsilon) {
-        return GroupEvaluation::kSoftening;
-      }
-      if (accumulator.previous_acceleration_magnitude_code.empty()) return GroupEvaluation::kHistory;
-      const double previous = accumulator.previous_acceleration_magnitude_code[active_i];
-      if (!(std::isfinite(previous) &&
-            previous > options.tree_options.relative_force_acceleration_floor_code)) {
+    for (std::size_t i = 0; i < count; ++i) {
+      const GroupTargetSample target = sample(i);
+      if (target.epsilon != uniform_epsilon) return GroupEvaluation::kSoftening;
+      if (!(std::isfinite(target.previous_acceleration) &&
+            target.previous_acceleration > options.tree_options.relative_force_acceleration_floor_code)) {
         return GroupEvaluation::kHistory;
       }
-      minimum_acceleration = std::min(minimum_acceleration, previous);
-      const std::array<double, 3> position{target_x(active_i), target_y(active_i), target_z(active_i)};
+      minimum_acceleration = std::min(minimum_acceleration, target.previous_acceleration);
+      const std::array<double, 3> position{target.x, target.y, target.z};
       for (std::size_t axis = 0; axis < 3U; ++axis) {
         if (!internal::treePmPeriodicMetric(m_source_coordinate_bounds[2U*axis],
                 m_source_coordinate_bounds[2U*axis+1U], position[axis], lengths[axis], round_to_nearest).bounded) {
           return GroupEvaluation::kGeometry;
         }
-        if (visit == visit_begin) {
+        if (i == 0U) {
           reference[axis] = position[axis];
           continue;
         }
@@ -4210,16 +4324,16 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     }
     internal::buildTreePmGroupInteractionList(nodes, group, minimum_acceleration, lengths,
         group_parameters, stack, scratch, counters);
-    const std::uint64_t group_size = static_cast<std::uint64_t>(visit_end - visit_begin);
+    const std::uint64_t group_size = static_cast<std::uint64_t>(count);
     ++counters.group_walk_groups;
     counters.group_walk_grouped_targets += group_size;
     counters.group_walk_target_group_size_max = std::max(counters.group_walk_target_group_size_max, group_size);
     counters.group_walk_list_entries_max = std::max<std::uint64_t>(counters.group_walk_list_entries_max,
         scratch.range_begin.size() + scratch.multipole_nodes.size());
     internal::TreePmGroupLeafCullCounts cull_counts{};
-    for (std::size_t visit = visit_begin; visit < visit_end; ++visit) {
-      const std::size_t active_i = m_target_visit_order[visit];
-      const double px = target_x(active_i), py = target_y(active_i), pz = target_z(active_i);
+    for (std::size_t i = 0; i < count; ++i) {
+      const GroupTargetSample target = sample(i);
+      const double px = target.x, py = target.y, pz = target.z;
       ++counters.targets;
       double ax = 0.0, ay = 0.0, az = 0.0;
       double nearest_pair_r2 = std::numeric_limits<double>::infinity();
@@ -4231,11 +4345,11 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       internal::accumulateTreePmGroupCulledLeaves(group_kernel, scratch, target_offset, px, py, pz,
           ax, ay, az, pairs, nearest_pair_r2, cull_counts);
       counters.direct_pair_evaluations += pairs;
-      const std::array<double, 3> target{px, py, pz};
+      const std::array<double, 3> position{px, py, pz};
       std::array<internal::TreePmPeriodicMetric, 3> node_metric;
       for (std::size_t axis = 0; axis < 3U; ++axis) {
         node_metric[axis] = internal::treePmPeriodicMetric(m_node_coordinate_bounds[2U*axis],
-            m_node_coordinate_bounds[2U*axis+1U], target[axis], lengths[axis], round_to_nearest);
+            m_node_coordinate_bounds[2U*axis+1U], position[axis], lengths[axis], round_to_nearest);
       }
       for (const TreeLocalIndex node : scratch.multipole_nodes) {
         const double dx = node_metric[0](nodes.com_x_comoving[node] - px);
@@ -4254,14 +4368,37 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         ay += contrib[1];
         az += contrib[2];
       }
-      accumulator.addShortRangeToActiveSlot(active_i, ax, ay, az);
-      accumulator.noteNearestPairToActiveSlot(active_i, nearest_pair_r2);
+      emit(i, ax, ay, az, nearest_pair_r2);
       sum_sq += ax * ax + ay * ay + az * az;
     }
     counters.group_walk_candidate_leaves += cull_counts.candidate_leaves;
     counters.group_walk_culled_leaves += cull_counts.culled_leaves;
     counters.group_walk_candidate_particles += cull_counts.candidate_particles;
     return GroupEvaluation::kEvaluated;
+  };
+  // Owned targets: visit positions of m_target_visit_order.
+  const auto evaluate_group = [&](std::size_t visit_begin, std::size_t visit_end,
+                                  ResidualTraversalCounters& counters, BoundedTreeStack& stack,
+                                  TreePmGroupWalkWorkerScratch& scratch, double& sum_sq) -> GroupEvaluation {
+    const auto sample = [&](std::size_t i) {
+      const std::size_t active_i = m_target_visit_order[visit_begin + i];
+      const TreeLocalIndex row = accumulator.active_particle_index[active_i];
+      return GroupTargetSample{
+          .x = target_x(active_i),
+          .y = target_y(active_i),
+          .z = target_z(active_i),
+          .epsilon = targetSofteningEpsilonUnchecked(active_i, row, validated_target_softening),
+          .previous_acceleration = accumulator.previous_acceleration_magnitude_code.empty()
+              ? std::numeric_limits<double>::quiet_NaN()
+              : accumulator.previous_acceleration_magnitude_code[active_i],
+      };
+    };
+    const auto emit = [&](std::size_t i, double ax, double ay, double az, double nearest_pair_r2) {
+      const std::size_t active_i = m_target_visit_order[visit_begin + i];
+      accumulator.addShortRangeToActiveSlot(active_i, ax, ay, az);
+      accumulator.noteNearestPairToActiveSlot(active_i, nearest_pair_r2);
+    };
+    return evaluate_target_group(visit_end - visit_begin, sample, emit, counters, stack, scratch, sum_sq);
   };
 
   // Owned-target evaluation of visit positions [visit_begin, visit_end) of
@@ -5527,6 +5664,29 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           std::fill(
               m_worker_counter_storage.begin(), m_worker_counter_storage.end(),
               ResidualTraversalCounters{});
+          // Remote group walk: order this peer's incoming targets along a
+          // Morton curve on a lattice of the group extent, then evaluate
+          // spatially coherent runs through the shared culled-list path. The
+          // response slot of each request is unchanged (single writer).
+          const bool incoming_group_walk = group_walk_active && incoming_count > 1U;
+          const std::size_t incoming_group_size = options.group_walk_target_group_size != 0U
+              ? options.group_walk_target_group_size : std::size_t{16U};
+          m_incoming_group_order.resize(incoming_count);
+          std::iota(m_incoming_group_order.begin(), m_incoming_group_order.end(), 0U);
+          if (incoming_group_walk) {
+            const std::array<double, 3> lengths{box_lengths.lx, box_lengths.ly, box_lengths.lz};
+            m_incoming_group_keys.resize(incoming_count);
+            for (std::size_t slot = 0; slot < incoming_count; ++slot) {
+              const auto& request = decoded_requests[slot];
+              m_incoming_group_keys[slot] = internal::treePmGroupMortonKey(
+                  {request.target_x_comoving, request.target_y_comoving, request.target_z_comoving},
+                  lengths, group_max_extent_comoving);
+            }
+            std::stable_sort(m_incoming_group_order.begin(), m_incoming_group_order.end(),
+                [&](std::uint32_t lhs, std::uint32_t rhs) {
+                  return m_incoming_group_keys[lhs] < m_incoming_group_keys[rhs];
+                });
+          }
           std::exception_ptr incoming_compute_failure;
           int region_observed_workers = 1;
 #if COSMOSIM_HAVE_OPENMP
@@ -5551,9 +5711,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               ResidualTraversalCounters& counters =
                   m_worker_counter_storage[worker_slot];
               const auto block_work_start = std::chrono::steady_clock::now();
-              for (std::size_t peer_slot = block_begin;
-                   peer_slot < block_end;
-                   ++peer_slot) {
+              const auto evaluate_incoming_slot = [&](std::size_t peer_slot) {
                 const ShortRangeTargetRequestPacket& request =
                     decoded_requests[peer_slot];
                 const auto remote_accel = evaluateTargetAgainstLocalTree(
@@ -5572,6 +5730,73 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                 peer_responses[peer_slot].accel_y_comoving = remote_accel[1];
                 peer_responses[peer_slot].accel_z_comoving = remote_accel[2];
                 peer_responses[peer_slot].nearest_pair_r2_comoving = remote_accel[3];
+              };
+              if (!incoming_group_walk) {
+                for (std::size_t position = block_begin; position < block_end; ++position) {
+                  evaluate_incoming_slot(m_incoming_group_order[position]);
+                }
+              } else {
+                const std::array<double, 3> lengths{box_lengths.lx, box_lengths.ly, box_lengths.lz};
+                double incoming_sum_sq = 0.0;  // residual norm is reported for owned targets only
+                std::size_t position = block_begin;
+                while (position < block_end) {
+                  const auto& first = decoded_requests[m_incoming_group_order[position]];
+                  const std::array<double, 3> reference{
+                      first.target_x_comoving, first.target_y_comoving, first.target_z_comoving};
+                  std::array<double, 3> low{}, high{};
+                  std::size_t group_end = position + 1U;
+                  while (group_end < block_end && group_end - position < incoming_group_size) {
+                    const auto& next = decoded_requests[m_incoming_group_order[group_end]];
+                    const std::array<double, 3> p{
+                        next.target_x_comoving, next.target_y_comoving, next.target_z_comoving};
+                    std::array<double, 3> next_low = low, next_high = high;
+                    bool within_extent = true;
+                    for (std::size_t axis = 0; axis < 3U; ++axis) {
+                      const double delta = internal::treePmGroupNearestImage(p[axis] - reference[axis], lengths[axis]);
+                      next_low[axis] = std::min(next_low[axis], delta);
+                      next_high[axis] = std::max(next_high[axis], delta);
+                      within_extent = within_extent && next_high[axis] - next_low[axis] <= group_max_extent_comoving;
+                    }
+                    if (!within_extent) break;
+                    low = next_low;
+                    high = next_high;
+                    ++group_end;
+                  }
+                  const std::size_t group_begin = position;
+                  const auto sample = [&](std::size_t i) {
+                    const auto& request = decoded_requests[m_incoming_group_order[group_begin + i]];
+                    return GroupTargetSample{
+                        .x = request.target_x_comoving,
+                        .y = request.target_y_comoving,
+                        .z = request.target_z_comoving,
+                        .epsilon = request.target_softening_epsilon_comoving,
+                        .previous_acceleration = (request.flags & k_short_range_flag_previous_acceleration) != 0U
+                            ? request.previous_acceleration_magnitude
+                            : std::numeric_limits<double>::quiet_NaN(),
+                    };
+                  };
+                  const auto emit = [&](std::size_t i, double ax, double ay, double az, double nearest_pair_r2) {
+                    auto& response = peer_responses[m_incoming_group_order[group_begin + i]];
+                    response.accel_x_comoving = ax;
+                    response.accel_y_comoving = ay;
+                    response.accel_z_comoving = az;
+                    response.nearest_pair_r2_comoving = nearest_pair_r2;
+                  };
+                  const GroupEvaluation evaluation = evaluate_target_group(
+                      group_end - group_begin, sample, emit, counters, stack,
+                      m_worker_group_scratch[worker_slot], incoming_sum_sq);
+                  if (evaluation != GroupEvaluation::kEvaluated) {
+                    const std::uint64_t group_targets = static_cast<std::uint64_t>(group_end - group_begin);
+                    counters.group_walk_fallback_targets += group_targets;
+                    if (evaluation == GroupEvaluation::kSoftening) counters.group_walk_fallback_softening += group_targets;
+                    if (evaluation == GroupEvaluation::kHistory) counters.group_walk_fallback_history += group_targets;
+                    if (evaluation == GroupEvaluation::kGeometry) counters.group_walk_fallback_geometry += group_targets;
+                    for (std::size_t i = group_begin; i < group_end; ++i) {
+                      evaluate_incoming_slot(m_incoming_group_order[i]);
+                    }
+                  }
+                  position = group_end;
+                }
               }
               const double block_work_ms = std::chrono::duration<double, std::milli>(
                   std::chrono::steady_clock::now() - block_work_start).count();

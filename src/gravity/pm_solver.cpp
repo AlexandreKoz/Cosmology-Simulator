@@ -1101,13 +1101,13 @@ struct PmPlanLocalStorageLayout {
       nz_complex,
       "PM plan local Fourier extent");
   storage.allocated_local_complex_cells = storage.logical_local_complex_cells;
-  storage.real_z_stride = shape.nz;
+  // In-place r2c storage: every real row is padded to 2 (nz/2 + 1) doubles
+  // and the real view aliases the complex allocation (2 doubles per cell).
+  storage.real_z_stride = checkedProduct(2U, nz_complex, "PM plan real stride");
 
   if (layout.world_size <= 1) {
     storage.real_element_count = checkedProduct(
-        checkedProduct(layout.local_nx(), shape.ny, "PM plan serial real extent"),
-        shape.nz,
-        "PM plan serial real extent");
+        2U, storage.allocated_local_complex_cells, "PM plan serial padded real extent");
     return storage;
   }
 
@@ -1251,6 +1251,126 @@ struct PmPlanLocalStorageLayout {
     throw std::overflow_error(std::string(context) + " byte estimate overflows uint64_t");
   }
   return a + b;
+}
+
+// Workload-aware routing (2026-10-25). Round sizing derives from a
+// rank-independent model (configured batch bytes, world size and the exact
+// per-kind routing metadata formula), so every rank partitions its local
+// population into identically sized rounds. The live wire buffers and the
+// communication arena are then sized from the measured remote-record
+// workload instead of (P-1) x effective_per_peer_payload_bytes.
+enum class PmRoutingPhaseKind : std::uint8_t { kDensity, kForceInterpolation };
+
+[[nodiscard]] std::size_t pmRoutingWireRecordBytes(PmRoutingPhaseKind kind) noexcept {
+  return kind == PmRoutingPhaseKind::kDensity ? k_pm_density_plane_wire_bytes
+                                              : k_pm_plane_interpolation_request_wire_bytes;
+}
+
+// Exactly the int count/displacement lanes plus the size_t cursor lane that
+// DensityExchangeBuffers (8 int lanes) and PlaneInterpolationExchangeBuffers
+// (12 int lanes) allocate per rank.
+[[nodiscard]] std::uint64_t pmRoutingMetadataBytes(PmRoutingPhaseKind kind, int world_size) {
+  const std::uint64_t int_lanes = kind == PmRoutingPhaseKind::kDensity ? 8U : 12U;
+  return checkedBytesForCount(
+      static_cast<std::size_t>(std::max(world_size, 1)),
+      static_cast<std::size_t>(int_lanes * sizeof(int) + sizeof(std::size_t)),
+      "PM routing metadata formula");
+}
+
+[[nodiscard]] PmRoutingCapacityModel pmPlannedRoutingModel(
+    PmRoutingPhaseKind kind, int world_size, std::uint64_t configured_per_peer_bytes) {
+  return modelPmRoutingCapacity(
+      world_size, configured_per_peer_bytes, k_pm_routing_modeled_workspace_limit_bytes,
+      pmRoutingMetadataBytes(kind, world_size), pmRoutingWireRecordBytes(kind));
+}
+
+struct PmRemotePlaneWorkload {
+  // Largest record count sent to any single remote peer in any round.
+  std::uint64_t max_peer_records = 0U;
+  // Largest total remote record count of any round (this rank's send side).
+  std::uint64_t max_round_records = 0U;
+};
+
+// Counts remote x-plane groups exactly as pass 1 of the density and force
+// routing loops does. grid_x(p) returns the target's x coordinate in grid
+// units, or std::nullopt for entries the routing loop skips.
+template <typename GridX>
+[[nodiscard]] PmRemotePlaneWorkload measurePmRemotePlaneWorkload(
+    std::size_t count,
+    std::size_t particles_per_round,
+    int world_rank,
+    int world_size,
+    bool periodic,
+    PmAssignmentScheme scheme,
+    const PmGridShape& shape,
+    const PmDecompositionView& decomposition_view,
+    const GridX& grid_x) {
+  if (particles_per_round == 0U) {
+    throw std::invalid_argument("PM routing workload requires a positive round capacity");
+  }
+  PmRemotePlaneWorkload workload;
+  std::vector<std::uint64_t> per_peer(static_cast<std::size_t>(std::max(world_size, 1)), 0U);
+  for (std::size_t begin = 0; begin < count; begin += particles_per_round) {
+    const std::size_t end = std::min(count, begin + particles_per_round);
+    std::fill(per_peer.begin(), per_peer.end(), std::uint64_t{0U});
+    std::uint64_t round_records = 0U;
+    for (std::size_t p = begin; p < end; ++p) {
+      const std::optional<double> x = grid_x(p);
+      if (!x.has_value()) continue;
+      const PmAxisStencil1d sx = makeAxisStencil(*x, scheme);
+      std::array<PmXPlaneGroup, 3> groups{};
+      const std::size_t group_count = makePmXPlaneGroups(sx, periodic, shape, decomposition_view, groups);
+      for (std::size_t group_i = 0; group_i < group_count; ++group_i) {
+        const int destination_rank = groups[group_i].destination_rank;
+        if (destination_rank == world_rank) continue;
+        ++per_peer[static_cast<std::size_t>(destination_rank)];
+        ++round_records;
+      }
+    }
+    workload.max_round_records = std::max(workload.max_round_records, round_records);
+    for (const std::uint64_t records : per_peer) {
+      workload.max_peer_records = std::max(workload.max_peer_records, records);
+    }
+  }
+  return workload;
+}
+
+// Bounded wire reservations and phase arena bytes from a collectively agreed
+// workload: send <= this rank's largest round, receive <= (P-1) x the global
+// largest per-peer round payload; both never exceed the configured model.
+struct PmRoutingReservation {
+  std::uint64_t send_bytes = 0U;
+  std::uint64_t receive_bytes = 0U;
+  std::uint64_t phase_arena_bytes = 0U;
+};
+
+[[nodiscard]] PmRoutingReservation pmRoutingReservation(
+    PmRoutingPhaseKind kind,
+    const PmRoutingCapacityModel& model,
+    int world_size,
+    std::uint64_t local_max_round_records,
+    std::uint64_t global_max_peer_records) {
+  const std::size_t record_bytes = pmRoutingWireRecordBytes(kind);
+  const std::uint64_t remote_peers = static_cast<std::uint64_t>(std::max(world_size - 1, 0));
+  PmRoutingReservation reservation;
+  reservation.send_bytes = std::min<std::uint64_t>(
+      model.max_send_payload_bytes,
+      checkedBytesForCount(static_cast<std::size_t>(local_max_round_records), record_bytes,
+                           "PM routing send reservation"));
+  const std::uint64_t receive_records = global_max_peer_records > 0U &&
+          remote_peers > std::numeric_limits<std::uint64_t>::max() / global_max_peer_records
+      ? std::numeric_limits<std::uint64_t>::max()
+      : remote_peers * global_max_peer_records;
+  reservation.receive_bytes = receive_records >
+          model.max_receive_payload_bytes / static_cast<std::uint64_t>(record_bytes)
+      ? model.max_receive_payload_bytes
+      : receive_records * static_cast<std::uint64_t>(record_bytes);
+  reservation.phase_arena_bytes = checkedAddBytes(
+      checkedAddBytes(pmRoutingMetadataBytes(kind, world_size), k_pm_routing_workspace_headroom_bytes,
+                      "PM routing phase arena bytes"),
+      checkedAddBytes(reservation.send_bytes, reservation.receive_bytes, "PM routing phase arena bytes"),
+      "PM routing phase arena bytes");
+  return reservation;
 }
 
 [[nodiscard]] std::uint64_t estimateIsolatedRootWorkspaceBytes(
@@ -1523,8 +1643,17 @@ class PmSolver::Impl {
 
   struct PlanResources {
     parallel::PmSlabLayout layout{};
-    std::vector<double> real;
+    // In-place FFT storage (2026-10-25): `fourier` is the single owner of the
+    // FFT working set. The real-space view aliases the same bytes as 2 *
+    // fourier.size() doubles in FFTW's padded r2c layout (rows of
+    // real_z_stride = 2 (nz/2 + 1) doubles; serial and distributed alike).
+    // std::complex<double> is layout-compatible with double[2] ([complex.numbers]).
+    // Forward r2c and inverse c2r transforms run in place; the real view and
+    // the spectrum are never simultaneously meaningful.
     std::vector<std::complex<double>> fourier;
+    [[nodiscard]] std::span<double> realView() noexcept {
+      return {reinterpret_cast<double*>(fourier.data()), 2U * fourier.size()};
+    }
     // Pristine phi_k copy for the spectral gradient backend only (complex-to-
     // real transforms destroy their input). Allocated on the first spectral
     // solve and retained; never allocated by kFiniteDifference4.
@@ -1943,7 +2072,6 @@ class PmSolver::Impl {
       plan.spectral_transposed = storage_layout.spectral_transposed;
       plan.transposed_local_ny = storage_layout.transposed_local_ny;
       plan.transposed_begin_y = storage_layout.transposed_begin_y;
-      plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(allocated_local_complex_size, std::complex<double>(0.0, 0.0));
     }
 #endif
@@ -1954,7 +2082,7 @@ class PmSolver::Impl {
           static_cast<ptrdiff_t>(m_shape.nx),
           static_cast<ptrdiff_t>(m_shape.ny),
           static_cast<ptrdiff_t>(m_shape.nz),
-          plan.real.data(),
+          plan.realView().data(),
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
           MPI_COMM_WORLD,
           decomposition_mode == core::PmDecompositionMode::kPencil
@@ -1965,7 +2093,7 @@ class PmSolver::Impl {
           static_cast<ptrdiff_t>(m_shape.ny),
           static_cast<ptrdiff_t>(m_shape.nz),
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
-          plan.real.data(),
+          plan.realView().data(),
           MPI_COMM_WORLD,
           decomposition_mode == core::PmDecompositionMode::kPencil
               ? (COSMOSIM_FFTW_PLANNER_FLAGS | FFTW_MPI_TRANSPOSED_IN)
@@ -1984,14 +2112,13 @@ class PmSolver::Impl {
 #endif
     {
       plan.real_z_stride = storage_layout.real_z_stride;
-      plan.real.assign(storage_layout.real_element_count, 0.0);
       plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
       configureFftwPlannerThreads();
       plan.forward_plan = fftw_plan_dft_r2c_3d(
           static_cast<int>(m_shape.nx),
           static_cast<int>(m_shape.ny),
           static_cast<int>(m_shape.nz),
-          plan.real.data(),
+          plan.realView().data(),
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
           COSMOSIM_FFTW_PLANNER_FLAGS);
       plan.inverse_plan = fftw_plan_dft_c2r_3d(
@@ -1999,7 +2126,7 @@ class PmSolver::Impl {
           static_cast<int>(m_shape.ny),
           static_cast<int>(m_shape.nz),
           reinterpret_cast<fftw_complex*>(plan.fourier.data()),
-          plan.real.data(),
+          plan.realView().data(),
           COSMOSIM_FFTW_PLANNER_FLAGS);
     }
     if (plan.forward_plan == nullptr || plan.inverse_plan == nullptr) {
@@ -2010,7 +2137,6 @@ class PmSolver::Impl {
       throw std::invalid_argument(
           "PM solver naive DFT fallback requires full-domain slab ownership; distributed PM requires COSMOSIM_ENABLE_FFTW=ON and COSMOSIM_ENABLE_MPI=ON");
     }
-    plan.real.assign(storage_layout.real_element_count, 0.0);
     plan.fourier.assign(expected_local_complex_size, std::complex<double>(0.0, 0.0));
 #endif
 
@@ -2054,7 +2180,7 @@ class PmSolver::Impl {
     return insert_it->second;
   }
 
-  [[nodiscard]] std::span<double> realGrid() { return activePlan().real; }
+  [[nodiscard]] std::span<double> realGrid() { return activePlan().realView(); }
   [[nodiscard]] std::span<std::complex<double>> fourierGrid() { return activePlan().fourier; }
   // Spectral-gradient phi_k copy, sized to the backend Fourier allocation on
   // first use and retained for later spectral solves.
@@ -2380,23 +2506,50 @@ class PmSolver::Impl {
     return epoch;
   }
 
+  // required_bytes is the workload-derived phase requirement. An external
+  // (coordinator-owned) arena must already hold it — the coordinator grows it
+  // at the idle boundary before leasing; the standalone fallback grows itself
+  // here (it is idle between calls) instead of retaining the 128 MiB ceiling.
   [[nodiscard]] std::pmr::memory_resource* communicationResource(
       GravityCommunicationArena::Phase phase,
-      std::optional<GravityCommunicationArena::Lease>& fallback_lease) {
+      std::optional<GravityCommunicationArena::Lease>& fallback_lease,
+      std::uint64_t required_bytes = k_pm_routing_workspace_target_bytes) {
     if (m_external_communication_arena != nullptr) {
       if (m_external_communication_arena->activePhase() != phase) {
         throw std::logic_error("PmSolver external gravity communication arena phase mismatch");
+      }
+      if (m_external_communication_arena->capacityBytes() < required_bytes) {
+        throw std::logic_error(
+            "PmSolver external gravity communication arena is smaller than the planned routing workload; "
+            "the coordinator must grow it before leasing");
       }
       return m_external_communication_resource;
     }
     if (m_standalone_communication_arena == nullptr) {
       m_standalone_communication_arena = std::make_unique<GravityCommunicationArena>(
           nullptr, "pm_solver.communication_arena");
-      m_standalone_communication_arena->configure(k_pm_routing_workspace_target_bytes);
     }
+    m_standalone_communication_arena->configure(std::max<std::uint64_t>(required_bytes, 1U));
     fallback_lease.emplace(m_standalone_communication_arena->begin(phase));
     return fallback_lease->resource();
   }
+
+  // One collective workload plan per routing phase, produced by
+  // PmSolver::plan*Routing() and consumed exactly once by the next routing
+  // call of the same kind. Presence is rank-consistent because the planning
+  // call is collective; the key is verified inside a coordinated phase.
+  struct RoutingWorkloadPlanCache {
+    bool valid = false;
+    const double* x_data = nullptr;
+    const void* index_data = nullptr;
+    std::size_t count = 0U;
+    std::uint64_t configured_batch_bytes = 0U;
+    std::uint64_t global_max_count = 0U;
+    std::uint64_t global_max_peer_records = 0U;
+    std::uint64_t local_max_round_records = 0U;
+  };
+  RoutingWorkloadPlanCache m_density_routing_plan;
+  RoutingWorkloadPlanCache m_force_routing_plan;
 
   void attachCommunicationArena(GravityCommunicationArena* arena) {
     if (arena == nullptr || arena->activePhase() == GravityCommunicationArena::Phase::kIdle) {
@@ -2651,13 +2804,25 @@ class PmSolver::Impl {
     std::copy(out.begin(), out.end(), field.begin());
   }
 
+  // Diagnostic naive DFTs. The FFT working set is in place (the real view
+  // aliases `fourier`), so each transform first stages its input in a
+  // transient copy; this fallback exists only for small non-FFTW test meshes.
   void naiveForwardDft() {
     if (!activePlan().layout.ownsFullDomain()) {
       throw std::logic_error(
           "PM solver naiveForwardDft requires full-domain ownership; distributed PM is unavailable without FFTW/MPI");
     }
-    auto& real = activePlan().real;
-    auto& fourier = activePlan().fourier;
+    auto& plan = activePlan();
+    const std::size_t stride = plan.real_z_stride;
+    std::vector<double> real(m_shape.cellCount());
+    {
+      const auto view = plan.realView();
+      for (std::size_t row = 0; row < m_shape.nx * m_shape.ny; ++row) {
+        std::copy_n(view.begin() + static_cast<std::ptrdiff_t>(row * stride), m_shape.nz,
+                    real.begin() + static_cast<std::ptrdiff_t>(row * m_shape.nz));
+      }
+    }
+    auto& fourier = plan.fourier;
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
     for (std::size_t ix = 0; ix < m_shape.nx; ++ix) {
       for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
@@ -2688,8 +2853,10 @@ class PmSolver::Impl {
       throw std::logic_error(
           "PM solver naiveInverseDft requires full-domain ownership; distributed PM is unavailable without FFTW/MPI");
     }
-    auto& real = activePlan().real;
-    auto& fourier = activePlan().fourier;
+    auto& plan = activePlan();
+    const std::vector<std::complex<double>> fourier(plan.fourier.begin(), plan.fourier.end());
+    auto real = plan.realView();
+    const std::size_t stride = plan.real_z_stride;
     const std::size_t total = m_shape.cellCount();
     std::fill(real.begin(), real.end(), 0.0);
     const std::size_t nz_complex = m_shape.nz / 2U + 1U;
@@ -2715,7 +2882,7 @@ class PmSolver::Impl {
               }
             }
           }
-          real[(x * m_shape.ny + y) * m_shape.nz + z] = acc.real() / static_cast<double>(total);
+          real[(x * m_shape.ny + y) * stride + z] = acc.real() / static_cast<double>(total);
         }
       }
     }
@@ -2771,7 +2938,6 @@ class PmSolver::Impl {
       std::uint64_t current = 0U;
       std::uint64_t capacity = 0U;
       for (const auto& [_, resources] : m_plan_cache) {
-        accumulate(current, capacity, resources.real);
         accumulate(current, capacity, resources.fourier);
         accumulate(current, capacity, resources.potential_k);
         accumulate(current, capacity, resources.fd_halo_planes);
@@ -2934,10 +3100,11 @@ PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
   estimate.allocated_local_complex_cells = static_cast<std::uint64_t>(storage_layout.allocated_local_complex_cells);
   estimate.used_backend_allocation_query = storage_layout.used_backend_allocation_query;
 
-  estimate.real_array_bytes = checked_bytes(
-      storage_layout.real_element_count,
-      sizeof(double),
-      "PM plan-memory real bytes");
+  // In-place FFT: the padded real view aliases the complex allocation, so it
+  // owns no bytes of its own (real_element_count = 2 x allocated complex).
+  (void)storage_layout.real_element_count;
+  estimate.real_array_bytes = 0U;
+  estimate.real_view_aliases_complex = true;
 
   estimate.complex_spectral_array_bytes = checked_bytes(
       checkedProduct(
@@ -3548,7 +3715,7 @@ void PmSolver::assignDensityImpl(
     plan.periodic_density_grid = nullptr;
     plan.periodic_density_generation = 0U;
     plan.periodic_density_grid_generation = 0U;
-    density_storage = plan.real;
+    density_storage = plan.realView();
     density_z_stride = plan.real_z_stride;
     std::fill(density_storage.begin(), density_storage.end(), 0.0);
   } else {
@@ -3688,10 +3855,78 @@ void PmSolver::assignDensityImpl(
     std::optional<GravityCommunicationArena::Lease> standalone_communication_lease;
     std::optional<Impl::DensityExchangeBuffers> exchange_storage;
     Impl::DensityExchangeBuffers* exchange_ptr = nullptr;
-    std::uint64_t routing_metadata_capacity = 0U;
     PmRoutingCapacityModel routing_capacity{};
     std::size_t routing_buffer_limit = 0U;
     std::size_t particles_per_round = 0U;
+    const bool routing_periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+    const auto density_grid_x = [&](std::size_t p) -> std::optional<double> {
+      if (!routing_periodic &&
+          (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+        return std::nullopt;
+      }
+      return (routing_periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+    };
+    // Rank-independent round model; a collectively planned workload (if the
+    // coordinator called planDensityRouting) or a local measurement plus one
+    // MAX reduction then bounds the live wire reservations.
+    bool use_routing_plan = false;
+    PmRemotePlaneWorkload local_workload{};
+    runPmCoordinatedPhase(
+        "PmSolver::assignDensity routing workload",
+        world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
+          routing_capacity = pmPlannedRoutingModel(
+              PmRoutingPhaseKind::kDensity, world_size, options.routing_exchange_batch_bytes);
+          if (routing_capacity.max_send_payload_bytes >
+              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            throw std::overflow_error("PM density routing buffer limit exceeds size_t capacity");
+          }
+          routing_buffer_limit =
+              static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          particles_per_round = pmRoutingParticlesPerRound(
+              routing_capacity.effective_per_peer_payload_bytes,
+              k_pm_density_plane_wire_bytes);
+          auto& plan = m_impl->m_density_routing_plan;
+          use_routing_plan = plan.valid;
+          if (use_routing_plan) {
+            plan.valid = false;  // consumed exactly once
+            if (plan.x_data != pos_x.data() || plan.count != mass.size() ||
+                plan.configured_batch_bytes != options.routing_exchange_batch_bytes) {
+              throw std::logic_error("PM density routing plan does not describe this deposition");
+            }
+            local_workload.max_round_records = plan.local_max_round_records;
+          } else {
+            local_workload = measurePmRemotePlaneWorkload(
+                mass.size(), particles_per_round, world_rank, world_size, routing_periodic,
+                options.assignment_scheme, m_shape, decomposition_view, density_grid_x);
+          }
+        });
+    std::uint64_t global_max_source_count = 0U;
+    std::uint64_t global_max_peer_records = 0U;
+    if (use_routing_plan) {
+      global_max_source_count = m_impl->m_density_routing_plan.global_max_count;
+      global_max_peer_records = m_impl->m_density_routing_plan.global_max_peer_records;
+    } else {
+      // Replaces the former max-source reduction: one MAX over [count, M].
+      std::array<std::uint64_t, 2U> local_maxima{
+          static_cast<std::uint64_t>(mass.size()), local_workload.max_peer_records};
+      std::array<std::uint64_t, 2U> global_maxima{};
+      measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+        requirePmMpiSuccess(
+            MPI_Allreduce(local_maxima.data(), global_maxima.data(), 2, MPI_UINT64_T,
+                          MPI_MAX, MPI_COMM_WORLD),
+            "PmSolver::assignDensity max-source/workload MPI_Allreduce");
+      });
+      global_max_source_count = global_maxima[0];
+      global_max_peer_records = global_maxima[1];
+    }
+    const PmRoutingReservation wire_reservation = pmRoutingReservation(
+        PmRoutingPhaseKind::kDensity, routing_capacity, world_size,
+        local_workload.max_round_records, global_max_peer_records);
     runPmCoordinatedPhase(
         "PmSolver::assignDensity routing preflight",
         world_rank,
@@ -3700,61 +3935,25 @@ void PmSolver::assignDensityImpl(
         [&]() {
           std::pmr::memory_resource* communication_resource = m_impl->communicationResource(
               GravityCommunicationArena::Phase::kPmDensity,
-              standalone_communication_lease);
+              standalone_communication_lease,
+              wire_reservation.phase_arena_bytes);
           exchange_storage.emplace(
               communication_resource, static_cast<std::size_t>(world_size));
           exchange_ptr = &*exchange_storage;
-          auto& prepared_exchange = *exchange_ptr;
-          const auto add_routing_metadata = [&](const auto& values) {
-            routing_metadata_capacity = checkedAddBytes(
-                routing_metadata_capacity,
-                core::ownedCapacityBytesForContainer(values),
-                "PM density routing metadata capacity");
-          };
-          add_routing_metadata(prepared_exchange.send_counts);
-          add_routing_metadata(prepared_exchange.send_displs);
-          add_routing_metadata(prepared_exchange.recv_counts);
-          add_routing_metadata(prepared_exchange.recv_displs);
-          add_routing_metadata(prepared_exchange.send_counts_bytes);
-          add_routing_metadata(prepared_exchange.send_displs_bytes);
-          add_routing_metadata(prepared_exchange.recv_counts_bytes);
-          add_routing_metadata(prepared_exchange.recv_displs_bytes);
-          add_routing_metadata(prepared_exchange.cursor);
-          routing_capacity = modelPmRoutingCapacity(
-              world_size,
-              options.routing_exchange_batch_bytes,
-              k_pm_routing_modeled_workspace_limit_bytes,
-              routing_metadata_capacity,
-              k_pm_density_plane_wire_bytes);
-          if (routing_capacity.max_send_payload_bytes >
-              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-            throw std::overflow_error("PM density routing buffer limit exceeds size_t capacity");
-          }
-          routing_buffer_limit =
-              static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
           // The phase arena is monotonic/resettable. Reserve both bounded wire
-          // maxima once so later exact-size swaps/resizes never accumulate
-          // abandoned growth blocks inside the same logical lease.
-          prepared_exchange.send_wire.reserve(routing_buffer_limit);
-          prepared_exchange.recv_wire.reserve(routing_buffer_limit);
-          particles_per_round = pmRoutingParticlesPerRound(
-              routing_capacity.effective_per_peer_payload_bytes,
-              k_pm_density_plane_wire_bytes);
+          // maxima once so later exact-size resizes never accumulate abandoned
+          // growth blocks inside the same logical lease. The reservations are
+          // workload bounds (see pmRoutingReservation), not the configured
+          // (P-1) x per-peer ceiling.
+          exchange_ptr->send_wire.reserve(static_cast<std::size_t>(wire_reservation.send_bytes));
+          exchange_ptr->recv_wire.reserve(static_cast<std::size_t>(wire_reservation.receive_bytes));
         });
     auto& exchange = *exchange_ptr;
+    // Fixed routing metadata of this phase (exact lane formula; the planned
+    // round model is built on the same value on every rank).
+    const std::uint64_t routing_metadata_capacity =
+        pmRoutingMetadataBytes(PmRoutingPhaseKind::kDensity, world_size);
     const std::uint64_t local_source_count = static_cast<std::uint64_t>(mass.size());
-    std::uint64_t global_max_source_count = 0U;
-    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
-      requirePmMpiSuccess(
-          MPI_Allreduce(
-              &local_source_count,
-              &global_max_source_count,
-              1,
-              MPI_UINT64_T,
-              MPI_MAX,
-              MPI_COMM_WORLD),
-          "PmSolver::assignDensity max-source MPI_Allreduce");
-    });
     const std::uint64_t round_capacity = static_cast<std::uint64_t>(particles_per_round);
     const std::uint64_t round_count = global_max_source_count == 0U
         ? 0U
@@ -4444,31 +4643,24 @@ void PmSolver::solvePoissonPeriodicImpl(
     auto real_values = m_impl->realGrid();
 #if COSMOSIM_ENABLE_FFTW
     const double normalization = 1.0 / static_cast<double>(m_shape.cellCount());
-    if (plan.is_distributed) {
+#else
+    const double normalization = 1.0;  // the naive inverse DFT is normalized
+#endif
+    // Padded in-place rows (real_z_stride) -> compact force/potential lanes,
+    // identical for serial and distributed slabs.
 #if COSMOSIM_HAVE_OPENMP
 #pragma omp parallel for schedule(static)
 #endif
-      for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
-        const std::size_t global_ix = plan.layout.globalXFromLocal(local_ix);
-        for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
-          const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
-          const std::size_t fftw_base = (local_ix * m_shape.ny + iy) * plan.real_z_stride;
-          for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
-            dst[compact_base + iz] = real_values[fftw_base + iz] * normalization;
-          }
+    for (std::size_t local_ix = 0; local_ix < plan.layout.local_nx(); ++local_ix) {
+      const std::size_t global_ix = plan.layout.globalXFromLocal(local_ix);
+      for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
+        const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
+        const std::size_t fftw_base = (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+        for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
+          dst[compact_base + iz] = real_values[fftw_base + iz] * normalization;
         }
       }
-    } else {
-#if COSMOSIM_HAVE_OPENMP
-#pragma omp parallel for schedule(static)
-#endif
-      for (std::size_t i = 0; i < dst.size(); ++i) {
-        dst[i] = real_values[i] * normalization;
-      }
     }
-#else
-    std::copy(real_values.begin(), real_values.end(), dst.begin());
-#endif
     if (profile != nullptr) {
       if (axis >= 0) {
         profile->inverse_axis_ms[static_cast<std::size_t>(axis)] += fft_time;
@@ -4861,6 +5053,177 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
       profile->bytes_moved += local_gather_scatter_bytes;
     }
   }
+}
+
+namespace {
+
+// Shared collective body of PmSolver::plan*Routing(). Local measurement
+// failures are folded into the single MAX reduction so every rank leaves
+// together; the agreed values are returned through `cache`.
+template <typename GridX>
+PmSolver::PmRoutingWorkloadPlan planPmRoutingCollective(
+    PmRoutingPhaseKind kind,
+    const PmGridShape& shape,
+    const PmGridStorage& grid,
+    const PmSolveOptions& options,
+    std::size_t count,
+    const GridX& grid_x,
+    std::uint64_t& global_max_count,
+    std::uint64_t& global_max_peer_records,
+    std::uint64_t& local_max_round_records) {
+  PmSolver::PmRoutingWorkloadPlan plan;
+#if COSMOSIM_ENABLE_MPI
+  const int world_size = grid.slabLayout().world_size;
+  const int world_rank = grid.slabLayout().world_rank;
+  if (world_size <= 1 || grid.ownsFullDomain()) {
+    return plan;
+  }
+  std::exception_ptr local_failure;
+  PmRoutingCapacityModel model{};
+  PmRemotePlaneWorkload local{};
+  try {
+    validateOptions(shape, options);
+    model = pmPlannedRoutingModel(kind, world_size, options.routing_exchange_batch_bytes);
+    const std::size_t particles_per_round = pmRoutingParticlesPerRound(
+        model.effective_per_peer_payload_bytes, pmRoutingWireRecordBytes(kind));
+    const PmDecompositionView decomposition_view(shape, grid.slabLayout(), options.decomposition_mode);
+    local = measurePmRemotePlaneWorkload(
+        count, particles_per_round, world_rank, world_size,
+        options.boundary_condition == PmBoundaryCondition::kPeriodic,
+        options.assignment_scheme, shape, decomposition_view, grid_x);
+  } catch (...) {
+    local_failure = std::current_exception();
+  }
+  std::array<std::uint64_t, 3U> local_maxima{
+      static_cast<std::uint64_t>(count), local.max_peer_records, local_failure ? 1U : 0U};
+  std::array<std::uint64_t, 3U> global_maxima{};
+  requirePmMpiSuccess(
+      MPI_Allreduce(local_maxima.data(), global_maxima.data(), 3, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD),
+      "PmSolver routing workload plan MPI_Allreduce");
+  if (global_maxima[2] != 0U) {
+    if (local_failure) std::rethrow_exception(local_failure);
+    throw std::runtime_error("PM routing workload planning failed on a peer rank");
+  }
+  global_max_count = global_maxima[0];
+  global_max_peer_records = global_maxima[1];
+  local_max_round_records = local.max_round_records;
+  const PmRoutingReservation reservation = pmRoutingReservation(
+      kind, model, world_size, local.max_round_records, global_max_peer_records);
+  plan.distributed = true;
+  plan.phase_arena_bytes = reservation.phase_arena_bytes;
+  plan.send_reservation_bytes = reservation.send_bytes;
+  plan.receive_reservation_bytes = reservation.receive_bytes;
+  plan.configured_ceiling_bytes = checkedAddBytes(
+      model.max_send_payload_bytes, model.max_receive_payload_bytes, "PM routing configured ceiling");
+  plan.global_max_peer_records = global_max_peer_records;
+#else
+  static_cast<void>(kind); static_cast<void>(shape); static_cast<void>(grid);
+  static_cast<void>(options); static_cast<void>(count); static_cast<void>(grid_x);
+  static_cast<void>(global_max_count); static_cast<void>(global_max_peer_records);
+  static_cast<void>(local_max_round_records);
+#endif
+  return plan;
+}
+
+}  // namespace
+
+PmSolver::PmRoutingWorkloadPlan PmSolver::planDensityRouting(
+    const PmGridStorage& grid,
+    std::span<const double> pos_x,
+    std::span<const double> pos_y,
+    std::span<const double> pos_z,
+    std::span<const double> mass,
+    const PmSolveOptions& options) const {
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
+  const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+  const auto grid_x = [&](std::size_t p) -> std::optional<double> {
+    // Non-finite sources are rejected collectively by assignDensity itself.
+    if (!std::isfinite(pos_x[p]) || !std::isfinite(pos_y[p]) || !std::isfinite(pos_z[p])) {
+      return std::nullopt;
+    }
+    if (!periodic &&
+        (!positionInsideOpenDomain(pos_x[p], lengths.lx) ||
+         !positionInsideOpenDomain(pos_y[p], lengths.ly) ||
+         !positionInsideOpenDomain(pos_z[p], lengths.lz))) {
+      return std::nullopt;
+    }
+    return (periodic ? wrapPosition(pos_x[p], lengths.lx) : pos_x[p]) * inv_dx;
+  };
+  if (pos_y.size() != pos_x.size() || pos_z.size() != pos_x.size() || mass.size() != pos_x.size()) {
+    throw std::invalid_argument("PmSolver::planDensityRouting source extents must match");
+  }
+  auto& cache = m_impl->m_density_routing_plan;
+  cache = {};
+  std::uint64_t global_max_count = 0U, global_max_peer_records = 0U, local_max_round_records = 0U;
+  const PmRoutingWorkloadPlan plan = planPmRoutingCollective(
+      PmRoutingPhaseKind::kDensity, m_shape, grid, options, mass.size(), grid_x,
+      global_max_count, global_max_peer_records, local_max_round_records);
+  if (plan.distributed) {
+    cache = Impl::RoutingWorkloadPlanCache{
+        .valid = true,
+        .x_data = pos_x.data(),
+        .index_data = nullptr,
+        .count = mass.size(),
+        .configured_batch_bytes = options.routing_exchange_batch_bytes,
+        .global_max_count = global_max_count,
+        .global_max_peer_records = global_max_peer_records,
+        .local_max_round_records = local_max_round_records,
+    };
+  }
+  return plan;
+}
+
+PmSolver::PmRoutingWorkloadPlan PmSolver::planForceInterpolationRouting(
+    const PmGridStorage& grid,
+    const PmForceTargetView& target_view,
+    const PmSolveOptions& options) const {
+  const bool indexed = target_view.coordinate_layout == PmForceCoordinateLayout::kIndexedSource;
+  const std::size_t count = indexed ? target_view.coordinate_source_index.size()
+                                    : target_view.pos_x_comoving.size();
+  const auto pos_x = target_view.pos_x_comoving;
+  const auto pos_y = target_view.pos_y_comoving;
+  const auto pos_z = target_view.pos_z_comoving;
+  if (pos_y.size() != pos_x.size() || pos_z.size() != pos_x.size()) {
+    throw std::invalid_argument("PmSolver::planForceInterpolationRouting coordinate extents must match");
+  }
+  const BoxLengths lengths = effectiveBoxLengths(options);
+  const double inv_dx = static_cast<double>(m_shape.nx) / lengths.lx;
+  const bool periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+  const auto grid_x = [&](std::size_t p) -> std::optional<double> {
+    const std::size_t row = indexed ? static_cast<std::size_t>(target_view.coordinate_source_index[p]) : p;
+    if (row >= pos_x.size() ||
+        !std::isfinite(pos_x[row]) || !std::isfinite(pos_y[row]) || !std::isfinite(pos_z[row])) {
+      return std::nullopt;  // rejected collectively by interpolateForces itself
+    }
+    if (!periodic &&
+        (!positionInsideOpenDomain(pos_x[row], lengths.lx) ||
+         !positionInsideOpenDomain(pos_y[row], lengths.ly) ||
+         !positionInsideOpenDomain(pos_z[row], lengths.lz))) {
+      return std::nullopt;
+    }
+    return (periodic ? wrapPosition(pos_x[row], lengths.lx) : pos_x[row]) * inv_dx;
+  };
+  auto& cache = m_impl->m_force_routing_plan;
+  cache = {};
+  std::uint64_t global_max_count = 0U, global_max_peer_records = 0U, local_max_round_records = 0U;
+  const PmRoutingWorkloadPlan plan = planPmRoutingCollective(
+      PmRoutingPhaseKind::kForceInterpolation, m_shape, grid, options, count, grid_x,
+      global_max_count, global_max_peer_records, local_max_round_records);
+  if (plan.distributed) {
+    cache = Impl::RoutingWorkloadPlanCache{
+        .valid = true,
+        .x_data = pos_x.data(),
+        .index_data = indexed && !target_view.coordinate_source_index.empty()
+            ? static_cast<const void*>(target_view.coordinate_source_index.data()) : nullptr,
+        .count = count,
+        .configured_batch_bytes = options.routing_exchange_batch_bytes,
+        .global_max_count = global_max_count,
+        .global_max_peer_records = global_max_peer_records,
+        .local_max_round_records = local_max_round_records,
+    };
+  }
+  return plan;
 }
 
 void PmSolver::interpolateForces(
@@ -5306,10 +5669,81 @@ void PmSolver::interpolateForcesImpl(
     std::optional<GravityCommunicationArena::Lease> standalone_communication_lease;
     std::optional<Impl::PlaneInterpolationExchangeBuffers> exchange_storage;
     Impl::PlaneInterpolationExchangeBuffers* exchange_ptr = nullptr;
-    std::uint64_t routing_metadata_capacity = 0U;
     PmRoutingCapacityModel routing_capacity{};
     std::size_t routing_buffer_limit = 0U;
     std::size_t particles_per_round = 0U;
+    const bool routing_periodic = options.boundary_condition == PmBoundaryCondition::kPeriodic;
+    const auto target_grid_x = [&](std::size_t p) -> std::optional<double> {
+      const std::size_t source_row = coordinate_row(p);
+      if (!routing_periodic &&
+          (!positionInsideOpenDomain(pos_x[source_row], lengths.lx) ||
+           !positionInsideOpenDomain(pos_y[source_row], lengths.ly) ||
+           !positionInsideOpenDomain(pos_z[source_row], lengths.lz))) {
+        return std::nullopt;
+      }
+      return (routing_periodic ? wrapPosition(pos_x[source_row], lengths.lx) : pos_x[source_row]) * inv_dx;
+    };
+    bool use_routing_plan = false;
+    PmRemotePlaneWorkload local_workload{};
+    runPmCoordinatedPhase(
+        "PmSolver::interpolateForces routing workload",
+        world_rank,
+        world_size,
+        routed_mpi_wait_ms,
+        [&]() {
+          routing_capacity = pmPlannedRoutingModel(
+              PmRoutingPhaseKind::kForceInterpolation, world_size, options.routing_exchange_batch_bytes);
+          if (routing_capacity.max_send_payload_bytes >
+              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+            throw std::overflow_error("PM force routing buffer limit exceeds size_t capacity");
+          }
+          routing_buffer_limit =
+              static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
+          particles_per_round = pmRoutingParticlesPerRound(
+              routing_capacity.effective_per_peer_payload_bytes,
+              k_pm_plane_interpolation_request_wire_bytes);
+          auto& plan = m_impl->m_force_routing_plan;
+          use_routing_plan = plan.valid;
+          if (use_routing_plan) {
+            plan.valid = false;  // consumed exactly once
+            const void* index_data = coordinate_source_index.empty()
+                ? nullptr : static_cast<const void*>(coordinate_source_index.data());
+            if (plan.x_data != pos_x.data() || plan.index_data != index_data ||
+                plan.count != target_count ||
+                plan.configured_batch_bytes != options.routing_exchange_batch_bytes) {
+              throw std::logic_error("PM force routing plan does not describe this interpolation");
+            }
+            local_workload.max_round_records = plan.local_max_round_records;
+          } else {
+            local_workload = measurePmRemotePlaneWorkload(
+                target_count, particles_per_round, world_rank, world_size, routing_periodic,
+                options.assignment_scheme, m_shape, decomposition_view, target_grid_x);
+          }
+        });
+    const std::uint64_t local_target_count = static_cast<std::uint64_t>(target_count);
+    std::uint64_t global_max_target_count = 0U;
+    std::uint64_t global_max_peer_records = 0U;
+    if (use_routing_plan) {
+      global_max_target_count = m_impl->m_force_routing_plan.global_max_count;
+      global_max_peer_records = m_impl->m_force_routing_plan.global_max_peer_records;
+    } else {
+      // Replaces the former max-target reduction: one MAX over [count, M].
+      std::array<std::uint64_t, 2U> local_maxima{local_target_count, local_workload.max_peer_records};
+      std::array<std::uint64_t, 2U> global_maxima{};
+      measurePmMpiWait(routed_mpi_wait_ms, [&]() {
+        requirePmMpiSuccess(
+            MPI_Allreduce(local_maxima.data(), global_maxima.data(), 2, MPI_UINT64_T,
+                          MPI_MAX, MPI_COMM_WORLD),
+            "PmSolver::interpolateForces max-target/workload MPI_Allreduce");
+      });
+      global_max_target_count = global_maxima[0];
+      global_max_peer_records = global_maxima[1];
+    }
+    // Responses (64 B) are compacted in place inside the request buffers
+    // (96 B), so the request bounds also bound the response traffic.
+    const PmRoutingReservation wire_reservation = pmRoutingReservation(
+        PmRoutingPhaseKind::kForceInterpolation, routing_capacity, world_size,
+        local_workload.max_round_records, global_max_peer_records);
     runPmCoordinatedPhase(
         "PmSolver::interpolateForces routing preflight",
         world_rank,
@@ -5318,65 +5752,17 @@ void PmSolver::interpolateForcesImpl(
         [&]() {
           std::pmr::memory_resource* communication_resource = m_impl->communicationResource(
               GravityCommunicationArena::Phase::kPmInterpolation,
-              standalone_communication_lease);
+              standalone_communication_lease,
+              wire_reservation.phase_arena_bytes);
           exchange_storage.emplace(
               communication_resource, static_cast<std::size_t>(world_size));
           exchange_ptr = &*exchange_storage;
-          auto& prepared_exchange = *exchange_ptr;
-          const auto add_routing_metadata = [&](const auto& values) {
-            routing_metadata_capacity = checkedAddBytes(
-                routing_metadata_capacity,
-                core::ownedCapacityBytesForContainer(values),
-                "PM force routing metadata capacity");
-          };
-          add_routing_metadata(prepared_exchange.send_counts);
-          add_routing_metadata(prepared_exchange.send_displs);
-          add_routing_metadata(prepared_exchange.recv_counts);
-          add_routing_metadata(prepared_exchange.recv_displs);
-          add_routing_metadata(prepared_exchange.send_counts_bytes);
-          add_routing_metadata(prepared_exchange.send_displs_bytes);
-          add_routing_metadata(prepared_exchange.recv_counts_bytes);
-          add_routing_metadata(prepared_exchange.recv_displs_bytes);
-          add_routing_metadata(prepared_exchange.send_response_counts_bytes);
-          add_routing_metadata(prepared_exchange.send_response_displs_bytes);
-          add_routing_metadata(prepared_exchange.recv_response_counts_bytes);
-          add_routing_metadata(prepared_exchange.recv_response_displs_bytes);
-          add_routing_metadata(prepared_exchange.cursor);
-          routing_capacity = modelPmRoutingCapacity(
-              world_size,
-              options.routing_exchange_batch_bytes,
-              k_pm_routing_modeled_workspace_limit_bytes,
-              routing_metadata_capacity,
-              k_pm_plane_interpolation_request_wire_bytes);
-          if (routing_capacity.max_send_payload_bytes >
-              static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-            throw std::overflow_error("PM force routing buffer limit exceeds size_t capacity");
-          }
-          routing_buffer_limit =
-              static_cast<std::size_t>(routing_capacity.max_send_payload_bytes);
-          // The phase arena is monotonic/resettable. Reserve both bounded wire
-          // maxima once so later exact-size swaps/resizes never accumulate
-          // abandoned growth blocks inside the same logical lease.
-          prepared_exchange.send_wire.reserve(routing_buffer_limit);
-          prepared_exchange.recv_wire.reserve(routing_buffer_limit);
-          particles_per_round = pmRoutingParticlesPerRound(
-              routing_capacity.effective_per_peer_payload_bytes,
-              k_pm_plane_interpolation_request_wire_bytes);
+          exchange_ptr->send_wire.reserve(static_cast<std::size_t>(wire_reservation.send_bytes));
+          exchange_ptr->recv_wire.reserve(static_cast<std::size_t>(wire_reservation.receive_bytes));
         });
     auto& exchange = *exchange_ptr;
-    const std::uint64_t local_target_count = static_cast<std::uint64_t>(target_count);
-    std::uint64_t global_max_target_count = 0U;
-    measurePmMpiWait(routed_mpi_wait_ms, [&]() {
-      requirePmMpiSuccess(
-          MPI_Allreduce(
-              &local_target_count,
-              &global_max_target_count,
-              1,
-              MPI_UINT64_T,
-              MPI_MAX,
-              MPI_COMM_WORLD),
-          "PmSolver::interpolateForces max-target MPI_Allreduce");
-    });
+    const std::uint64_t routing_metadata_capacity =
+        pmRoutingMetadataBytes(PmRoutingPhaseKind::kForceInterpolation, world_size);
     const std::uint64_t round_capacity = static_cast<std::uint64_t>(particles_per_round);
     const std::uint64_t round_count = global_max_target_count == 0U
         ? 0U

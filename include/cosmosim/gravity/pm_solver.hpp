@@ -109,6 +109,8 @@ struct PmGridShape {
 // Backend-internal FFTW/cuFFT allocations are intentionally excluded and must
 // be carried as an explicit external reserve by the production memory policy.
 struct PmPlanResourcesMemoryEstimate {
+  // Zero since the 2026-10-25 in-place layout: the padded real view aliases
+  // the first complex spectral array (real_view_aliases_complex).
   std::uint64_t real_array_bytes = 0U;
   std::uint64_t complex_spectral_array_bytes = 0U;
   // Full scalar spectral operators are not retained after M48-09. This field
@@ -121,6 +123,7 @@ struct PmPlanResourcesMemoryEstimate {
   std::uint64_t logical_local_complex_cells = 0U;
   std::uint64_t allocated_local_complex_cells = 0U;
   bool used_backend_allocation_query = false;
+  bool real_view_aliases_complex = false;
 };
 
 [[nodiscard]] PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
@@ -499,6 +502,34 @@ class PmSolver {
       const PmForceTargetView& target_view,
       const PmSolveOptions& options,
       PmProfileEvent* profile = nullptr) const;
+
+  // Workload-aware distributed routing (2026-10-25). Collective on
+  // MPI_COMM_WORLD for distributed slabs (one MAX reduction that replaces the
+  // routing call's own max-count reduction); returns zeros for serial meshes.
+  // Measures this rank's remote x-plane records per peer per round, agrees on
+  // the global per-peer maximum, caches the agreement for the next
+  // assignDensity*/interpolateForces call on the same arrays (consumed once),
+  // and returns the communication-arena bytes that phase will need, so the
+  // caller can grow its arena at the idle boundary before leasing.
+  struct PmRoutingWorkloadPlan {
+    std::uint64_t phase_arena_bytes = 0U;
+    std::uint64_t send_reservation_bytes = 0U;
+    std::uint64_t receive_reservation_bytes = 0U;
+    std::uint64_t configured_ceiling_bytes = 0U;  // former (P-1) x per-peer send+receive
+    std::uint64_t global_max_peer_records = 0U;
+    bool distributed = false;
+  };
+  [[nodiscard]] PmRoutingWorkloadPlan planDensityRouting(
+      const PmGridStorage& grid,
+      std::span<const double> pos_x,
+      std::span<const double> pos_y,
+      std::span<const double> pos_z,
+      std::span<const double> mass,
+      const PmSolveOptions& options) const;
+  [[nodiscard]] PmRoutingWorkloadPlan planForceInterpolationRouting(
+      const PmGridStorage& grid,
+      const PmForceTargetView& target_view,
+      const PmSolveOptions& options) const;
 
   void interpolateForces(
       const PmGridStorage& grid,

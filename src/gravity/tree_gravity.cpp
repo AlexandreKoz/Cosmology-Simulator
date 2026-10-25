@@ -423,6 +423,7 @@ void TreeGravitySolver::build(
     const TreeBuildGeneration next_generation =
         nextGravityIdentity(m_tree_build_generation, "Tree build generation overflow");
     m_tree_build_generation = next_generation;
+    m_topology_generation = ++m_topology_generation_counter;
     m_construction_in_progress = false;
     m_build_valid = true;
     if (profile != nullptr) {
@@ -497,6 +498,7 @@ void TreeGravitySolver::build(
   const TreeBuildGeneration next_generation =
       nextGravityIdentity(m_tree_build_generation, "Tree build generation overflow");
   m_tree_build_generation = next_generation;
+  m_topology_generation = ++m_topology_generation_counter;
   m_construction_in_progress = false;
   m_build_valid = true;
 
@@ -834,6 +836,10 @@ const TreeMortonOrdering& TreeGravitySolver::ordering() const {
   return m_ordering;
 }
 
+std::uint64_t TreeGravitySolver::topologyGeneration() const noexcept {
+  return m_build_valid && !m_construction_in_progress ? m_topology_generation : 0U;
+}
+
 TreeBuildGeneration TreeGravitySolver::treeBuildGeneration() const noexcept {
   return m_tree_build_generation;
 }
@@ -1013,6 +1019,8 @@ TreeGravitySolver::ConstructionScratchView TreeGravitySolver::beginConstructionW
 
   m_construction_source_count = source_count;
   m_construction_in_progress = true;
+  // A new topology is being built: topology-keyed caches must not match.
+  m_topology_generation = 0U;
   return ConstructionScratchView{
       .key_primary = m_ordering.morton_key,
       .key_scratch = m_morton_key_scratch,

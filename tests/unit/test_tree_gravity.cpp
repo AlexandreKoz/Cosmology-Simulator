@@ -581,16 +581,15 @@ void testPmPlanRankLocalGeometryAndOverflow() {
         item.shape.nx, item.shape.ny, item.shape.nz, item.ranks, item.rank);
     CHUI_REQUIRE(layout.owned_x.begin_x == item.begin_x && layout.owned_x.end_x == item.end_x);
     const auto estimate = cosmosim::gravity::estimatePmPlanResourcesMemory(item.shape, layout, item.mode);
-    const auto real_elements = item.ranks == 1
-        ? item.shape.nx * item.shape.ny * item.shape.nz : 2U * item.allocated_complex;
     const auto axes = 2U * (item.shape.nx + item.shape.ny + item.shape.nz / 2U + 1U);
     CHUI_REQUIRE(estimate.logical_local_complex_cells == item.logical_complex);
     CHUI_REQUIRE(estimate.allocated_local_complex_cells == item.allocated_complex);
-    CHUI_REQUIRE(estimate.real_array_bytes == real_elements * sizeof(double));
+    // In-place layout: the padded real view aliases the first complex array.
+    CHUI_REQUIRE(estimate.real_array_bytes == 0U && estimate.real_view_aliases_complex);
     CHUI_REQUIRE(estimate.complex_spectral_array_bytes == 2U * item.allocated_complex * sizeof(std::complex<double>));
     CHUI_REQUIRE(estimate.scalar_spectral_array_bytes == 0U);
     CHUI_REQUIRE(estimate.spectral_axis_metadata_bytes == axes * sizeof(double));
-    CHUI_REQUIRE(estimate.total_owned_bytes == real_elements * sizeof(double) +
+    CHUI_REQUIRE(estimate.total_owned_bytes ==
         2U * item.allocated_complex * sizeof(std::complex<double>) + axes * sizeof(double));
     CHUI_REQUIRE(!estimate.used_backend_allocation_query);
   }
@@ -655,14 +654,15 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
   const auto serial_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
       shape, serial_layout, cosmosim::core::PmDecompositionMode::kSlab);
   // Derived from PlanResources allocation sites, not estimator output:
-  // serial real[nx*ny*nz], fourier + potential_k[nx*ny*(nz/2+1)],
+  // fourier + potential_k[nx*ny*(nz/2+1)] (real is an aliased view),
   // k and assignment-window metadata on each GLOBAL spectral axis.
-  constexpr std::uint64_t serial_real_cells = 32ULL * 32ULL * 32ULL;
+  // In-place layout (2026-10-25): the padded real view aliases fourier, so
+  // only fourier + potential_k[nx*ny*(nz/2+1)] are owned.
   constexpr std::uint64_t serial_complex_cells = 32ULL * 32ULL * 17ULL;
   constexpr std::uint64_t axis_bytes = 2ULL * (32ULL + 32ULL + 17ULL) * sizeof(double);
-  const std::uint64_t expected_serial = serial_real_cells * sizeof(double) +
+  const std::uint64_t expected_serial =
       2ULL * serial_complex_cells * sizeof(std::complex<double>) + axis_bytes;
-  CHUI_REQUIRE(serial_plan.real_array_bytes == serial_real_cells * sizeof(double));
+  CHUI_REQUIRE(serial_plan.real_array_bytes == 0U);
   CHUI_REQUIRE(serial_plan.complex_spectral_array_bytes == 2ULL * serial_complex_cells * sizeof(std::complex<double>));
   CHUI_REQUIRE(serial_plan.scalar_spectral_array_bytes == 0U);
   CHUI_REQUIRE(serial_plan.spectral_axis_metadata_bytes == axis_bytes);
@@ -677,10 +677,9 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
       shape, rank3_layout, cosmosim::core::PmDecompositionMode::kSlab);
   constexpr std::uint64_t distributed_complex_cells = 4ULL * 32ULL * 17ULL;
   const std::uint64_t expected_distributed =
-      2ULL * distributed_complex_cells * sizeof(double) +
       2ULL * distributed_complex_cells * sizeof(std::complex<double>) + axis_bytes;
   CHUI_REQUIRE(distributed_plan.total_owned_bytes == expected_distributed);
-  CHUI_REQUIRE(distributed_plan.real_array_bytes == 2ULL * distributed_complex_cells * sizeof(double));
+  CHUI_REQUIRE(distributed_plan.real_array_bytes == 0U);
   CHUI_REQUIRE(distributed_plan.complex_spectral_array_bytes == 2ULL * distributed_complex_cells * sizeof(std::complex<double>));
   CHUI_REQUIRE(distributed_plan.spectral_axis_metadata_bytes == axis_bytes);
   CHUI_REQUIRE(distributed_plan.scalar_spectral_array_bytes == 0U);
@@ -689,7 +688,7 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
   CHUI_REQUIRE(!distributed_plan.used_backend_allocation_query);
 
   // Planning only: no 512^3 buffers are allocated. One 64-plane MPI slab
-  // retains padded real[2*A] and TWO complex[A] arrays, plus global axis data.
+  // retains TWO complex[A] arrays (the padded real view aliases the first).
   const cosmosim::gravity::PmGridShape first_light_shape{512U, 512U, 512U};
   const auto first_light_layout = cosmosim::parallel::makePmSlabLayout(512, 512, 512, 8, 0);
   const auto first_light_plan = cosmosim::gravity::estimatePmPlanResourcesMemory(
@@ -697,7 +696,6 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
   constexpr std::uint64_t first_light_complex = 64ULL * 512ULL * 257ULL;
   constexpr std::uint64_t first_light_axes = 2ULL * (512ULL + 512ULL + 257ULL) * sizeof(double);
   const std::uint64_t first_light_expected =
-      2ULL * first_light_complex * sizeof(double) +
       2ULL * first_light_complex * sizeof(std::complex<double>) + first_light_axes;
   CHUI_REQUIRE(first_light_plan.total_owned_bytes == first_light_expected);
   CHUI_REQUIRE(first_light_plan.logical_local_complex_cells == first_light_complex);
@@ -706,7 +704,6 @@ void testPmPlanResourcesAndDmoProcessPreflight() {
       first_light_shape, cosmosim::parallel::makePmSlabLayout(512, 512, 512, 1, 0),
       cosmosim::core::PmDecompositionMode::kSlab);
   CHUI_REQUIRE(first_light_serial.total_owned_bytes ==
-      512ULL * 512ULL * 512ULL * sizeof(double) +
       2ULL * 512ULL * 512ULL * 257ULL * sizeof(std::complex<double>) + first_light_axes);
 
   const auto gravity_estimate = cosmosim::gravity::estimateGravityMemory({

@@ -9,6 +9,12 @@ reductions, independent checkpoint cadence, structural snapshot verification
 and `numerics.gravity_timestep_eta`. See the
 [campaign record](repair/treepm_optimization_campaign_20261025.md) for the
 implementation matrix, risks and validation checklist.
+Round 2 of the same campaign (also NOT compiled, NOT tested): batched rank
+consensus (one MIN allreduce of `[v, ~v]`) for gravity entry/PM decisions,
+tree topology-generation caches, stable radix target ordering, in-place FFTW
+PM storage, workload-aware PM routing reserves, remote LET group walk,
+experimental `numerics.treepm_pm_reuse_policy = stale_within_cadence`,
+`output.restart_interval_time_code`, and uniform-mass lane release.
 
 20261015 TreePM performance campaign: tree-ordered residual traversal
 (bitwise-identical forces), threaded FFTW, opt-in adaptive estimator and

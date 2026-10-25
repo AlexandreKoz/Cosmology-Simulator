@@ -1003,8 +1003,25 @@ that leaf; surviving tree-contiguous leaves are re-coalesced for the
 vectorized pair kernel. `numerics.treepm_group_walk_target_size` (0 = legacy
 one-leaf groups) groups up to N tree-order targets within one residual block
 and an AABB extent of `0.5 r_cut`. Owned targets use the group walk in both
-the local-only and the distributed (LET-overlapped) residual paths; incoming
-remote targets keep the per-target walk. `gravity.treepm_let` events report
+the local-only and the distributed (LET-overlapped) residual paths. Incoming
+remote LET targets are grouped per peer after a Morton sort (21 bits per axis
+on a lattice of the group extent) and use the same group evaluator through a
+sample/emit adapter; ineligible groups fall back to the per-target walk
+(`incoming_group_walk_*` counters).
+
+Round 2 (2026-10-25, unqualified): the tree exposes `topologyGeneration()`
+(changes only on full builds, unchanged by certified refits), so the
+row → tree-position map and the group-walk leaf map are rebuilt only on
+topology change (`topology_cache_rebuilds/reuses`). Large target visit orders
+use a stable two-pass 16-bit radix sort. Uniform-mass source populations
+release the tree-order mass lane and pass the species mass as a scalar
+(same per-pair expression, bitwise identical). PM particle routing reserves
+are sized from the measured remote x-plane workload (per-peer per-round
+record maxima, rank-independent round model) via `planDensityRouting` /
+`planForceInterpolationRouting`, planned before the communication arena is
+configured; the PM-only path measures and reduces locally. The PM backend
+works in place (`real` aliases the padded `fourier` array, rows of
+`2(nz/2+1)` doubles). `gravity.treepm_let` events report
 `group_walk_status`, groups, grouped/fallback targets by reason, candidate and
 culled leaves and candidate particles. The PM long-range force may use the
 opt-in `numerics.treepm_pm_force_gradient = finite_difference_4` backend

@@ -1507,9 +1507,21 @@ void testOutputCodeTimeCadenceValidationAndRoundtrip() {
   CHUI_REQUIRE(cosmosim::core::loadFrozenConfigFromString(
       independent.normalized_text, "independent_checkpoint_roundtrip").normalized_text ==
       independent.normalized_text);
+  // Code-time checkpoint cadence (independent of the step cadence).
+  CHUI_REQUIRE(aggregated.config.output.restart_interval_time_code == 0.0);
+  const auto timed = cosmosim::core::loadFrozenConfigFromString(
+      "[mode]\nmode = zoom_in\n[output]\n"
+      "restart_interval_time_code = 0.125\n",
+      "time_checkpoint_cadence");
+  CHUI_REQUIRE(timed.config.output.restart_interval_time_code == 0.125);
+  CHUI_REQUIRE(cosmosim::core::loadFrozenConfigFromString(
+      timed.normalized_text, "time_checkpoint_roundtrip").normalized_text ==
+      timed.normalized_text);
   for (const char* invalid : {
            "restart_interval_steps = -1\n",
            "restart_interval_steps = 8\nwrite_restarts = false\n",
+           "restart_interval_time_code = -0.5\n",
+           "restart_interval_time_code = 0.5\nwrite_restarts = false\n",
            "snapshot_verification = none\n"}) {
     bool rejected = false;
     try {
@@ -1636,6 +1648,25 @@ void testTreePmProductionTuningRoundTrip() {
     CHUI_REQUIRE(loadFrozenConfigFromString(no_encounter.normalized_text, "encounter_replay").normalized_text ==
         no_encounter.normalized_text);
     requireNumericsRejected(baseline.normalized_text, "hierarchical_encounter_timestep_enabled", "maybe");
+  }
+  // PM reuse policy: exact reference keeps cadence 1; the experimental
+  // stale-window policy admits cadence in [2,64] for global KDK only.
+  CHUI_REQUIRE(baseline.config.numerics.treepm_pm_reuse_policy ==
+      cosmosim::core::TreePmPmReusePolicy::kExactSourceState);
+  CHUI_REQUIRE(baseline.normalized_text.find("treepm_pm_reuse_policy = exact") != std::string::npos);
+  requireNumericsRejected(baseline.normalized_text, "treepm_update_cadence_steps", "2");
+  {
+    auto stale_text = withNumericsValue(baseline.normalized_text, "treepm_pm_reuse_policy", "stale_within_cadence");
+    stale_text = withNumericsValue(stale_text, "treepm_update_cadence_steps", "4");
+    const auto stale = loadFrozenConfigFromString(stale_text, "pm_stale_reuse");
+    CHUI_REQUIRE(stale.config.numerics.treepm_pm_reuse_policy ==
+        cosmosim::core::TreePmPmReusePolicy::kStaleWithinCadence);
+    CHUI_REQUIRE(stale.config.numerics.treepm_update_cadence_steps == 4);
+    CHUI_REQUIRE(loadFrozenConfigFromString(stale.normalized_text, "pm_stale_replay").normalized_text ==
+        stale.normalized_text);
+    for (const auto value : {"1", "65"})
+      requireNumericsRejected(stale.normalized_text, "treepm_update_cadence_steps", value, "treepm_pm_reuse_policy");
+    requireNumericsRejected(baseline.normalized_text, "treepm_pm_reuse_policy", "sometimes");
   }
   // Gravity timestep accuracy coefficient: historical 0.2 default, typed
   // finite (0, 1] range, normalized round trip.

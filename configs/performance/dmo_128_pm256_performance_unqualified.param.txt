@@ -78,7 +78,7 @@ treepm_full_residual_lookup_enabled = false
 treepm_leaf_simd_enabled = false
 treepm_radial_coefficients_enabled = true
 treepm_identical_source_tree_reuse_enabled = false
-treepm_topology_refit_enabled = false
+treepm_topology_refit_enabled = true
 treepm_residual_block_size = 64
 treepm_tree_max_leaf_size = 8
 
