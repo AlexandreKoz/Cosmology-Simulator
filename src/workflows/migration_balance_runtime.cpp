@@ -2234,7 +2234,7 @@ struct CompactDmoMigrationCommitResult {
       source_storage.emplace(state, world_rank, active_particle_indices);
       source_view = source_storage->view();
       for (std::size_t particle = 0; particle < source_view.particle_count; ++particle) {
-        const std::uint32_t species = source_view.particle_species_tag[particle];
+        const std::uint32_t species = source_view.particleSpeciesTag(particle);
         if (species >= source_view.particle_memory_bytes_by_species.size()) {
           throw std::invalid_argument("runtime compact source species exceeds memory table");
         }
