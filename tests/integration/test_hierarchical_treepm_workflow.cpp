@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <vector>
 #include <utility>
@@ -343,6 +344,9 @@ void run(int rank,int ranks,std::uint64_t token) {
         require(block.time_end_code>block.time_begin_code);
         require(block.pm_cycle_opening_time_code<=block.time_begin_code && block.time_end_code<=block.pm_cycle_end_time_code);
         require(block.pm_cycle_end_time_code<=4e-5);
+        // The accepted PM interval honours the displacement criterion at every block.
+        require(block.pm_cycle_end_time_code-block.pm_cycle_opening_time_code<=
+                block.pm_displacement_limit_time_code*(1.0+1e-12));
         require(same_on_all_ranks(block.time_end_code) && same_on_all_ranks(block.quantum_time_code));
         if (block.opens_pm_cycle) require(block.pm_cycle_block_index==0U && block.time_begin_code==block.pm_cycle_opening_time_code);
         if (block.closes_pm_cycle) { require(block.time_end_code==block.pm_cycle_end_time_code); ++closed; }
@@ -471,6 +475,10 @@ void run(int rank,int ranks,std::uint64_t token) {
       check_blocks(forced.first);
       require(forced.first.multirate_forced_test_rollbacks>0U);
       require(forced.first.multirate_pm_cycle_rollbacks>=forced.first.multirate_forced_test_rollbacks);
+      require(forced.first.multirate_rejected_blocks>=forced.first.multirate_forced_test_rollbacks);
+      // Rejected attempts are excluded from the trajectory diagnostics.
+      require(refreshes(forced.first)==full4.refreshes);
+      require(forced.first.treepm_long_range_refresh_count==full4.last.first.treepm_long_range_refresh_count);
       same_schedule(forced.first.hierarchical_block_records,full4.records);
       same_endpoint(forced.second,full4.last.second,1e-22);
       // Generation-keyed tree reuse/refit may sum in a different order after
@@ -506,6 +514,74 @@ void run(int rank,int ranks,std::uint64_t token) {
       require(global_error[level]<=global_error[level-1U]+1e-18);
       // Below roundoff the splitting error carries no order information.
       if (splitting_error[level-1U]>1e-24) require(splitting_error[level]<splitting_error[level-1U]);
+    }
+
+    // (6) Genuine PM-displacement rejection (no test seam). Particles start
+    // at rest, so the RMS displacement criterion is unbounded when the first
+    // cycle opens (T = 4 blocks) and finite once gravity has accelerated them.
+    // The criterion is linear in its factor and the dynamics before the first
+    // interior boundary t1 do not depend on it, so a calibration run at factor
+    // 1 (bound D1 at t1) fixes factor = 1.5 t1 / D1: the interior re-check at
+    // t1 then sees 1.5 t1 < T and must reject, roll back and retry with
+    // T = 1.5 t1, which the same re-check accepts.
+    {
+      const auto set_key=[](std::string text,const std::string& key,const std::string& value) {
+        const auto position=text.find("\n"+key+" = ");
+        require(position!=std::string::npos);
+        const auto line_end=text.find('\n',position+1U);
+        text.replace(position+1U,line_end-(position+1U),key+" = "+value);
+        return text;
+      };
+      const auto rejecting_runner=[&](double factor) {
+        std::ostringstream value;
+        value<<std::setprecision(17)<<factor;
+        auto text=set_key(hierarchical_config.normalized_text,"hierarchical_coarse_displacement_criterion","rms_split_scale");
+        text=set_key(text,"hierarchical_coarse_rms_displacement_factor",value.str());
+        return workflows::ReferenceWorkflowRunner(multirate_config_with(4,text,"multirate_m4_genuine_rejection"));
+      };
+      auto at_rest=initial;
+      for (auto* lane:{&at_rest.particles.velocity_x_peculiar,&at_rest.particles.velocity_y_peculiar,&at_rest.particles.velocity_z_peculiar}) {
+        std::fill(lane->begin(),lane->end(),0.0);
+      }
+      const auto run_at_rest=[&](const workflows::ReferenceWorkflowRunner& runner,const char* label) {
+        const auto report=runner.run(scratch.root()/label,workflows::ReferenceWorkflowOptions{
+            .dt_time_code=1e-5,.write_outputs=true,.initial_state_override=&at_rest});
+        require(report.restart_roundtrip_ok);
+        return std::pair{report,io::readRestartCheckpointHdf5(report.restart_path)};
+      };
+      const auto calibration_runner=rejecting_runner(1.0);
+      auto calibration=run_at_rest(calibration_runner,"multirate_rejection_calibration");
+      check_blocks(calibration.first);
+      const Record* first_interior=nullptr;
+      for (const auto& block:calibration.first.hierarchical_block_records) {
+        if (block.time_begin_code>0.0) { first_interior=&block; break; }
+      }
+      require(first_interior!=nullptr && std::isfinite(first_interior->pm_displacement_limit_time_code) &&
+              first_interior->pm_displacement_limit_time_code>0.0);
+      const double factor=1.5*first_interior->time_begin_code/first_interior->pm_displacement_limit_time_code;
+      require(std::isfinite(factor) && factor>0.0);
+      // factor >= 1: the calibration run itself already rejected at t1.
+      const auto rejecting=rejecting_runner(std::min(factor,1.0));
+      const auto run_rejecting=[&](const char* label) { return run_at_rest(rejecting,label); };
+      auto genuine=run_rejecting("multirate_genuine_rejection");
+      check_blocks(genuine.first);
+      require(genuine.first.multirate_forced_test_rollbacks==0U);
+      require(genuine.first.multirate_pm_cycle_rollbacks>0U);
+      require(genuine.first.multirate_rejected_blocks>0U);
+      // Interior blocks are short-range only: a rejected attempt never solved PM.
+      require(genuine.first.multirate_rejected_pm_refreshes==0U);
+      // Trajectory diagnostics exclude the rejected attempts.
+      require(refreshes(genuine.first)==genuine.first.treepm_long_range_refresh_count);
+      bool retried_cycle_published=false;
+      for (const auto& block:genuine.first.hierarchical_block_records) retried_cycle_published=retried_cycle_published||block.pm_cycle_retries>0U;
+      require(retried_cycle_published);
+      require(genuine.second.integrator_state.current_time_code==4e-5);
+      assertSynchronized(genuine.second,2U);
+      // Rollback/retry is deterministic.
+      auto replayed=run_rejecting("multirate_genuine_rejection_replay");
+      require(replayed.first.final_state_digest==genuine.first.final_state_digest);
+      same_schedule(replayed.first.hierarchical_block_records,genuine.first.hierarchical_block_records);
+      require(replayed.first.multirate_pm_cycle_rollbacks==genuine.first.multirate_pm_cycle_rollbacks);
     }
     if (rank==0) {
       std::cout<<"hierarchical_multirate_outer_kick ranks="<<ranks
