@@ -741,3 +741,31 @@ production-qualified:
 3. Hierarchical: `rms_split_scale` with `hierarchical_max_rung` 4 and 6 versus
    global KDK at matched scale factors (same diagnostics), restart equivalence
    and the existing `validation_hierarchical_dmo_growth_*` gates.
+
+## AREPO-grade campaign validation additions (2026-10-26; authored, NOT RUN)
+
+Record: [`repair/arepo_grade_campaign_20261026.md`](repair/arepo_grade_campaign_20261026.md).
+All thresholds below are **provisional** (scientifically motivated, not
+qualified); agreement with AREPO is a consistency check, not a proof of
+correctness — both codes carry force, time-integration and discretization
+error.
+
+| Area | Owner-executable evidence | Provisional gate |
+| --- | --- | --- |
+| MPI routing admission | `integration_pm_routing_admission_mpi_{two,four}_rank` | every rank fails together; no hang (watchdog 120 s / case) |
+| In-place FFT layout | `integration_pm_in_place_fft_layout[_mpi_{two,four}_rank]` | Fourier-mode response ≤ 1e-9 rel; distributed = serial ≤ 1e-9 rel |
+| Remote group walk | `integration_tree_pm_remote_group_walk_mpi_{two,four}_rank` | grouped = per-target ≤ 1e-9 rel; identical in-cutoff pair counts |
+| Fine-tick caches | `integration_tree_pm_fine_tick_caches` | retained = eager ≤ 1e-12 rel; uniform scalar = explicit lane (bitwise) |
+| Gravity invariants | `validation_gravity_invariant_suite` | self-force ≤ 1e-2 one-cell force; Σ m a ≤ 1e-6 Σ m\|a\|; axis covariance ≤ 1e-9; two-body vs Ewald non-increasing with mesh and ≤ 2 % at 64³; FD ≤ 5 % |
+| Multirate PM | `test_hierarchical_treepm_workflow` (multirate block) | converges toward fine global reference (√err/64 < 1e-3); fewer PM refreshes than exact; bitwise resume at cycle end |
+| Checkpoint cadence | `unit_output_cadence` | no dropped/duplicated requests; one request per crossing step |
+| Matched-IC DMO vs AREPO | `tools/compare_dmo_arepo.py --enforce` | mass rel. diff ≤ 1e-12; P(k) ratio within 2 % and r(k) ≥ 0.99 for k < k_Ny/4; FoF mass-function bins (≥ 20 halos) within 10 %; median displacement ≤ 0.1 mean spacing |
+
+Recommended owner sequence for the AREPO comparison: identical ICs
+(`tools/convert_ic.*`), matched softening, `treepm_asmth_cells` /
+`treepm_rcut_cells` comparable to AREPO's `ASMTH` / `RCUT`, matched PM mesh,
+`gravity_timestep_eta` translated as documented (`eta_CHUI = sqrt(2
+eta_AREPO)`), snapshots at the same scale factors (z = 9, 3, 1, 0), first with
+the exact reference policies, then with each experimental policy toggled
+separately (`multirate_outer_kick`, `finite_difference_4`, group walk,
+topology refit) so differences are attributable.

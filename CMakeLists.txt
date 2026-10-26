@@ -2383,6 +2383,19 @@ if(COSMOSIM_ENABLE_TESTS)
     validation_periodic_ewald_reference
     PROPERTIES LABELS "validation;gravity;periodic;reference")
 
+  # Gravity invariant suite (2026-10-26): self-force, momentum conservation,
+  # axis-permutation isotropy, PM-resolution convergence vs Ewald, FD/spectral
+  # gradient distinctness. Provisional thresholds; NOT RUN by the author.
+  add_executable(
+    test_validation_gravity_invariant_suite
+    tests/validation/test_gravity_invariant_suite.cpp
+    tests/support/periodic_ewald_reference.cpp)
+  target_include_directories(test_validation_gravity_invariant_suite PRIVATE tests/support)
+  target_link_libraries(test_validation_gravity_invariant_suite PRIVATE cosmosim_gravity)
+  add_test(NAME validation_gravity_invariant_suite COMMAND test_validation_gravity_invariant_suite)
+  set_tests_properties(validation_gravity_invariant_suite
+    PROPERTIES LABELS "validation;gravity;treepm;periodic;invariants;provisional")
+
   add_executable(
     test_validation_tree_pm_ewald_accuracy
     tests/validation/test_tree_pm_ewald_accuracy.cpp

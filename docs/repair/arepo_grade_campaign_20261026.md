@@ -375,3 +375,73 @@ first candidate, kept for the owner:
 * Asynchronous neighbour collectives overlapping traversal beyond the
   existing owned-target overlap.
 * Low-memory degradation, beyond the existing governor refusal paths.
+
+## Stage 7 — validation infrastructure (*authored, NOT RUN*)
+
+* `tests/validation/test_gravity_invariant_suite.cpp` (`validation_gravity_invariant_suite`):
+  * self-force;
+  * momentum conservation;
+  * axis-permutation isotropy;
+  * PM-resolution convergence against the independent Ewald reference;
+  * spectral versus finite-difference gradient distinctness;
+  * provisional thresholds throughout.
+* `tools/compare_dmo_arepo.py`: a matched-IC DMO comparison through the
+  validated snapshot reader:
+  * mass conservation;
+  * ID-matched displacement statistics;
+  * deconvolved and shot-noise-corrected P(k) and its ratio;
+  * the cross-correlation r(k);
+  * FoF mass functions;
+  * matched-halo offsets and mass ratios;
+  * provisional gates, with `--enforce`.
+* `docs/validation_plan.md`: a gate table and a recommended owner sequence.
+
+## Owner validation checklist (risk order)
+
+1. **Build** every preset (cpu-only debug, HDF5+FFTW, MPI). Nothing was
+   compiled. The largest compile risks are:
+   * `RankConsensusBatch` (std::array / exception_ptr);
+   * the multirate plumbing (`HierarchicalPmCyclePlan` designated
+     initializers, the new pure virtual
+     `hierarchicalShortRangeEndpointReusable`);
+   * the routing plan key (`operator==` default) and `agreePmRoutingWorkload`
+     (MPI-only);
+   * the template group-kernel dispatch.
+2. **Collective safety:** run `integration_pm_routing_admission_mpi_{2,4}`
+   and the existing `integration_mpi_collective_safety`, `pm_periodic_mode`
+   and TreePM MPI tests. Watch for hangs, especially around
+   `agreePmRoutingWorkload` and the consensus batch.
+3. **Reference-path integrity:** `integration_pm_in_place_fft_layout`
+   (serial and MPI), the existing Ewald accuracy matrix,
+   `integration_tree_pm_coupling_periodic`, and
+   `integration_tree_pm_remote_group_walk_mpi`.
+4. **Fine-tick caches:** `integration_tree_pm_fine_tick_caches`, then the
+   hierarchical workflow test on the reference path (multirate disabled must
+   reproduce previous checkpoints bitwise).
+5. **Multirate:** the multirate block of `test_hierarchical_treepm_workflow`,
+   then long runs comparing `exact` against `multirate_outer_kick`
+   (M = 2, 4, 8): P(k), energy and momentum drift, and the quantum-clamp
+   counters.
+6. **Checkpoints:** `unit_output_cadence`, `unit_config_parser`, and resume
+   tests at multirate cycle ends and PM-deferred boundaries.
+7. **Gravity invariants and AREPO comparison:**
+   `validation_gravity_invariant_suite`, then `tools/compare_dmo_arepo.py`
+   on matched ICs.
+8. **Performance (predictions, not measurements):**
+   * fewer PM solves per coarse block under multirate (1/M);
+   * no 64-point quadrature per inactive source;
+   * no per-tick uniform-mass scan in DMO;
+   * O(degree) instead of O(P) LET bookkeeping;
+   * no per-tick telemetry collective.
+   Measure with `bench_tree_pm_sweep` and the performance deck against the
+   pre-campaign commit `a33ff76`.
+
+## Known numerical uncertainties
+
+* Multirate RESPA: possible resonance at large M; the clamped finest rung
+  when a mid-cycle criterion asks for a smaller quantum; no measured order.
+* The finite-difference PM gradient attenuates mesh-scale forces (round 1).
+* The group walk changes MAC decisions (a conservative box); the remote
+  coincident-pair convention is now aligned with the per-target walk.
+* Routing re-measurement on the planned path costs one extra O(N_local)
+  pass (prediction).
