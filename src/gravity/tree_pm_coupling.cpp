@@ -1991,6 +1991,14 @@ void TreePmCoordinator::shutdownMpiResources() {
   }
 }
 
+void TreePmCoordinator::invalidateSourceHistoryForRollback() noexcept {
+  m_tree_solver.m_build_valid = false;
+  m_tree_source_layout_generation = 0U;
+  m_leaf_map_topology_generation = 0U;
+  m_order_map_topology_generation = 0U;
+  m_order_map_extent = 0U;
+}
+
 const parallel::PmSlabLayout& TreePmCoordinator::slabLayout() const noexcept {
   return m_grid.slabLayout();
 }

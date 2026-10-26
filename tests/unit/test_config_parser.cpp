@@ -1692,6 +1692,20 @@ void testTreePmProductionTuningRoundTrip() {
       requireNumericsRejected(multirate.normalized_text, "treepm_update_cadence_steps", value, "treepm_pm_reuse_policy");
     // The stale window stays global-KDK only.
     requireNumericsRejected(multirate.normalized_text, "treepm_pm_reuse_policy", "stale_within_cadence");
+    // Rollback-snapshot memory policy (round 4): typed, normalized, both values
+    // round-trip; unknown values are rejected.
+    CHUI_REQUIRE(multirate.config.numerics.treepm_multirate_rollback_memory_policy ==
+        cosmosim::core::MultirateRollbackMemoryPolicy::kSingleBlockFallback);
+    CHUI_REQUIRE(multirate.normalized_text.find("treepm_multirate_rollback_memory_policy = single_block_fallback") !=
+        std::string::npos);
+    const auto strict = loadFrozenConfigFromString(
+        withNumericsValue(multirate.normalized_text, "treepm_multirate_rollback_memory_policy", "fail"),
+        "pm_multirate_memory_fail");
+    CHUI_REQUIRE(strict.config.numerics.treepm_multirate_rollback_memory_policy ==
+        cosmosim::core::MultirateRollbackMemoryPolicy::kFail);
+    CHUI_REQUIRE(loadFrozenConfigFromString(strict.normalized_text, "pm_multirate_memory_fail_replay").normalized_text ==
+        strict.normalized_text);
+    requireNumericsRejected(multirate.normalized_text, "treepm_multirate_rollback_memory_policy", "sometimes");
   }
   // Gravity timestep accuracy coefficient: historical 0.2 default, typed
   // finite (0, 1] range, normalized round trip.

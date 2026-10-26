@@ -63,6 +63,21 @@ struct ReferenceWorkflowOptions {
   // interval, exercising the transactional rollback; the final state must equal
   // an uninterrupted run. 0 (default) in production; never weakens a check.
   std::uint64_t multirate_test_forced_cycle_rollbacks = 0;
+  // Test-only seams (multirate_outer_kick); 0/empty/false in production.
+  // * forced_rejections_per_cycle: consecutive forced rejections of one cycle
+  //   (each retried with the identical T; must stay below the retry bound 64).
+  // * snapshot_refusals: the next N rollback-snapshot admissions are treated
+  //   as refused on the listed ranks (all ranks when the list is empty), as a
+  //   MemoryGovernor refusal or, with snapshot_allocation_failure, as a
+  //   std::bad_alloc while copying. Admission is reduced collectively, so a
+  //   refusal on one rank must produce the same fallback on every rank.
+  std::uint64_t multirate_test_forced_rejections_per_cycle = 1;
+  std::uint64_t multirate_test_snapshot_refusals = 0;
+  std::vector<int> multirate_test_snapshot_refusal_ranks;
+  bool multirate_test_snapshot_allocation_failure = false;
+  // Throws inside the transactional rollback on this world rank (-1: never);
+  // every rank must then fail collectively (no rank left inside a collective).
+  int multirate_test_rollback_failure_rank = -1;
 
   // Test/embedding composition seam. Built-in production descriptors are
   // registered first; callers may add independent descriptors before the
@@ -164,6 +179,11 @@ struct ReferenceWorkflowReport {
     // Multirate invariant: pm_cycle_end - pm_cycle_opening <= this bound for
     // every block of an accepted cycle.
     double pm_displacement_limit_time_code = 0.0;
+    // Limiter that fixed this cycle's length T: target_blocks,
+    // pm_displacement, output_or_end_boundary, rollback_retry (physical or
+    // retry-selected) or rollback_memory (resource-induced single-block
+    // fallback; see numerics.treepm_multirate_rollback_memory_policy).
+    std::string pm_cycle_length_limiter;
   };
   std::vector<HierarchicalBlockRecord> hierarchical_block_records;
   std::uint64_t multirate_pm_cycles_completed = 0U;
@@ -175,6 +195,11 @@ struct ReferenceWorkflowReport {
   std::uint64_t multirate_rejected_blocks = 0U;
   std::uint64_t multirate_rejected_pm_refreshes = 0U;
   std::uint64_t multirate_rejected_pm_reuses = 0U;
+  std::uint64_t multirate_rejected_cadence_records = 0U;
+  // Governed rollback-snapshot storage: high-water reservation of the segment
+  // and the reservation still held when the segment returned (always 0).
+  std::uint64_t multirate_rollback_snapshot_peak_bytes = 0U;
+  std::uint64_t multirate_rollback_snapshot_retained_bytes = 0U;
   // Multi-block cycles opened as a single block because the rollback
   // snapshot was refused by the memory governor on some rank.
   std::uint64_t multirate_memory_limited_cycles = 0U;

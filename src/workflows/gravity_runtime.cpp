@@ -613,27 +613,90 @@ class GravityRuntimeImpl final : public GravityRuntime {
   [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
     return m_cadence_records;
   }
-  [[nodiscard]] DiagnosticsMark diagnosticsMark() const noexcept override {
-    return DiagnosticsMark{.long_range_refreshes = m_long_range_refresh_count,
-                           .long_range_reuses = m_long_range_reuse_count,
-                           .cadence_records_appended = m_cadence_records_appended};
+  void appendAcceptedCadenceRecord(ReferenceWorkflowReport::TreePmCadenceRecord record) {
+    if (m_cadence_records.size() == k_recent_cadence_limit) {
+      m_cadence_records.erase(m_cadence_records.begin());
+    }
+    m_cadence_records.push_back(std::move(record));
   }
-  void discardDiagnosticsSince(const DiagnosticsMark& mark) noexcept override {
-    if (m_long_range_refresh_count >= mark.long_range_refreshes) {
-      m_rejected_long_range_refresh_count += m_long_range_refresh_count - mark.long_range_refreshes;
-      m_long_range_refresh_count = mark.long_range_refreshes;
+  void appendCadenceRecord(ReferenceWorkflowReport::TreePmCadenceRecord record) {
+    if (!m_cycle_transaction_open) {
+      appendAcceptedCadenceRecord(std::move(record));
+      return;
     }
-    if (m_long_range_reuse_count >= mark.long_range_reuses) {
-      m_rejected_long_range_reuse_count += m_long_range_reuse_count - mark.long_range_reuses;
-      m_long_range_reuse_count = mark.long_range_reuses;
+    if (m_pending_cadence_records.size() == k_recent_cadence_limit) {
+      m_pending_cadence_records.erase(m_pending_cadence_records.begin());
+      ++m_pending_cadence_records_dropped;
     }
-    if (m_cadence_records_appended >= mark.cadence_records_appended) {
-      const std::uint64_t appended = m_cadence_records_appended - mark.cadence_records_appended;
-      const std::size_t drop = static_cast<std::size_t>(
-          std::min<std::uint64_t>(appended, static_cast<std::uint64_t>(m_cadence_records.size())));
-      m_cadence_records.resize(m_cadence_records.size() - drop);
-      m_cadence_records_appended = mark.cadence_records_appended;
+    m_pending_cadence_records.push_back(std::move(record));
+  }
+  void beginCycleTransaction() override {
+    if (m_cycle_transaction_open) {
+      throw std::logic_error("multirate PM cycle transaction is already open");
     }
+    // Reserve both bounded windows here so commit (noexcept) never allocates.
+    m_cadence_records.reserve(k_recent_cadence_limit);
+    m_pending_cadence_records.reserve(k_recent_cadence_limit);
+    m_cycle_transaction_open = true;
+    m_pending_long_range_refreshes = 0U;
+    m_pending_long_range_reuses = 0U;
+    m_pending_cadence_records.clear();
+    m_pending_cadence_records_dropped = 0U;
+  }
+  void commitCycleTransaction() noexcept override {
+    if (!m_cycle_transaction_open) return;
+    // Publish the journal in order through the same bounded window the
+    // non-transactional path uses (oldest accepted records are evicted only
+    // by newer accepted records).
+    for (auto& record : m_pending_cadence_records) appendAcceptedCadenceRecord(std::move(record));
+    m_pending_cadence_records.clear();
+    m_pending_long_range_refreshes = 0U;
+    m_pending_long_range_reuses = 0U;
+    m_pending_cadence_records_dropped = 0U;
+    m_cycle_transaction_open = false;
+  }
+  void rollbackCycleTransaction(
+      const io::GravityForceCachePersistentState& opening_endpoint,
+      const core::SimulationState& restored_state) override {
+    if (!m_cycle_transaction_open) {
+      throw std::logic_error("multirate PM cycle rollback without an open transaction");
+    }
+    // Diagnostics: the attempt's trajectory counts move to execution cost.
+    m_long_range_refresh_count -= m_pending_long_range_refreshes;
+    m_long_range_reuse_count -= m_pending_long_range_reuses;
+    m_rejected_long_range_refresh_count += m_pending_long_range_refreshes;
+    m_rejected_long_range_reuse_count += m_pending_long_range_reuses;
+    m_rejected_cadence_record_count +=
+        static_cast<std::uint64_t>(m_pending_cadence_records.size()) + m_pending_cadence_records_dropped;
+    m_pending_cadence_records.clear();
+    m_pending_long_range_refreshes = 0U;
+    m_pending_long_range_reuses = 0U;
+    m_pending_cadence_records_dropped = 0U;
+    m_cycle_transaction_open = false;
+    // Derived state. Tree build/refit candidates and topology maps depend on
+    // the positions the rejected attempt visited: force a full build.
+    m_tree_pm_coordinator.invalidateSourceHistoryForRollback();
+    // Particle ghost layer: next solve refreshes it from restored positions.
+    m_ghost_cache_lifecycle.valid = false;
+    ++m_ghost_cache_lifecycle.invalidation_count;
+    // Borrowed-source certificates are keyed by generations that the caller
+    // has advanced; clear them explicitly as well (no consumer may rely on
+    // the generation check alone).
+    m_active_source_indices = {};
+    m_borrowed_particle_index_generation = 0U;
+    m_borrowed_gravity_source_generation = 0U;
+    m_borrowed_eligibility_certificate_valid = false;
+    m_source_predicted_inactive_count = 0U;
+    // Force cache, per-row validity, Tree/PM endpoint split and nearest-pair
+    // lane: re-imported for the restored rows at the restored generation.
+    importRestartForceCache(opening_endpoint, restored_state);
+    if (!m_force_cache_valid || m_hierarchical_force_generation.size() != restored_state.particles.size()) {
+      throw std::logic_error("multirate PM cycle rollback could not re-establish the opening endpoint force");
+    }
+  }
+  [[nodiscard]] bool cycleTransactionOpen() const noexcept override { return m_cycle_transaction_open; }
+  [[nodiscard]] std::uint64_t rejectedCadenceRecordCount() const noexcept override {
+    return m_rejected_cadence_record_count;
   }
   [[nodiscard]] std::uint64_t rejectedLongRangeRefreshCount() const noexcept override {
     return m_rejected_long_range_refresh_count;
@@ -678,8 +741,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
     active("gravity_runtime.active_accel_z", m_active_accel_z);
     active("gravity_runtime.active_previous_acceleration", m_active_previous_acceleration_magnitude);
     persistent("gravity_runtime.recent_cadence_records", m_cadence_records);
+    persistent("gravity_runtime.multirate_cadence_journal", m_pending_cadence_records);
     std::uint64_t cadence_string_bytes = 0U;
-    for (const auto& record : m_cadence_records) {
+    for (const auto* window : {&m_cadence_records, &m_pending_cadence_records}) for (const auto& record : *window) {
       for (const auto* value : {&record.stage_name, &record.pm_sync_surface, &record.pm_refresh_reason}) {
         cadence_string_bytes = core::checkedMemoryBytesAdd(cadence_string_bytes,
             core::checkedSizeAdd(value->capacity(), 1U, "cadence string terminator"), "cadence retained strings");
@@ -2328,8 +2392,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
       }
       m_has_long_range_field = true;
       ++m_long_range_refresh_count;
+      if (m_cycle_transaction_open) ++m_pending_long_range_refreshes;
     } else if (!m_tree_pm_options.short_range_only) {
       ++m_long_range_reuse_count;
+      if (m_cycle_transaction_open) ++m_pending_long_range_reuses;
     }
     context.pm_refresh_directive.solver_executed = true;
     m_last_committed_field_version = decision.field_version;
@@ -2338,12 +2404,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
         context.state.particles.size() - m_local_kick_particle_count);
     // Recent detail is bounded; refresh/reuse counters above remain lifetime
     // aggregates for the final report. No run-length-sized terminal copy.
-    constexpr std::size_t k_recent_cadence_limit = 256U;
-    if (m_cadence_records.size() == k_recent_cadence_limit) {
-      m_cadence_records.erase(m_cadence_records.begin());
-    }
-    ++m_cadence_records_appended;
-    m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
+    // Inside a multirate PM cycle transaction the record is journaled and
+    // published only when the cycle is accepted.
+    appendCadenceRecord(ReferenceWorkflowReport::TreePmCadenceRecord{
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
         .pm_sync_surface = std::string(pmSyncSurfaceName(decision.sync_surface)),
@@ -4005,11 +4068,19 @@ class GravityRuntimeImpl final : public GravityRuntime {
   // (memoized per (source epoch, evaluation epoch); telemetry only).
   std::uint64_t m_source_prediction_drift_integrals = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
-  // Lifetime appends to m_cadence_records and rejected multirate attempts
-  // (diagnostics; see GravityRuntime::discardDiagnosticsSince).
-  std::uint64_t m_cadence_records_appended = 0U;
+  // Bounded recent cadence window (accepted trajectory) and the multirate
+  // cycle transaction journal (same bound; older journal entries would be
+  // evicted from the window by newer ones on commit anyway).
+  static constexpr std::size_t k_recent_cadence_limit = 256U;
+  bool m_cycle_transaction_open = false;
+  std::uint64_t m_pending_long_range_refreshes = 0U;
+  std::uint64_t m_pending_long_range_reuses = 0U;
+  std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_pending_cadence_records;
+  std::uint64_t m_pending_cadence_records_dropped = 0U;
+  // Execution-cost totals of rejected multirate attempts.
   std::uint64_t m_rejected_long_range_refresh_count = 0U;
   std::uint64_t m_rejected_long_range_reuse_count = 0U;
+  std::uint64_t m_rejected_cadence_record_count = 0U;
 };
 
 }  // namespace

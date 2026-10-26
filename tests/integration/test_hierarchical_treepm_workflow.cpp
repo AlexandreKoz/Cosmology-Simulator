@@ -44,10 +44,16 @@ core::FrozenConfig config(int rung,int ranks) {
        << "snapshot_interval_steps = 1\n";
   return core::loadFrozenConfigFromString(text.str(),"hierarchical_treepm_qualification");
 }
-core::SimulationState initialState(int rank,int ranks) {
+// skewed: rank 0 owns almost every particle, ranks 1..P-2 own one each and
+// rank P-1 owns none (empty rank) -- uneven-ownership MPI fixture.
+core::SimulationState initialState(int rank,int ranks,bool skewed=false) {
   core::SimulationState state;
   std::vector<std::uint32_t> indices;
-  for (std::uint32_t i=0;i<64U;++i) if (i%static_cast<unsigned>(ranks)==static_cast<unsigned>(rank)) indices.push_back(i);
+  const auto owner=[&](std::uint32_t i) {
+    if (!skewed) return static_cast<int>(i%static_cast<unsigned>(ranks));
+    return static_cast<int>(i)<ranks-2 ? static_cast<int>(i)+1 : 0;
+  };
+  for (std::uint32_t i=0;i<64U;++i) if (owner(i)==rank) indices.push_back(i);
   state.resizeParticles(indices.size());
   const double pi=std::acos(-1.0);
   for (std::size_t row=0;row<indices.size();++row) {
@@ -219,11 +225,14 @@ void run(int rank,int ranks,std::uint64_t token) {
   workflows::ReferenceWorkflowRunner hierarchical(hierarchical_config),global(global_config);
   auto execute=[&](const workflows::ReferenceWorkflowRunner& runner,const char* label,double dt,
                    const io::RestartReadResult* restart=nullptr,std::uint64_t max_steps=0U,
-                   std::uint64_t forced_multirate_rollbacks=0U) {
-    const auto report=runner.run(scratch.root()/label,workflows::ReferenceWorkflowOptions{
+                   std::uint64_t forced_multirate_rollbacks=0U,
+                   const std::function<void(workflows::ReferenceWorkflowOptions&)>& customize={}) {
+    workflows::ReferenceWorkflowOptions options{
         .dt_time_code=dt,.write_outputs=true,.initial_state_override=restart?nullptr:&initial,
         .restart_state_override=restart,.max_steps_override=max_steps,
-        .multirate_test_forced_cycle_rollbacks=forced_multirate_rollbacks});
+        .multirate_test_forced_cycle_rollbacks=forced_multirate_rollbacks};
+    if (customize) customize(options);
+    const auto report=runner.run(scratch.root()/label,options);
     require(report.restart_roundtrip_ok);
     return std::pair{report,io::readRestartCheckpointHdf5(report.restart_path)};
   };
@@ -582,6 +591,176 @@ void run(int rank,int ranks,std::uint64_t token) {
       require(replayed.first.final_state_digest==genuine.first.final_state_digest);
       same_schedule(replayed.first.hierarchical_block_records,genuine.first.hierarchical_block_records);
       require(replayed.first.multirate_pm_cycle_rollbacks==genuine.first.multirate_pm_cycle_rollbacks);
+    }
+
+    // (7) Memory-pressure fallback. Snapshot admission is reduced
+    // collectively: a refusal (governor or std::bad_alloc) on ANY rank must
+    // open the same single-block cycle on EVERY rank, every fallback block
+    // must still honour the particle criteria and the PM displacement bound
+    // (check_blocks), no PM half-kick may be duplicated (one PM refresh per
+    // closed cycle plus at most the segment bootstrap), and no governed
+    // snapshot storage may outlive the segment.
+    if (has_multi_block_cycle) {
+      const auto refusal_case=[&](const char* label,std::vector<int> refusing_ranks,bool allocation_failure,
+                                  std::uint64_t refusals) {
+        auto fallback=execute(multirate4,label,5e-6,nullptr,0U,0U,[&](workflows::ReferenceWorkflowOptions& options) {
+          options.multirate_test_snapshot_refusals=refusals;
+          options.multirate_test_snapshot_refusal_ranks=refusing_ranks;
+          options.multirate_test_snapshot_allocation_failure=allocation_failure;
+        });
+        check_blocks(fallback.first);
+        require(fallback.first.multirate_memory_limited_cycles>0U);
+        require(mpi.allreduceMinUint64(fallback.first.multirate_memory_limited_cycles)==
+                mpi.allreduceMaxUint64(fallback.first.multirate_memory_limited_cycles));
+        bool memory_limited_block=false;
+        for (const auto& block:fallback.first.hierarchical_block_records) {
+          if (block.pm_cycle_length_limiter!="rollback_memory") continue;
+          memory_limited_block=true;
+          require(block.opens_pm_cycle && block.closes_pm_cycle && block.pm_cycle_block_index==0U);
+        }
+        require(memory_limited_block);
+        const auto pm_refreshes=fallback.first.treepm_long_range_refresh_count;
+        const auto cycles=fallback.first.multirate_pm_cycles_completed;
+        require(pm_refreshes>=cycles && pm_refreshes<=cycles+1U);
+        require(fallback.first.multirate_rollback_snapshot_retained_bytes==0U);
+        require(fallback.second.integrator_state.current_time_code==4e-5);
+        assertSynchronized(fallback.second,2U);
+        return fallback;
+      };
+      // Every admission refused on every rank: only single-block cycles.
+      auto all_refused=refusal_case("multirate4_refused_all",{},false,1000000U);
+      for (const auto& block:all_refused.first.hierarchical_block_records) {
+        require(block.opens_pm_cycle && block.closes_pm_cycle);
+      }
+      require(all_refused.first.multirate_rollback_snapshot_peak_bytes==0U);
+      // Refusal on rank 0 only, on several ranks, and an allocation failure
+      // on the last rank: identical fallback everywhere.
+      auto rank0_refused=refusal_case("multirate4_refused_rank0",{0},false,1000000U);
+      same_schedule(rank0_refused.first.hierarchical_block_records,all_refused.first.hierarchical_block_records);
+      same_endpoint(rank0_refused.second,all_refused.second,1e-22);
+      auto several_refused=refusal_case("multirate4_refused_several",{0,ranks-1},false,1000000U);
+      same_schedule(several_refused.first.hierarchical_block_records,all_refused.first.hierarchical_block_records);
+      auto allocation_failed=refusal_case("multirate4_allocation_failure",{ranks-1},true,1000000U);
+      same_schedule(allocation_failed.first.hierarchical_block_records,all_refused.first.hierarchical_block_records);
+      same_endpoint(allocation_failed.second,all_refused.second,1e-22);
+      // Only the first admission refused: that cycle falls back, later cycles
+      // are multi-block again; the fallback is visible in the block records.
+      auto first_refused=refusal_case("multirate4_refused_first",{0},false,1U);
+      require(first_refused.first.hierarchical_block_records.front().pm_cycle_length_limiter=="rollback_memory");
+      require(first_refused.first.multirate_memory_limited_cycles==1U);
+      // Reproducibility mode: the same refusal fails collectively instead.
+      {
+        auto strict_text=multirate_config_with(4,hierarchical_config.normalized_text,"multirate_m4_strict_source").normalized_text;
+        const std::string from="treepm_multirate_rollback_memory_policy = single_block_fallback";
+        const auto position=strict_text.find(from);
+        require(position!=std::string::npos);
+        strict_text.replace(position,from.size(),"treepm_multirate_rollback_memory_policy = fail");
+        workflows::ReferenceWorkflowRunner strict(core::loadFrozenConfigFromString(strict_text,"multirate_m4_memory_fail"));
+        bool failed=false;
+        try {
+          (void)execute(strict,"multirate4_memory_fail",5e-6,nullptr,0U,0U,[&](workflows::ReferenceWorkflowOptions& options) {
+            options.multirate_test_snapshot_refusals=1U;
+            options.multirate_test_snapshot_refusal_ranks={0};
+          });
+        } catch (const std::exception& error) {
+          failed=std::string(error.what()).find("memory governor")!=std::string::npos;
+        }
+        require(mpi.allreduceSumUint64(failed?1U:0U)==static_cast<std::uint64_t>(ranks));
+        // Without a refusal the strict policy is the uninterrupted schedule.
+        auto strict_ok=execute(strict,"multirate4_memory_fail_admitted",5e-6);
+        same_schedule(strict_ok.first.hierarchical_block_records,full4.records);
+        same_endpoint(strict_ok.second,full4.last.second,1e-22);
+      }
+    }
+
+    // (8) Consecutive rejections of the same cycle (forced, identical T):
+    // bitwise equal to the uninterrupted run; the accepted-trajectory
+    // diagnostics (cadence history, refresh counts, block records) equal the
+    // uninterrupted run's although the attempts generated more records; the
+    // governed snapshot storage is reused across retries and released.
+    if (has_multi_block_cycle) {
+      auto repeated=execute(multirate4,"multirate4_consecutive_rejections",5e-6,nullptr,0U,6U,
+          [](workflows::ReferenceWorkflowOptions& options) { options.multirate_test_forced_rejections_per_cycle=3U; });
+      check_blocks(repeated.first);
+      require(repeated.first.multirate_forced_test_rollbacks>=3U);
+      unsigned max_retries=0U;
+      for (const auto& block:repeated.first.hierarchical_block_records) max_retries=std::max(max_retries,block.pm_cycle_retries);
+      require(max_retries>=3U);
+      same_schedule(repeated.first.hierarchical_block_records,full4.records);
+      same_endpoint(repeated.second,full4.last.second,1e-22);
+      const auto& accepted=repeated.first.treepm_cadence_records;
+      const auto& uninterrupted=full4.last.first.treepm_cadence_records;
+      require(accepted.size()==uninterrupted.size());
+      for (std::size_t i=0;i<accepted.size();++i) {
+        require(accepted[i].step_index==uninterrupted[i].step_index);
+        require(accepted[i].refreshed_long_range_field==uninterrupted[i].refreshed_long_range_field);
+        require(accepted[i].short_range_only==uninterrupted[i].short_range_only);
+        require(accepted[i].field_version==uninterrupted[i].field_version);
+      }
+      require(repeated.first.multirate_rejected_cadence_records>0U);
+      require(repeated.first.treepm_long_range_refresh_count==full4.last.first.treepm_long_range_refresh_count);
+      require(repeated.first.multirate_rollback_snapshot_peak_bytes>0U);
+      require(repeated.first.multirate_rollback_snapshot_retained_bytes==0U);
+      // A rank-local failure inside the rollback (last rank) must fail every
+      // rank through the collective failure protocol, never deadlock.
+      {
+        bool failed=false;
+        try {
+          (void)execute(multirate4,"multirate4_rollback_failure",5e-6,nullptr,0U,1U,
+              [&](workflows::ReferenceWorkflowOptions& options) { options.multirate_test_rollback_failure_rank=ranks-1; });
+        } catch (const std::exception&) {
+          failed=true;
+        }
+        require(mpi.allreduceSumUint64(failed?1U:0U)==static_cast<std::uint64_t>(ranks));
+      }
+    }
+
+    // (9) Rollback with every source-history cache enabled: identical-source
+    // tree reuse, certified topology refit, residual lookups, SIMD leaves and
+    // the (remote, under MPI) group walk; the sparse LET graph is reused
+    // automatically. Rollback forces a full tree build, so a replay with
+    // forced rejections keeps the uninterrupted schedule and agrees to
+    // roundoff (summation order may differ from the refitted original).
+    if (has_multi_block_cycle) {
+      auto stress_text=optimized_text;
+      const std::string from="treepm_group_walk_enabled = false";
+      const auto position=stress_text.find(from);
+      require(position!=std::string::npos);
+      stress_text.replace(position,from.size(),"treepm_group_walk_enabled = true");
+      workflows::ReferenceWorkflowRunner stress(multirate_config_with(4,stress_text,"multirate_m4_cache_stress"));
+      auto plain=execute(stress,"multirate4_cache_stress_plain",5e-6);
+      auto rejected=execute(stress,"multirate4_cache_stress_rejected",5e-6,nullptr,0U,4U,
+          [](workflows::ReferenceWorkflowOptions& options) { options.multirate_test_forced_rejections_per_cycle=2U; });
+      check_blocks(plain.first);
+      check_blocks(rejected.first);
+      require(rejected.first.multirate_forced_test_rollbacks>0U);
+      same_schedule(rejected.first.hierarchical_block_records,plain.first.hierarchical_block_records);
+      same_endpoint(rejected.second,plain.second,1e-18);
+      // Deterministic replay of the same rejection pattern.
+      auto replay=execute(stress,"multirate4_cache_stress_replay",5e-6,nullptr,0U,4U,
+          [](workflows::ReferenceWorkflowOptions& options) { options.multirate_test_forced_rejections_per_cycle=2U; });
+      require(replay.first.final_state_digest==rejected.first.final_state_digest);
+    }
+
+    // (10) Highly skewed ownership (rank 0 owns nearly everything, the last
+    // rank owns nothing) with forced rollbacks: same physical trajectory as
+    // the balanced run to roundoff, identical schedule on every rank, no
+    // collective divergence (owner timeout on the _np2/_np4 registrations).
+    if (has_multi_block_cycle) {
+      const auto skewed=initialState(rank,ranks,true);
+      auto skewed_run=execute(multirate4,"multirate4_skewed_rollback",5e-6,nullptr,0U,2U,
+          [&](workflows::ReferenceWorkflowOptions& options) { options.initial_state_override=&skewed; });
+      check_blocks(skewed_run.first);
+      require(skewed_run.first.multirate_forced_test_rollbacks>0U);
+      require(skewed_run.first.hierarchical_block_records.size()==full4.records.size());
+      for (std::size_t i=0;i<full4.records.size();++i) {
+        const auto& a=skewed_run.first.hierarchical_block_records[i];
+        const auto& b=full4.records[i];
+        require(std::abs(a.time_end_code-b.time_end_code)<=1e-12*std::abs(b.time_end_code));
+        require(a.opens_pm_cycle==b.opens_pm_cycle && a.closes_pm_cycle==b.closes_pm_cycle);
+      }
+      require(skewed_run.second.integrator_state.current_time_code==4e-5);
+      require(mpi.allreduceSumDouble(phaseError(skewed_run.second.state,full4.last.second.state))<1e-18);
     }
     if (rank==0) {
       std::cout<<"hierarchical_multirate_outer_kick ranks="<<ranks

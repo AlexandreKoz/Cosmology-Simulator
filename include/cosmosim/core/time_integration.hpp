@@ -125,11 +125,14 @@ struct StepBoundaryState {
   bool multirate_pm_cycle_interior = false;
 };
 
-// Outer PM level of the multirate hierarchical TreePM integrator (2026-10-26).
-// A PM cycle is M consecutive coarse blocks of equal duration Δc. With
+// Outer PM level of the multirate hierarchical TreePM integrator (2026-10-26;
+// stabilized round 3/4). A PM cycle of length T (fixed at its opening by the
+// time coordinator) is tiled exactly by m >= 1 coarse blocks of possibly
+// different durations Δc_j (re-planned per block from the reference criteria).
+// With
 //   H = H_kin + H_tree,short + H_PM,long
 // the cycle update is the r-RESPA composition
-//   K_PM(t0 → t0+MΔc/2) ∘ B_1 ∘ … ∘ B_M ∘ K_PM(t0+MΔc/2 → t0+MΔc)
+//   K_PM(t0 → t0+T/2) ∘ B_1 ∘ … ∘ B_m ∘ K_PM(t0+T/2 → t0+T)
 // where each B_j is the existing tree-only power-of-two block (fine-rung
 // tree kicks around all-source drifts) and K_PM(·) is a long-range kick
 // with the field evaluated at the cycle endpoint positions. Cosmological
@@ -140,11 +143,12 @@ struct HierarchicalPmCyclePlan {
   bool enabled = false;
   bool opens_cycle = true;
   bool closes_cycle = true;
-  // Opening kick factor ∫_{t0}^{t0+MΔc/2} dt/a / a(t0); used when opens_cycle.
+  // Opening kick factor ∫_{t0}^{t0+T/2} dt/a / a(t0); used when opens_cycle.
   double opening_pm_kick_factor_code = 0.0;
-  // Closing kick lower limit a(t0+MΔc/2) (cosmological runs).
+  // Closing kick lower limit a(t0+T/2) (cosmological runs); the closing
+  // integral runs to the actual closing scale factor.
   double cycle_mid_scale_factor = 0.0;
-  // Closing kick factor for non-cosmological runs (MΔc/2 in code time).
+  // Closing kick factor for non-cosmological runs (T/2 in code time).
   double closing_half_interval_time_code = 0.0;
 };
 

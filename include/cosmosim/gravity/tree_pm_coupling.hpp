@@ -530,6 +530,18 @@ class TreePmCoordinator {
   // when the next mandatory phase needs more headroom. Scientific state and
   // installed tree/PM generations are unaffected.
   void trimOptionalAccelerationCaches(std::uint64_t required_headroom_bytes);
+  // Transactional rollback (multirate PM cycle rejection; call only between
+  // solves, collectively on every rank). Drops the source-history-dependent
+  // tree state so the next solve performs a full build from the restored
+  // positions: the built tree (identical-source reuse and certified motion
+  // refit candidates) and the topology-keyed order/leaf maps. Content-keyed
+  // caches stay valid and are retained: LET domain leaves and hierarchy
+  // (geometry fingerprint), the sparse peer graph (communication topology
+  // only; payloads are exchanged every solve) and the uniform-mass
+  // certificate (mass lanes are frozen inside a cycle). The long-range field
+  // is not touched: no PM refresh occurs inside a cycle, so the mesh still
+  // describes the restored cycle-opening sources.
+  void invalidateSourceHistoryForRollback() noexcept;
   explicit TreePmCoordinator(PmGridShape pm_shape);
   TreePmCoordinator(PmGridShape pm_shape, parallel::PmSlabLayout pm_layout);
   TreePmCoordinator(

@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "../support/test_require.hpp"
+#include "cosmosim/core/cosmology.hpp"
 #include "cosmosim/core/simulation_state.hpp"
 #include "cosmosim/core/time_integration.hpp"
 
@@ -58,13 +59,22 @@ struct Outcome {
   std::vector<Vec3> position;
   std::vector<Vec3> velocity;
   double time = 0.0;
+  double scale_factor = 1.0;
 };
 
 // Integrates `cycles` PM cycles of length T. Each cycle is tiled by blocks
 // whose intervals are fractions*T. multirate=false runs the reference scheme
 // (PM surfaces at both endpoints of every block) on the same blocks.
+// Optional cosmological background: code time in units of 1/H0, the outer
+// PM plan factors computed exactly as TimeCoordinator computes them.
+struct Cosmology {
+  const LambdaCdmBackground* background = nullptr;
+  double a_begin = 1.0;
+  double t_begin = 0.0;
+};
+
 Outcome integrate(const Problem& problem, double cycle_length, std::size_t cycles,
-                  const std::vector<double>& fractions, bool multirate) {
+                  const std::vector<double>& fractions, bool multirate, const Cosmology& cosmology = {}) {
   const std::size_t n = problem.particle_count;
   SimulationState state;
   state.resizeParticles(n);
@@ -76,11 +86,12 @@ Outcome integrate(const Problem& problem, double cycle_length, std::size_t cycle
   }
   problem.initialize(state);
   state.rebuildSpeciesIndex();
-  state.updateAllParticleDriftEpoch(0.0, 1.0);
+  state.updateAllParticleDriftEpoch(cosmology.t_begin, cosmology.a_begin);
   CHUI_REQUIRE(state.compactHomogeneousDmoMetadata(0U));
   IntegratorState integrator;
-  integrator.current_time_code = 0.0;
-  integrator.current_scale_factor = 1.0;
+  integrator.current_time_code = cosmology.t_begin;
+  integrator.current_scale_factor = cosmology.a_begin;
+  if (cosmology.background != nullptr) integrator.time_si_per_code = 1.0 / cosmology.background->hubble0Si();
   HierarchicalTimeBinScheduler particles(k_max_bin), cells(k_max_bin);
   particles.reset(static_cast<std::uint32_t>(n), 0U, 0U);
   cells.reset(0U, 0U, 0U);
@@ -140,15 +151,23 @@ Outcome integrate(const Problem& problem, double cycle_length, std::size_t cycle
         plan.closes_cycle = j + 1U == fractions.size();
         plan.opening_pm_kick_factor_code = 0.5 * cycle_length;
         plan.closing_half_interval_time_code = 0.5 * cycle_length;
+        if (cosmology.background != nullptr) {
+          const double a0 = integrator.current_scale_factor;
+          plan.cycle_mid_scale_factor = advanceScaleFactorByCosmicTime(
+              *cosmology.background, a0, 0.5 * cycle_length * integrator.time_si_per_code);
+          plan.opening_pm_kick_factor_code = computeComovingDriftFactor(
+              *cosmology.background, a0, plan.cycle_mid_scale_factor, 64U) / (integrator.time_si_per_code * a0);
+        }
       }
       orchestrator.executeHierarchicalBlockWithDispatcher(state, integrator, particles, cells, dispatcher,
-                                                          nullptr, workspace, nullptr, nullptr, {}, plan);
+                                                          cosmology.background, workspace, nullptr, nullptr, {}, plan);
       CHUI_REQUIRE(!integrator.inside_kdk_step);
       CHUI_REQUIRE(integrator.last_completed_restart_safe == (!multirate || j + 1U == fractions.size()));
     }
   }
   Outcome outcome;
   outcome.time = integrator.current_time_code;
+  outcome.scale_factor = integrator.current_scale_factor;
   for (std::size_t row = 0U; row < n; ++row) {
     const auto lane = lanes(row);
     outcome.position.push_back({*lane[0], *lane[1], *lane[2]});
@@ -326,6 +345,91 @@ void testTwoBodyCircularOrbit() {
   requireOrder("two_body_circular", errors, 1.8, 2.2);
 }
 
+
+// Einstein-de Sitter background, code time in 1/H0:
+// a(t)^{3/2} = a0^{3/2} + 1.5 (t - t0), integral(dt/a) = 2 (sqrt(a1) - sqrt(a0)).
+LambdaCdmBackground edsBackground() {
+  CosmologyBackgroundConfig config;
+  config.omega_matter = 1.0;
+  config.omega_lambda = 0.0;
+  config.omega_radiation = 0.0;
+  config.omega_curvature = 0.0;
+  return LambdaCdmBackground(config);
+}
+
+// Cosmological kick coefficients and long-range kick ownership. With constant
+// comoving accelerations the canonical momentum p = a u is exact:
+//   p(a1) = p0 + (A_tree + A_PM) * 2 (sqrt(a1) - sqrt(a0)),
+// for any block tiling, rung history and PM cycle length. A duplicated or
+// missing PM half-kick, a kick factor at the wrong epoch, or a gap/overlap
+// between the opening [a0, a_mid] and closing [a_mid, a_end] PM integrals
+// changes p by O(A * integral) and fails this test. Positions converge at
+// second order to the analytic integral of p a^{-3/2} da.
+void testCosmologicalKickCoefficients() {
+  const auto background = edsBackground();
+  const double a0 = 0.5, s0 = std::sqrt(a0), u0_z = 0.3;
+  const Vec3 tree_acceleration{1.0, 0.0, 0.0}, pm_acceleration{0.0, 2.0, 0.0};
+  Problem problem;
+  problem.initialize = [&](SimulationState& state) { state.particles.velocity_z_peculiar[0] = u0_z; };
+  problem.force = [&](const SimulationState&, std::size_t, Vec3& tree, Vec3& pm) {
+    tree = tree_acceleration;
+    pm = pm_acceleration;
+  };
+  problem.rung = [](std::size_t, std::uint64_t block) { return static_cast<std::uint8_t>(block % 3U); };
+  const Cosmology cosmology{&background, a0, 0.0};
+  const double span = 0.08;
+  for (const auto& fractions : std::vector<std::vector<double>>{k_uniform4, {0.1, 0.4, 0.2, 0.3}}) {
+    for (const bool multirate : {true, false}) {
+      std::vector<double> position_errors;
+      for (const std::size_t cycles : {8U, 16U, 32U}) {
+        const auto outcome = integrate(problem, span / static_cast<double>(cycles), cycles, fractions, multirate, cosmology);
+        const double a1 = outcome.scale_factor, s1 = std::sqrt(a1);
+        CHUI_REQUIRE(std::abs(outcome.time - span) < 1e-12);
+        CHUI_REQUIRE(std::abs(a1 - std::pow(std::pow(a0, 1.5) + 1.5 * span, 2.0 / 3.0)) < 1e-7);
+        const double integral = 2.0 * (s1 - s0);
+        const double p0[3] = {0.0, 0.0, a0 * u0_z};
+        double position_error = 0.0;
+        for (std::size_t axis = 0U; axis < 3U; ++axis) {
+          const double acceleration = tree_acceleration[axis] + pm_acceleration[axis];
+          const double p_expected = p0[axis] + acceleration * integral;
+          const double p = a1 * outcome.velocity[0][axis];
+          CHUI_REQUIRE(std::abs(p - p_expected) <= 1e-8 * (std::abs(acceleration) * integral + std::abs(p0[axis])) + 1e-15);
+          const double x_expected = 2.0 * (p0[axis] - 2.0 * acceleration * s0) * (1.0 / s0 - 1.0 / s1) +
+                                    4.0 * acceleration * std::log(s1 / s0);
+          position_error = std::max(position_error, std::abs(outcome.position[0][axis] - x_expected));
+        }
+        position_errors.push_back(position_error);
+      }
+      if (position_errors.front() > 1e-12) {
+        requireOrder(multirate ? "cosmological_positions_multirate" : "cosmological_positions_reference",
+                     position_errors, 1.8, 2.2);
+      } else {
+        for (const double error : position_errors) CHUI_REQUIRE(error < 1e-10);
+      }
+    }
+  }
+}
+
+// Cosmological split oscillator (comoving): self-convergence of the multirate
+// composition, with rung changes, against a 32x finer reference-scheme run.
+void testCosmologicalOscillatorConvergence() {
+  const auto background = edsBackground();
+  const std::vector<double> ws{6.0, 2.0}, wl{1.0, 1.0};
+  auto problem = oscillators(ws, wl);
+  problem.rung = [](std::size_t row, std::uint64_t block) {
+    return row == 0U ? std::uint8_t{0U} : static_cast<std::uint8_t>(block % 2U == 0U ? 2U : 1U);
+  };
+  const Cosmology cosmology{&background, 0.5, 0.0};
+  const double span = 0.2;
+  const auto reference = integrate(problem, span / 2560.0, 2560U, {1.0}, false, cosmology);
+  std::vector<double> errors;
+  for (const std::size_t cycles : {20U, 40U, 80U}) {
+    const auto multirate = integrate(problem, span / static_cast<double>(cycles), cycles, k_uniform4, true, cosmology);
+    CHUI_REQUIRE(std::abs(multirate.scale_factor - reference.scale_factor) < 1e-9);
+    errors.push_back(difference(multirate, reference));
+  }
+  requireOrder("cosmological_oscillator", errors, 1.8, 2.2);
+}
 }  // namespace
 
 int main() {
@@ -335,6 +439,8 @@ int main() {
     testCombinedAndVariableBlocks();
     testAdaptiveRungs();
     testTwoBodyCircularOrbit();
+    testCosmologicalKickCoefficients();
+    testCosmologicalOscillatorConvergence();
   } catch (const std::exception& error) {
     std::cerr << "hierarchical multirate convergence: " << error.what() << '\n';
     return 1;

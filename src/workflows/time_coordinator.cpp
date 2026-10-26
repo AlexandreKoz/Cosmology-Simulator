@@ -5,7 +5,9 @@
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
+#include <cstring>
 #include <limits>
+#include <new>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -1478,17 +1480,22 @@ void TimeCoordinator::runHierarchicalSegment(
   const std::uint64_t multirate_blocks_per_cycle = multirate_pm
       ? static_cast<std::uint64_t>(std::max(config.numerics.treepm_update_cadence_steps, 1)) : 1U;
   constexpr unsigned k_multirate_max_retries_per_cycle = 64U;
-  // Lane-level rollback point. Hierarchical KDK runs homogeneous DMO with
-  // frozen ownership inside a cycle (no rebalance/migration at interior
-  // boundaries), so a block can only mutate the phase-space lanes, the SFC
-  // key lane, the common drift epoch, the metadata and the gravity source
-  // generation. Everything else (identity, mass, species/flags/rank,
-  // softening, index generation, cell/gas containers) must be unchanged at
-  // rollback; a fingerprint taken at the opening verifies it and the
-  // rollback fails closed otherwise. This replaces the earlier full
-  // SimulationState copy (identity, mass and metadata lanes are no longer
-  // duplicated).
-  struct MultirateCycleSnapshot {
+  // Rollback store (multirate PM cycle transactions). Hierarchical KDK runs
+  // homogeneous DMO with frozen ownership inside a cycle (no rebalance or
+  // migration at interior boundaries), so a block can only mutate: the
+  // phase-space lanes, the SFC key lane, the common drift epoch, the
+  // metadata, the gravity source generation, the integrator, both
+  // schedulers, the pending output boundary and gravity-derived state.
+  // Authoritative state among these is journaled here; gravity-derived state
+  // is restored (endpoint force) or invalidated by
+  // GravityRuntime::rollbackCycleTransaction. Everything else (identity,
+  // mass, species/flags/rank, softening, index generation, cell/gas
+  // containers) must be unchanged at rollback: a fingerprint taken at the
+  // opening verifies it and the rollback fails closed otherwise.
+  // The store lives for the whole segment: its lanes keep their capacity and
+  // its governed reservation is grown (never re-reserved per cycle) so
+  // successive cycles reuse one allocation; both are released at segment end.
+  struct MultirateRollbackStore {
     std::vector<double> position_x_comoving;
     std::vector<double> position_y_comoving;
     std::vector<double> position_z_comoving;
@@ -1507,8 +1514,23 @@ void TimeCoordinator::runHierarchicalSegment(
     // the state row order (refilled from the frozen identity lane).
     io::GravityForceCachePersistentState force_cache{};
     internal::PendingOutputBoundary pending{};
-    GravityRuntime::DiagnosticsMark diagnostics{};
+    bool armed = false;  // holds the rollback point of the open cycle
     core::MemoryReservation reservation;
+    std::uint64_t reserved_bytes = 0U;
+    std::uint64_t peak_reserved_bytes = 0U;
+    void releaseStorage() noexcept {
+      armed = false;
+      for (auto* lane : {&position_x_comoving, &position_y_comoving, &position_z_comoving,
+                         &velocity_x_peculiar, &velocity_y_peculiar, &velocity_z_peculiar}) {
+        std::vector<double>().swap(*lane);
+      }
+      std::vector<std::uint64_t>().swap(sfc_key);
+      force_cache = io::GravityForceCachePersistentState{};
+      particle_scheduler = core::TimeBinPersistentState{};
+      cell_scheduler = core::TimeBinPersistentState{};
+      reservation.release();
+      reserved_bytes = 0U;
+    }
   };
   struct MultirateCycle {
     bool open = false;
@@ -1520,25 +1542,49 @@ void TimeCoordinator::runHierarchicalSegment(
     const char* length_limiter = "target_blocks";
     unsigned retries = 0U;               // rejections of the current opening
     double retry_length_limit = 0.0;     // > 0 after a rejection: bound on T at reopening
-    bool forced_rollback_used = false;   // test seam bookkeeping (see ReferenceWorkflowOptions)
-    std::optional<MultirateCycleSnapshot> snapshot;
+    std::uint64_t forced_rejections = 0U;  // test seam bookkeeping (see ReferenceWorkflowOptions)
     // Block evidence of the open attempt; published when the cycle closes,
     // discarded by a rollback (rejected attempts never reach the report).
     std::vector<ReferenceWorkflowReport::HierarchicalBlockRecord> staged_records;
   } pm_cycle;
+  MultirateRollbackStore rollback_store;
+  // Released on every exit path (normal end, collective failure).
+  struct RollbackStoreRelease {
+    MultirateRollbackStore& store;
+    ~RollbackStoreRelease() { store.releaseStorage(); }
+  } rollback_store_release{rollback_store};
   std::uint64_t forced_rollbacks_remaining =
       multirate_pm ? options.multirate_test_forced_cycle_rollbacks : 0U;
+  const std::uint64_t forced_rejections_per_cycle =
+      std::max<std::uint64_t>(options.multirate_test_forced_rejections_per_cycle, 1U);
+  std::uint64_t snapshot_refusals_remaining =
+      multirate_pm ? options.multirate_test_snapshot_refusals : 0U;
+  const bool snapshot_refusal_this_rank = options.multirate_test_snapshot_refusal_ranks.empty() ||
+      std::find(options.multirate_test_snapshot_refusal_ranks.begin(),
+                options.multirate_test_snapshot_refusal_ranks.end(),
+                m_services.mpi_context.worldRank()) != options.multirate_test_snapshot_refusal_ranks.end();
   core::HierarchicalPmCyclePlan pm_cycle_plan{};
-  std::uint64_t soft_stop_extension_blocks = 0U;
   if (multirate_pm && !integrator.last_completed_restart_safe && integrator.step_index > 0U) {
     throw std::logic_error("multirate PM cycle must open at a restart-safe synchronization boundary");
+  }
+  if (multirate_pm && m_gravity.cycleTransactionOpen()) {
+    throw std::logic_error("multirate PM segment started with an open gravity cycle transaction");
   }
   // FNV-1a over everything a cycle must leave unchanged (see above).
   const auto frozen_state_fingerprint = [&]() {
     std::uint64_t hash = 14695981039346656037ULL;
+    // Word-wise FNV-1a (8-byte words, then the byte tail): one pass over the
+    // frozen lanes at each multi-block opening and each rollback.
     const auto mix_bytes = [&hash](const void* data, std::size_t bytes) {
       const auto* p = static_cast<const unsigned char*>(data);
-      for (std::size_t i = 0U; i < bytes; ++i) { hash ^= p[i]; hash *= 1099511628211ULL; }
+      std::size_t i = 0U;
+      for (; i + sizeof(std::uint64_t) <= bytes; i += sizeof(std::uint64_t)) {
+        std::uint64_t word = 0U;
+        std::memcpy(&word, p + i, sizeof(word));
+        hash ^= word;
+        hash *= 1099511628211ULL;
+      }
+      for (; i < bytes; ++i) { hash ^= p[i]; hash *= 1099511628211ULL; }
     };
     const auto mix_value = [&](std::uint64_t value) { mix_bytes(&value, sizeof(value)); };
     const auto mix_lane = [&](const auto& lane) {
@@ -1559,133 +1605,168 @@ void TimeCoordinator::runHierarchicalSegment(
     mix_value(static_cast<std::uint64_t>(state.particleMetadataRepresentation()));
     return hash;
   };
-  // Captures the rollback point. Returns false (on every rank) when the
-  // governor refuses the snapshot on any rank: the caller then opens a
-  // single-block cycle, which has no interior boundary and cannot be
-  // rejected. Any other failure is collective and fatal.
+  // Captures the rollback point and opens the gravity cycle transaction.
+  // Returns false on EVERY rank when admission failed on ANY rank (governor
+  // refusal or allocation failure, both reduced collectively before any rank
+  // advances): the caller then applies the configured memory policy. Any
+  // other failure is collective and fatal.
   const auto take_cycle_snapshot = [&]() -> bool {
     std::exception_ptr failure;
     bool admitted_local = true;
+    auto& store = rollback_store;
     try {
-      MultirateCycleSnapshot snapshot;
+      if (store.armed || m_gravity.cycleTransactionOpen()) {
+        throw std::logic_error("multirate PM cycle snapshot requested while a rollback point is armed");
+      }
       if (!state.hasHomogeneousDmoMetadata()) {
         throw std::logic_error("multirate PM cycle rollback requires homogeneous DMO particle metadata");
       }
+      const bool simulated_refusal = snapshot_refusals_remaining > 0U && snapshot_refusal_this_rank;
       const std::uint64_t n = static_cast<std::uint64_t>(state.particles.size());
       // Governed: 6 phase-space lanes + SFC key, the force endpoint (total,
       // Tree and PM vectors + nearest pair = 10 doubles, ids only when the
       // cache order differs) and both schedulers' persistent lanes.
       const std::uint64_t bytes = core::checkedSizeMultiply(
           n, 17U * sizeof(double) + 3U * sizeof(std::uint64_t), "multirate rollback snapshot bytes");
-      if (m_services.memory_governor != nullptr) {
+      if (simulated_refusal && options.multirate_test_snapshot_allocation_failure) throw std::bad_alloc();
+      if (simulated_refusal) {
+        admitted_local = false;
+      } else if (m_services.memory_governor != nullptr && bytes > store.reserved_bytes) {
+        // Grow the governed reservation (released first so the old and new
+        // grants are never double counted).
+        store.reservation.release();
+        store.reserved_bytes = 0U;
         try {
-          snapshot.reservation = m_services.memory_governor->reserve(
+          store.reservation = m_services.memory_governor->reserve(
               core::MemoryClass::kPhaseResident, bytes, "time.multirate_cycle_rollback_snapshot");
-          snapshot.reservation.commit();
+          store.reservation.commit();
+          store.reserved_bytes = bytes;
+          store.peak_reserved_bytes = std::max(store.peak_reserved_bytes, bytes);
         } catch (const core::MemoryAdmissionError&) {
           admitted_local = false;
         }
       }
       if (admitted_local) {
         const auto copy = [](const auto& lane, auto& out) { out.assign(lane.begin(), lane.end()); };
-        copy(state.particles.position_x_comoving, snapshot.position_x_comoving);
-        copy(state.particles.position_y_comoving, snapshot.position_y_comoving);
-        copy(state.particles.position_z_comoving, snapshot.position_z_comoving);
-        copy(state.particles.velocity_x_peculiar, snapshot.velocity_x_peculiar);
-        copy(state.particles.velocity_y_peculiar, snapshot.velocity_y_peculiar);
-        copy(state.particles.velocity_z_peculiar, snapshot.velocity_z_peculiar);
-        copy(state.particle_sidecar.sfc_key, snapshot.sfc_key);
-        snapshot.metadata = state.metadata;
-        snapshot.drift_time_code = state.homogeneousDmoLastDriftTimeCode();
-        snapshot.drift_scale_factor = state.homogeneousDmoLastDriftScaleFactor();
-        snapshot.frozen_fingerprint = frozen_state_fingerprint();
-        snapshot.integrator = integrator;
-        snapshot.particle_scheduler = particles.exportPersistentState();
-        snapshot.cell_scheduler = cells.exportPersistentState();
-        snapshot.pending = pending;
-        snapshot.diagnostics = m_gravity.diagnosticsMark();
+        copy(state.particles.position_x_comoving, store.position_x_comoving);
+        copy(state.particles.position_y_comoving, store.position_y_comoving);
+        copy(state.particles.position_z_comoving, store.position_z_comoving);
+        copy(state.particles.velocity_x_peculiar, store.velocity_x_peculiar);
+        copy(state.particles.velocity_y_peculiar, store.velocity_y_peculiar);
+        copy(state.particles.velocity_z_peculiar, store.velocity_z_peculiar);
+        copy(state.particle_sidecar.sfc_key, store.sfc_key);
+        store.metadata = state.metadata;
+        store.drift_time_code = state.homogeneousDmoLastDriftTimeCode();
+        store.drift_scale_factor = state.homogeneousDmoLastDriftScaleFactor();
+        store.frozen_fingerprint = frozen_state_fingerprint();
+        store.integrator = integrator;
+        store.particle_scheduler = particles.exportPersistentState();
+        store.cell_scheduler = cells.exportPersistentState();
+        store.pending = pending;
         const io::GravityForceCachePersistentView view = m_gravity.restartForceCacheView(state);
         if (!view.valid || !view.hierarchical_endpoint_valid) {
           throw std::logic_error("multirate PM cycle opening lacks a complete synchronized force endpoint");
         }
-        auto& cache = snapshot.force_cache;
+        auto& cache = store.force_cache;
         cache.valid = true;
         const auto& ids = state.particle_sidecar.particle_id;
         if (view.particle_id.size() != ids.size() ||
             !std::equal(view.particle_id.begin(), view.particle_id.end(), ids.begin())) {
           cache.particle_id.assign(view.particle_id.begin(), view.particle_id.end());
+        } else {
+          cache.particle_id.clear();
         }
         cache.gas_cell_id.assign(view.gas_cell_id.begin(), view.gas_cell_id.end());
-        cache.particle_accel_x_comoving.assign(view.particle_accel_x_comoving.begin(), view.particle_accel_x_comoving.end());
-        cache.particle_accel_y_comoving.assign(view.particle_accel_y_comoving.begin(), view.particle_accel_y_comoving.end());
-        cache.particle_accel_z_comoving.assign(view.particle_accel_z_comoving.begin(), view.particle_accel_z_comoving.end());
-        cache.cell_accel_x_comoving.assign(view.cell_accel_x_comoving.begin(), view.cell_accel_x_comoving.end());
-        cache.cell_accel_y_comoving.assign(view.cell_accel_y_comoving.begin(), view.cell_accel_y_comoving.end());
-        cache.cell_accel_z_comoving.assign(view.cell_accel_z_comoving.begin(), view.cell_accel_z_comoving.end());
+        copy(view.particle_accel_x_comoving, cache.particle_accel_x_comoving);
+        copy(view.particle_accel_y_comoving, cache.particle_accel_y_comoving);
+        copy(view.particle_accel_z_comoving, cache.particle_accel_z_comoving);
+        copy(view.cell_accel_x_comoving, cache.cell_accel_x_comoving);
+        copy(view.cell_accel_y_comoving, cache.cell_accel_y_comoving);
+        copy(view.cell_accel_z_comoving, cache.cell_accel_z_comoving);
         cache.hierarchical_endpoint_valid = true;
         cache.hierarchical_pm_field_version = view.hierarchical_pm_field_version;
-        cache.hierarchical_tree_accel_x_comoving.assign(view.hierarchical_tree_accel_x_comoving.begin(), view.hierarchical_tree_accel_x_comoving.end());
-        cache.hierarchical_tree_accel_y_comoving.assign(view.hierarchical_tree_accel_y_comoving.begin(), view.hierarchical_tree_accel_y_comoving.end());
-        cache.hierarchical_tree_accel_z_comoving.assign(view.hierarchical_tree_accel_z_comoving.begin(), view.hierarchical_tree_accel_z_comoving.end());
-        cache.hierarchical_pm_accel_x_comoving.assign(view.hierarchical_pm_accel_x_comoving.begin(), view.hierarchical_pm_accel_x_comoving.end());
-        cache.hierarchical_pm_accel_y_comoving.assign(view.hierarchical_pm_accel_y_comoving.begin(), view.hierarchical_pm_accel_y_comoving.end());
-        cache.hierarchical_pm_accel_z_comoving.assign(view.hierarchical_pm_accel_z_comoving.begin(), view.hierarchical_pm_accel_z_comoving.end());
-        cache.hierarchical_nearest_pair_r2_comoving.assign(
-            view.hierarchical_nearest_pair_r2_comoving.begin(), view.hierarchical_nearest_pair_r2_comoving.end());
-        pm_cycle.snapshot.emplace(std::move(snapshot));
+        copy(view.hierarchical_tree_accel_x_comoving, cache.hierarchical_tree_accel_x_comoving);
+        copy(view.hierarchical_tree_accel_y_comoving, cache.hierarchical_tree_accel_y_comoving);
+        copy(view.hierarchical_tree_accel_z_comoving, cache.hierarchical_tree_accel_z_comoving);
+        copy(view.hierarchical_pm_accel_x_comoving, cache.hierarchical_pm_accel_x_comoving);
+        copy(view.hierarchical_pm_accel_y_comoving, cache.hierarchical_pm_accel_y_comoving);
+        copy(view.hierarchical_pm_accel_z_comoving, cache.hierarchical_pm_accel_z_comoving);
+        copy(view.hierarchical_nearest_pair_r2_comoving, cache.hierarchical_nearest_pair_r2_comoving);
       }
+    } catch (const std::bad_alloc&) {
+      // Allocation failure of the snapshot lanes is an admission refusal,
+      // not a fatal error: drop the partial copy and its capacity.
+      admitted_local = false;
+      store.releaseStorage();
     } catch (...) { failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(failure, "multirate PM cycle snapshot");
     // Collective admission: every rank opens the same cycle shape.
+    // A locally refused rank holds no rollback storage at all (the released
+    // reservation and the retained lane capacity go together, so the
+    // governor never under-counts resident snapshot memory).
+    if (!admitted_local) store.releaseStorage();
     const bool admitted = mpi.allreduceMinUint64(admitted_local ? 1U : 0U) == 1U;
-    if (!admitted) pm_cycle.snapshot.reset();
-    return admitted;
+    if (snapshot_refusals_remaining > 0U) --snapshot_refusals_remaining;
+    if (!admitted) {
+      store.armed = false;
+      return false;
+    }
+    std::exception_ptr begin_failure;
+    try {
+      m_gravity.beginCycleTransaction();
+      store.armed = true;
+    } catch (...) { begin_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(begin_failure, "multirate PM cycle transaction begin");
+    return true;
   };
   // Transactional rollback to the cycle opening. Every rank executes it (the
   // decision derives from globally reduced criteria). The source generation
   // is advanced strictly beyond every generation used by the rejected attempt
-  // so no generation-keyed cache (tree reuse/refit, ghosts, LET geometry) can
-  // mistake retried positions for rejected ones; the restored force endpoint
-  // is re-stamped with that generation (it describes the restored positions).
-  // Diagnostics of the rejected attempt move to the rejected-attempt totals.
+  // so no generation-keyed consumer can mistake retried positions for
+  // rejected ones; GravityRuntime::rollbackCycleTransaction additionally
+  // drops every source-history-dependent derived gravity state explicitly
+  // and re-imports the opening endpoint force stamped with the new
+  // generation. Diagnostics of the rejected attempt move to execution cost.
   const auto rollback_cycle = [&]() {
     std::exception_ptr failure;
+    auto& store = rollback_store;
     try {
-      if (!pm_cycle.snapshot.has_value()) {
-        throw std::logic_error("multirate PM cycle rollback requested without an opening snapshot");
+      if (options.multirate_test_rollback_failure_rank == m_services.mpi_context.worldRank()) {
+        throw std::runtime_error("injected multirate PM cycle rollback failure (test seam)");
       }
-      auto& snapshot = *pm_cycle.snapshot;
-      if (state.particles.size() != snapshot.position_x_comoving.size() ||
-          frozen_state_fingerprint() != snapshot.frozen_fingerprint) {
+      if (!store.armed || !m_gravity.cycleTransactionOpen()) {
+        throw std::logic_error("multirate PM cycle rollback requested without an armed rollback point");
+      }
+      if (state.particles.size() != store.position_x_comoving.size() ||
+          frozen_state_fingerprint() != store.frozen_fingerprint) {
         throw std::logic_error(
             "multirate PM cycle rollback: state outside the rollback lanes changed inside the cycle");
       }
       const std::uint64_t generation_reached = state.gravitySourceGeneration();
       const auto restore = [](const auto& saved, auto& lane) { std::copy(saved.begin(), saved.end(), lane.begin()); };
-      restore(snapshot.position_x_comoving, state.particles.position_x_comoving);
-      restore(snapshot.position_y_comoving, state.particles.position_y_comoving);
-      restore(snapshot.position_z_comoving, state.particles.position_z_comoving);
-      restore(snapshot.velocity_x_peculiar, state.particles.velocity_x_peculiar);
-      restore(snapshot.velocity_y_peculiar, state.particles.velocity_y_peculiar);
-      restore(snapshot.velocity_z_peculiar, state.particles.velocity_z_peculiar);
-      state.particle_sidecar.sfc_key.assign(snapshot.sfc_key.begin(), snapshot.sfc_key.end());
-      state.metadata = snapshot.metadata;
-      state.updateAllParticleDriftEpoch(snapshot.drift_time_code, snapshot.drift_scale_factor);
-      integrator = snapshot.integrator;
-      particles.importPersistentState(snapshot.particle_scheduler);
-      cells.importPersistentState(snapshot.cell_scheduler);
-      pending = snapshot.pending;
+      restore(store.position_x_comoving, state.particles.position_x_comoving);
+      restore(store.position_y_comoving, state.particles.position_y_comoving);
+      restore(store.position_z_comoving, state.particles.position_z_comoving);
+      restore(store.velocity_x_peculiar, state.particles.velocity_x_peculiar);
+      restore(store.velocity_y_peculiar, state.particles.velocity_y_peculiar);
+      restore(store.velocity_z_peculiar, state.particles.velocity_z_peculiar);
+      state.particle_sidecar.sfc_key.assign(store.sfc_key.begin(), store.sfc_key.end());
+      state.metadata = store.metadata;
+      state.updateAllParticleDriftEpoch(store.drift_time_code, store.drift_scale_factor);
+      integrator = store.integrator;
+      particles.importPersistentState(store.particle_scheduler);
+      cells.importPersistentState(store.cell_scheduler);
+      pending = store.pending;
       while (state.gravitySourceGeneration() <= generation_reached) state.bumpGravitySourceGeneration();
-      if (snapshot.force_cache.particle_id.empty()) {
-        snapshot.force_cache.particle_id.assign(state.particle_sidecar.particle_id.begin(),
-                                                state.particle_sidecar.particle_id.end());
+      if (store.force_cache.particle_id.empty()) {
+        store.force_cache.particle_id.assign(state.particle_sidecar.particle_id.begin(),
+                                             state.particle_sidecar.particle_id.end());
       }
-      m_gravity.importRestartForceCache(snapshot.force_cache, state);
+      m_gravity.rollbackCycleTransaction(store.force_cache, state);
       integrator.pm_source_generation = state.gravitySourceGeneration();
       syncTimeBinsFromSchedulers(particles, cells, state);
-      m_gravity.discardDiagnosticsSince(snapshot.diagnostics);
       report.multirate_rejected_blocks += pm_cycle.completed_blocks;
-      pm_cycle.snapshot.reset();
+      store.armed = false;
     } catch (...) { failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(failure, "multirate PM cycle rollback");
     install_geometry();
@@ -1699,7 +1780,6 @@ void TimeCoordinator::runHierarchicalSegment(
     if (pm_cycle_interior_start && integrator.step_index >= final_step) {
       // Soft stop: the step budget was reached inside an open cycle. Finish
       // the cycle (never shorten it for an execution budget).
-      ++soft_stop_extension_blocks;
       profiler.counters().addCount("time.hierarchical_multirate_soft_stop_extension_blocks");
     }
     const auto console_begin = RuntimeConsoleReporter::Clock::now();
@@ -1985,10 +2065,20 @@ void TimeCoordinator::runHierarchicalSegment(
         }
         // Rollback point, before rung assignment and the opening PM kick.
         // A cycle whose first block reaches its end has no interior boundary
-        // and cannot be rejected: no snapshot is needed. When the governor
-        // refuses the snapshot on any rank, the cycle opens as one block
-        // (no rollback can be needed) instead of failing the run.
+        // and cannot be rejected: no snapshot is needed. When snapshot
+        // admission fails on any rank (collectively agreed), the configured
+        // memory policy decides: a one-block cycle on every rank (its single
+        // block still honours the particle criteria and, since
+        // coarse_dt < length <= Δt_PMdisp, the PM displacement bound), or a
+        // collective failure (reproducibility mode).
         if (coarse_dt < length * (1.0 - 1.0e-12) && !take_cycle_snapshot()) {
+          if (config.numerics.treepm_multirate_rollback_memory_policy ==
+              core::MultirateRollbackMemoryPolicy::kFail) {
+            profiler.counters().addCount("time.hierarchical_multirate_memory_policy_failures");
+            throw std::runtime_error(
+                "multirate PM cycle rollback snapshot was refused by the memory governor on at least one rank "
+                "and numerics.treepm_multirate_rollback_memory_policy = fail");
+          }
           length = coarse_dt;
           limiter = "rollback_memory";
           boundary_clipped = false;
@@ -2004,7 +2094,7 @@ void TimeCoordinator::runHierarchicalSegment(
         pm_cycle.length_limiter = limiter;
         // Reset per cycle, not per attempt: a retried opening keeps its
         // rejection history (retries, forced-rollback bookkeeping).
-        if (pm_cycle.retries == 0U) pm_cycle.forced_rollback_used = false;
+        if (pm_cycle.retries == 0U) pm_cycle.forced_rejections = 0U;
         profiler.counters().addCount(std::string("time.hierarchical_multirate_cycle_limited_by.") + limiter);
         if (boundary_clipped) profiler.counters().addCount("time.hierarchical_multirate_cycle_shortened_by_boundary");
         const double half_cycle_time_code = 0.5 * pm_cycle.length_time_code;
@@ -2024,7 +2114,8 @@ void TimeCoordinator::runHierarchicalSegment(
         // Interior boundary: the outer interval fixed at the opening must still
         // satisfy the PM displacement criterion with the current velocities.
         const bool displacement_violated = displacement_dt < pm_cycle.length_time_code * (1.0 - 1.0e-12);
-        const bool forced = !displacement_violated && forced_rollbacks_remaining > 0U && !pm_cycle.forced_rollback_used;
+        const bool forced = !displacement_violated && forced_rollbacks_remaining > 0U &&
+            pm_cycle.forced_rejections < forced_rejections_per_cycle;
         if (displacement_violated || forced) {
           ++pm_cycle.retries;
           if (pm_cycle.retries > k_multirate_max_retries_per_cycle) {
@@ -2040,7 +2131,7 @@ void TimeCoordinator::runHierarchicalSegment(
               ? pm_cycle.length_time_code
               : std::min(0.5 * pm_cycle.length_time_code, displacement_dt);
           const unsigned retries = pm_cycle.retries;
-          const bool forced_used = pm_cycle.forced_rollback_used || forced;
+          const std::uint64_t forced_rejections = pm_cycle.forced_rejections + (forced ? 1U : 0U);
           if (forced) --forced_rollbacks_remaining;
           profiler.counters().addCount("time.hierarchical_multirate_cycle_rejected_retried");
           rollback_cycle();
@@ -2048,7 +2139,7 @@ void TimeCoordinator::runHierarchicalSegment(
           pm_cycle.open = false;
           pm_cycle.retries = retries;
           pm_cycle.retry_length_limit = retry_limit;
-          pm_cycle.forced_rollback_used = forced_used;
+          pm_cycle.forced_rejections = forced_rejections;
           ++report.multirate_pm_cycle_rollbacks;
           if (forced) ++report.multirate_forced_test_rollbacks;
           continue;
@@ -2108,6 +2199,7 @@ void TimeCoordinator::runHierarchicalSegment(
         .pm_cycle_end_time_code = multirate_pm ? pm_cycle.end_time_code : integrator.current_time_code + coarse_dt,
         .pm_cycle_retries = multirate_pm ? pm_cycle.retries : 0U,
         .pm_displacement_limit_time_code = displacement_dt,
+        .pm_cycle_length_limiter = multirate_pm ? std::string(pm_cycle.length_limiter) : std::string("coarse_block"),
     };
     const core::TimeStepLimits limits{.min_dt_time_code = quantum,
         .max_dt_time_code = coarse_dt, .max_bin = particles.maxBin()};
@@ -2231,7 +2323,8 @@ void TimeCoordinator::runHierarchicalSegment(
       // Advance or close the outer PM cycle after the block completed.
       if (pm_cycle_plan.closes_cycle) {
         pm_cycle.open = false;
-        pm_cycle.snapshot.reset();
+        if (m_gravity.cycleTransactionOpen()) m_gravity.commitCycleTransaction();
+        rollback_store.armed = false;
         pm_cycle.retries = 0U;
         pm_cycle.retry_length_limit = 0.0;
         ++report.multirate_pm_cycles_completed;
@@ -2284,10 +2377,20 @@ void TimeCoordinator::runHierarchicalSegment(
   }
   report.completed_steps = integrator.step_index - run_start_step;
   report.requested_steps = requested_steps;
-  report.multirate_soft_stop_extension_blocks = soft_stop_extension_blocks;
-  if (multirate_pm && pm_cycle.open) {
+  // Accepted-trajectory value: blocks beyond the budget that closed an open
+  // cycle (blocks of rejected attempts were rolled back with step_index; the
+  // profiler counter time.hierarchical_multirate_soft_stop_extension_blocks
+  // counts executed work, rejected attempts included).
+  report.multirate_soft_stop_extension_blocks = multirate_pm && report.completed_steps > requested_steps
+      ? report.completed_steps - requested_steps : 0U;
+  if (multirate_pm && (pm_cycle.open || rollback_store.armed || m_gravity.cycleTransactionOpen())) {
     throw std::logic_error("hierarchical segment ended with an open multirate PM cycle");
   }
+  // Rollback storage: report the governed high-water and release it (the
+  // RAII guard also releases it on failure paths).
+  report.multirate_rollback_snapshot_peak_bytes = rollback_store.peak_reserved_bytes;
+  rollback_store.releaseStorage();
+  report.multirate_rollback_snapshot_retained_bytes = rollback_store.reserved_bytes;
   report.final_time_code = integrator.current_time_code;
   report.final_scale_factor = integrator.current_scale_factor;
 }
