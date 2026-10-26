@@ -990,6 +990,8 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
     }
     report.treepm_long_range_refresh_count = gravity_callback.longRangeRefreshCount();
     report.treepm_long_range_reuse_count = gravity_callback.longRangeReuseCount();
+    report.multirate_rejected_pm_refreshes = gravity_callback.rejectedLongRangeRefreshCount();
+    report.multirate_rejected_pm_reuses = gravity_callback.rejectedLongRangeReuseCount();
     report.treepm_cadence_records.assign(
         gravity_callback.cadenceRecords().begin(),
         gravity_callback.cadenceRecords().end());

@@ -81,6 +81,21 @@ class GravityRuntime : public GravityAccelerationProvider,
   [[nodiscard]] virtual double gravitationalConstantCode() const noexcept = 0;
   [[nodiscard]] virtual std::span<const ReferenceWorkflowReport::TreePmCadenceRecord>
   cadenceRecords() const noexcept = 0;
+  // Multirate PM rollback accounting (diagnostics only; never force truth).
+  // A rejected outer-PM cycle attempt is rolled back by the time coordinator;
+  // its refresh/reuse counts and recent cadence records are moved out of the
+  // trajectory diagnostics into the rejected-attempt totals, so reported
+  // trajectory counts equal an uninterrupted run's. Cadence records evicted
+  // from the bounded recent window during the attempt are not restored.
+  struct DiagnosticsMark {
+    std::uint64_t long_range_refreshes = 0U;
+    std::uint64_t long_range_reuses = 0U;
+    std::uint64_t cadence_records_appended = 0U;
+  };
+  [[nodiscard]] virtual DiagnosticsMark diagnosticsMark() const noexcept = 0;
+  virtual void discardDiagnosticsSince(const DiagnosticsMark& mark) noexcept = 0;
+  [[nodiscard]] virtual std::uint64_t rejectedLongRangeRefreshCount() const noexcept = 0;
+  [[nodiscard]] virtual std::uint64_t rejectedLongRangeReuseCount() const noexcept = 0;
   [[nodiscard]] virtual core::MemoryReport memoryReport() const = 0;
   [[nodiscard]] virtual const parallel::DecompositionRuntimeMeasurements&
   lastRuntimeDecompositionMeasurements() const noexcept = 0;

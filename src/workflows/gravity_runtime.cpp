@@ -613,6 +613,34 @@ class GravityRuntimeImpl final : public GravityRuntime {
   [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
     return m_cadence_records;
   }
+  [[nodiscard]] DiagnosticsMark diagnosticsMark() const noexcept override {
+    return DiagnosticsMark{.long_range_refreshes = m_long_range_refresh_count,
+                           .long_range_reuses = m_long_range_reuse_count,
+                           .cadence_records_appended = m_cadence_records_appended};
+  }
+  void discardDiagnosticsSince(const DiagnosticsMark& mark) noexcept override {
+    if (m_long_range_refresh_count >= mark.long_range_refreshes) {
+      m_rejected_long_range_refresh_count += m_long_range_refresh_count - mark.long_range_refreshes;
+      m_long_range_refresh_count = mark.long_range_refreshes;
+    }
+    if (m_long_range_reuse_count >= mark.long_range_reuses) {
+      m_rejected_long_range_reuse_count += m_long_range_reuse_count - mark.long_range_reuses;
+      m_long_range_reuse_count = mark.long_range_reuses;
+    }
+    if (m_cadence_records_appended >= mark.cadence_records_appended) {
+      const std::uint64_t appended = m_cadence_records_appended - mark.cadence_records_appended;
+      const std::size_t drop = static_cast<std::size_t>(
+          std::min<std::uint64_t>(appended, static_cast<std::uint64_t>(m_cadence_records.size())));
+      m_cadence_records.resize(m_cadence_records.size() - drop);
+      m_cadence_records_appended = mark.cadence_records_appended;
+    }
+  }
+  [[nodiscard]] std::uint64_t rejectedLongRangeRefreshCount() const noexcept override {
+    return m_rejected_long_range_refresh_count;
+  }
+  [[nodiscard]] std::uint64_t rejectedLongRangeReuseCount() const noexcept override {
+    return m_rejected_long_range_reuse_count;
+  }
   [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
   [[nodiscard]] core::MemoryReport memoryReport() const {
     core::MemoryReportBuilder builder;
@@ -2314,6 +2342,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     if (m_cadence_records.size() == k_recent_cadence_limit) {
       m_cadence_records.erase(m_cadence_records.begin());
     }
+    ++m_cadence_records_appended;
     m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
@@ -3976,6 +4005,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
   // (memoized per (source epoch, evaluation epoch); telemetry only).
   std::uint64_t m_source_prediction_drift_integrals = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
+  // Lifetime appends to m_cadence_records and rejected multirate attempts
+  // (diagnostics; see GravityRuntime::discardDiagnosticsSince).
+  std::uint64_t m_cadence_records_appended = 0U;
+  std::uint64_t m_rejected_long_range_refresh_count = 0U;
+  std::uint64_t m_rejected_long_range_reuse_count = 0U;
 };
 
 }  // namespace

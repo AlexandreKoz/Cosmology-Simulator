@@ -159,11 +159,25 @@ struct ReferenceWorkflowReport {
     double pm_cycle_opening_time_code = 0.0;
     double pm_cycle_end_time_code = 0.0;
     unsigned pm_cycle_retries = 0U;
+    // Global PM displacement bound (code time) evaluated at this block's
+    // opening synchronization point; +infinity when no speed bounds it.
+    // Multirate invariant: pm_cycle_end - pm_cycle_opening <= this bound for
+    // every block of an accepted cycle.
+    double pm_displacement_limit_time_code = 0.0;
   };
   std::vector<HierarchicalBlockRecord> hierarchical_block_records;
   std::uint64_t multirate_pm_cycles_completed = 0U;
   std::uint64_t multirate_pm_cycle_rollbacks = 0U;
   std::uint64_t multirate_forced_test_rollbacks = 0U;
+  // Work of rejected (rolled-back) multirate attempts, excluded from the
+  // trajectory diagnostics above (treepm_long_range_*_count, cadence records,
+  // hierarchical_block_records). Profiler timings still include it (cost).
+  std::uint64_t multirate_rejected_blocks = 0U;
+  std::uint64_t multirate_rejected_pm_refreshes = 0U;
+  std::uint64_t multirate_rejected_pm_reuses = 0U;
+  // Multi-block cycles opened as a single block because the rollback
+  // snapshot was refused by the memory governor on some rank.
+  std::uint64_t multirate_memory_limited_cycles = 0U;
   // Blocks executed beyond the requested step budget to close an open PM
   // cycle (soft stop); completed_steps includes them.
   std::uint64_t multirate_soft_stop_extension_blocks = 0U;
