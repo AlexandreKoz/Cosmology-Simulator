@@ -47,14 +47,31 @@ enum class TreePmForceGradient {
 //   for the next N-1 global KDK force evaluations (first-order in N dt in the
 //   long-range force); decomposition epoch, mesh and split must be unchanged.
 // kMultirateOuterKick (experimental, unqualified; hierarchical KDK only): an
-//   r-RESPA outer PM level. One PM cycle spans N = treepm_update_cadence_steps
-//   coarse blocks of equal duration; the field is evaluated only at cycle
-//   endpoints and applied as two half-cycle kicks (core::HierarchicalPmCyclePlan).
-//   Second-order time-symmetric splitting; not a stale-field interpolation.
+//   r-RESPA outer PM level. treepm_update_cadence_steps is the TARGET number
+//   of coarse blocks per PM cycle; the cycle length T is fixed at opening from
+//   that target, the PM displacement criterion and the next output/end
+//   boundary, and inner blocks are re-planned by the reference per-block
+//   criteria (an interior PM displacement violation rolls the cycle back and
+//   retries it shorter). PM is evaluated only at cycle endpoints and applied
+//   as two half-cycle kicks (core::HierarchicalPmCyclePlan). Formally second
+//   order; adaptive stepping breaks strict reversibility (docs/time_integration.md).
 enum class TreePmPmReusePolicy {
   kExactSourceState,
   kStaleWithinCadence,
   kMultirateOuterKick,
+};
+
+// Response to a MemoryGovernor refusal (on any rank) of the multirate PM cycle
+// rollback snapshot (numerics.treepm_multirate_rollback_memory_policy).
+// kSingleBlockFallback (default): every rank opens that cycle as one coarse
+//   block (cannot be rejected; all timestep and PM displacement limits still
+//   apply). The schedule then depends on the memory budget; each fallback is
+//   recorded (report/counters/block records).
+// kFail: the run fails collectively instead (reproducibility mode: the
+//   numerical schedule never depends on the memory budget).
+enum class MultirateRollbackMemoryPolicy {
+  kSingleBlockFallback,
+  kFail,
 };
 
 enum class TreePmOpeningCriterion {
@@ -326,6 +343,8 @@ struct NumericsConfig {
   bool treepm_enable_window_deconvolution = true;
   int treepm_update_cadence_steps = 1;
   TreePmPmReusePolicy treepm_pm_reuse_policy = TreePmPmReusePolicy::kExactSourceState;
+  MultirateRollbackMemoryPolicy treepm_multirate_rollback_memory_policy =
+      MultirateRollbackMemoryPolicy::kSingleBlockFallback;
   // Explicitly test/diagnostic-only. Production workflows fail closed when
   // TreePM is requested without a production FFT backend.
   bool treepm_allow_diagnostic_naive_dft = false;

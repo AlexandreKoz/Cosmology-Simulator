@@ -692,6 +692,19 @@ parseInitialConditionMissingFieldPolicy(
       "' (supported: exact, stale_within_cadence, multirate_outer_kick)");
 }
 
+[[nodiscard]] const char* multirateRollbackMemoryPolicyName(MultirateRollbackMemoryPolicy policy) noexcept {
+  return policy == MultirateRollbackMemoryPolicy::kFail ? "fail" : "single_block_fallback";
+}
+
+[[nodiscard]] MultirateRollbackMemoryPolicy parseMultirateRollbackMemoryPolicy(const std::string& value) {
+  const std::string lower = toLower(trim(value));
+  if (lower == "single_block_fallback") return MultirateRollbackMemoryPolicy::kSingleBlockFallback;
+  if (lower == "fail") return MultirateRollbackMemoryPolicy::kFail;
+  throw ConfigError(
+      "key 'numerics.treepm_multirate_rollback_memory_policy': invalid value '" + value +
+      "' (supported: single_block_fallback, fail)");
+}
+
 [[nodiscard]] TreePmForceGradient parseTreePmForceGradient(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "spectral") return TreePmForceGradient::kSpectral;
@@ -1304,6 +1317,7 @@ struct ConfigKeySpec {
       {"numerics.treepm_enable_window_deconvolution", "true"},
       {"numerics.treepm_update_cadence_steps", "1"},
       {"numerics.treepm_pm_reuse_policy", "exact"},
+      {"numerics.treepm_multirate_rollback_memory_policy", "single_block_fallback"},
       {"numerics.treepm_allow_diagnostic_naive_dft", "false"},
       {"numerics.treepm_pm_decomposition_mode", "slab"},
       {"numerics.treepm_tree_exchange_batch_bytes", "4194304"},
@@ -2569,6 +2583,9 @@ class NormalizedConfigStream {
   stream << "treepm_pm_reuse_policy = "
          << treePmPmReusePolicyName(frozen.config.numerics.treepm_pm_reuse_policy)
          << '\n';
+  stream << "treepm_multirate_rollback_memory_policy = "
+         << multirateRollbackMemoryPolicyName(frozen.config.numerics.treepm_multirate_rollback_memory_policy)
+         << '\n';
   stream << "treepm_allow_diagnostic_naive_dft = "
          << (frozen.config.numerics.treepm_allow_diagnostic_naive_dft ? "true" : "false") << '\n';
   stream << "treepm_pm_decomposition_mode = "
@@ -3340,6 +3357,9 @@ class NormalizedConfigStream {
   frozen.config.numerics.treepm_pm_reuse_policy = parseTreePmPmReusePolicy(requireString(
       entries, consumed, "numerics.treepm_pm_reuse_policy",
       defaultFor("numerics.treepm_pm_reuse_policy")));
+  frozen.config.numerics.treepm_multirate_rollback_memory_policy = parseMultirateRollbackMemoryPolicy(requireString(
+      entries, consumed, "numerics.treepm_multirate_rollback_memory_policy",
+      defaultFor("numerics.treepm_multirate_rollback_memory_policy")));
   frozen.config.numerics.treepm_allow_diagnostic_naive_dft = parseBool(
       requireString(
           entries,
