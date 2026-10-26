@@ -99,6 +99,9 @@ set(COSMOSIM_CTEST_DEFAULT_TIMEOUT_SECONDS
 set(COSMOSIM_CTEST_LONG_TIMEOUT_SECONDS
     "300"
     CACHE STRING "Timeout in seconds for long validation, MPI, I/O, and TreePM CTest tests")
+set(COSMOSIM_CTEST_HIERARCHICAL_TIMEOUT_SECONDS
+    "1800"
+    CACHE STRING "Timeout in seconds for the hierarchical TreePM workflow qualification (many full runs; also the MPI deadlock bound)")
 
 function(cosmosim_append_test_labels test_name)
   get_property(cosmosim_existing_labels TEST ${test_name} PROPERTY LABELS)
@@ -146,8 +149,11 @@ function(cosmosim_apply_test_defaults)
     endif()
 
     set(cosmosim_timeout "${COSMOSIM_CTEST_DEFAULT_TIMEOUT_SECONDS}")
-    if(cosmosim_test_name MATCHES "mpi|three_rank|two_rank|validation_|reference_workflow|tree_pm|pm_periodic|snapshot|restart|runtime_app_smoke")
+    if(cosmosim_test_name MATCHES "mpi|three_rank|two_rank|validation_|reference_workflow|tree_pm|hierarchical_treepm|multirate|pm_periodic|snapshot|restart|runtime_app_smoke")
       set(cosmosim_timeout "${COSMOSIM_CTEST_LONG_TIMEOUT_SECONDS}")
+    endif()
+    if(cosmosim_test_name MATCHES "hierarchical_treepm_workflow")
+      set(cosmosim_timeout "${COSMOSIM_CTEST_HIERARCHICAL_TIMEOUT_SECONDS}")
     endif()
 
     # Explicit fixture directories and deadlock budgets belong to each test.
