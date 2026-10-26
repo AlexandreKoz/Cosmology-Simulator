@@ -3408,6 +3408,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->graph_cache_superset_hit_count = m_last_residual_stats.graph_cache_superset_hit_count;
     diagnostics->topology_cache_rebuilds = m_last_residual_stats.topology_cache_rebuilds;
     diagnostics->topology_cache_reuses = m_last_residual_stats.topology_cache_reuses;
+    diagnostics->mass_uniformity_scans = m_last_residual_stats.mass_uniformity_scans;
+    diagnostics->mass_uniformity_reuses = m_last_residual_stats.mass_uniformity_reuses;
+    diagnostics->uniform_source_mass_lane_released = m_tree_ordered_source_mass_uniform ? 1U : 0U;
     diagnostics->let_candidate_peer_count = m_last_residual_stats.let_candidate_peer_count;
     diagnostics->let_exported_target_count = m_last_residual_stats.let_exported_target_count;
     diagnostics->let_imported_target_count = m_last_residual_stats.let_imported_target_count;
@@ -3730,10 +3733,29 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     // species-wide value is passed to the kernels as a scalar and multiplied
     // in the same per-pair expression, so results are bitwise unchanged.
     // Detection is an early-exit O(N) scan over the authoritative mass lane.
-    m_tree_ordered_source_mass_uniform = ordered_count != 0U && !mass_code.empty();
-    m_tree_ordered_source_uniform_mass_code = m_tree_ordered_source_mass_uniform ? mass_code[0] : 0.0;
-    for (std::size_t row = 1; row < mass_code.size() && m_tree_ordered_source_mass_uniform; ++row) {
-      m_tree_ordered_source_mass_uniform = mass_code[row] == m_tree_ordered_source_uniform_mass_code;
+    // With a nonzero options.source_mass_generation the caller certifies the
+    // mass lane is unchanged while the token, extent and address are, so the
+    // scan runs once per mass generation (e.g. once per migration in DMO)
+    // instead of once per fine-tick solve.
+    const bool mass_uniformity_certified = options.source_mass_generation != 0U &&
+        options.source_mass_generation == m_mass_uniformity_generation &&
+        mass_code.size() == m_mass_uniformity_extent && mass_code.data() == m_mass_uniformity_data;
+    if (mass_uniformity_certified) {
+      ++m_last_residual_stats.mass_uniformity_reuses;
+      m_tree_ordered_source_mass_uniform = m_mass_uniformity_result && ordered_count != 0U;
+      m_tree_ordered_source_uniform_mass_code = m_mass_uniformity_value;
+    } else {
+      ++m_last_residual_stats.mass_uniformity_scans;
+      m_tree_ordered_source_mass_uniform = ordered_count != 0U && !mass_code.empty();
+      m_tree_ordered_source_uniform_mass_code = m_tree_ordered_source_mass_uniform ? mass_code[0] : 0.0;
+      for (std::size_t row = 1; row < mass_code.size() && m_tree_ordered_source_mass_uniform; ++row) {
+        m_tree_ordered_source_mass_uniform = mass_code[row] == m_tree_ordered_source_uniform_mass_code;
+      }
+      m_mass_uniformity_generation = options.source_mass_generation;
+      m_mass_uniformity_extent = mass_code.size();
+      m_mass_uniformity_data = mass_code.data();
+      m_mass_uniformity_result = m_tree_ordered_source_mass_uniform;
+      m_mass_uniformity_value = m_tree_ordered_source_uniform_mass_code;
     }
     if (m_tree_ordered_source_mass_uniform) {
       m_tree_ordered_source_mass_code.clear();

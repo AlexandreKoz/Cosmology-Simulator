@@ -2133,6 +2133,13 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_tree_pm_options.source_layout_generation = m_source_representation ==
             gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
         ? context.state.particleIndexGeneration() : 0U;
+    // Homogeneous DMO has no mass-changing source physics: row masses change
+    // only by reorder/migration, which advance the dense particle index
+    // generation. Offset by one so generation 0 still certifies. Materialized
+    // generic sources (gas, star formation, feedback) stay uncertified (0).
+    m_tree_pm_options.source_mass_generation = m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? context.state.particleIndexGeneration() + 1U : 0U;
     // Geometry freshness metadata was published by the pre-solve refit; keep
     // the stamp aligned with the authoritative source generation this solve.
     publishAuthoritativeTopDomainLeavesSpan();
@@ -2414,6 +2421,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
                       {"ghost_refresh_committed_slots", std::to_string(gravity_ghost_refresh.committed_slots)},
                       {"predicted_inactive_source_particles", std::to_string(m_source_predicted_inactive_count)},
                       {"predicted_inactive_source_count", std::to_string(m_source_predicted_inactive_count)},
+                      {"source_prediction_drift_integrals", std::to_string(m_source_prediction_drift_integrals)},
                       {"predicted_inactive_sources_required",
                           context.pm_refresh_directive.requires_predicted_inactive_sources ? "true" : "false"},
                       {"pm_refresh_reason", std::string(pmRefreshReasonName(context.pm_refresh_directive.reason))},
@@ -2471,6 +2479,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"incoming_group_walk_culled_leaves", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.group_walk_culled_leaves)},
               {"topology_cache_reuses", std::to_string(m_last_tree_pm_diagnostics.topology_cache_reuses)},
               {"topology_cache_rebuilds", std::to_string(m_last_tree_pm_diagnostics.topology_cache_rebuilds)},
+              {"mass_uniformity_scans", std::to_string(m_last_tree_pm_diagnostics.mass_uniformity_scans)},
+              {"mass_uniformity_reuses", std::to_string(m_last_tree_pm_diagnostics.mass_uniformity_reuses)},
+              {"uniform_source_mass_lane_released", std::to_string(m_last_tree_pm_diagnostics.uniform_source_mass_lane_released)},
               {"skipped_geometry_evaluations", std::to_string(m_last_tree_pm_diagnostics.local_traversal.skipped_geometry_evaluations)},
               {"residual_block_size", std::to_string(m_tree_pm_options.residual_block_size)},
               {"tree_max_leaf_size", std::to_string(m_tree_pm_options.tree_options.max_leaf_size)},
@@ -3639,6 +3650,40 @@ class GravityRuntimeImpl final : public GravityRuntime {
       return source_index;
     };
 
+    // Exact memoization of the cosmological drift integral (2026-10-26). The
+    // factor depends only on (source scale, evaluation scale); inactive
+    // sources share a handful of last-drift epochs (block time bins, common
+    // DMO epoch), so the 64-point quadrature runs once per distinct epoch
+    // instead of once per source. Identical inputs reproduce bitwise
+    // identical factors, so predicted coordinates are unchanged.
+    struct DriftFactorMemoEntry {
+      std::uint64_t source_scale_bits = 0U;
+      std::uint64_t evaluation_scale_bits = 0U;
+      double factor = 0.0;
+    };
+    std::array<DriftFactorMemoEntry, 16U> drift_factor_memo{};
+    std::size_t drift_factor_memo_size = 0U;
+    std::size_t drift_factor_memo_next = 0U;
+    m_source_prediction_drift_integrals = 0U;
+    const auto memoized_drift_factor = [&](double source_scale, double evaluation_scale) {
+      const auto source_bits = std::bit_cast<std::uint64_t>(source_scale);
+      const auto evaluation_bits = std::bit_cast<std::uint64_t>(evaluation_scale);
+      for (std::size_t i = 0; i < drift_factor_memo_size; ++i) {
+        const DriftFactorMemoEntry& entry = drift_factor_memo[i];
+        if (entry.source_scale_bits == source_bits && entry.evaluation_scale_bits == evaluation_bits) {
+          return entry.factor;
+        }
+      }
+      const double factor = core::computeComovingDriftFactor(
+          *context.cosmology_background, source_scale, evaluation_scale, 64) /
+          context.timeline_step.time_si_per_code;
+      drift_factor_memo[drift_factor_memo_next] = DriftFactorMemoEntry{source_bits, evaluation_bits, factor};
+      drift_factor_memo_next = (drift_factor_memo_next + 1U) % drift_factor_memo.size();
+      drift_factor_memo_size = std::min(drift_factor_memo_size + 1U, drift_factor_memo.size());
+      ++m_source_prediction_drift_integrals;
+      return factor;
+    };
+
     // Collisionless and compact-object particle state remains particle-owned.
     // Gas-tagged generic particles are compatibility/lineage mirrors only and
     // must not duplicate the authoritative gas-cell mass in the gravity source
@@ -3674,14 +3719,20 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   << " evaluation_scale=" << evaluation_scale;
           throw std::runtime_error(message.str());
         }
+        // Prediction contract: the velocity lane holds the global-KDK
+        // canonical momentum p (drift factor ∫dt/a²). Hierarchical KDK stores
+        // u = p/a at the common position epoch and drifts every source
+        // canonically each fine tick, so a hierarchical source can never
+        // require a non-zero predicted drift here; fail closed if it would.
+        if (context.hierarchical_kdk.enabled &&
+            (source_scale != evaluation_scale || source_time != evaluation_time)) {
+          throw std::logic_error(
+              "hierarchical KDK sources must be canonically drifted to the force epoch; "
+              "the global-KDK momentum predictor does not apply to u = p/a lanes");
+        }
         double inactive_drift_factor = evaluation_time - source_time;
         if (context.cosmology_background != nullptr) {
-          inactive_drift_factor = core::computeComovingDriftFactor(
-              *context.cosmology_background,
-              source_scale,
-              evaluation_scale,
-              64) /
-              context.timeline_step.time_si_per_code;
+          inactive_drift_factor = memoized_drift_factor(source_scale, evaluation_scale);
         }
         if (!std::isfinite(inactive_drift_factor) ||
             inactive_drift_factor < -1.0e-14) {
@@ -3900,6 +3951,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
   bool m_has_process_memory_estimate = false;
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::uint64_t m_source_predicted_inactive_count = 0;
+  // Distinct cosmological drift integrals evaluated by the last prediction
+  // (memoized per (source epoch, evaluation epoch); telemetry only).
+  std::uint64_t m_source_prediction_drift_integrals = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
 };
 

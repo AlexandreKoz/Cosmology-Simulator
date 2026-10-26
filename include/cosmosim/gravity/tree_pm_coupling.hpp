@@ -280,6 +280,11 @@ struct TreePmOptions {
   // Nonzero certifies unchanged dense source-row identity. Rank-local token,
   // not a collective generation; unknown/reordered views reject motion refit.
   std::uint64_t source_layout_generation = 0U;
+  // Nonzero certifies that every source row's mass is unchanged while this
+  // rank-local token (and the mass lane extent/address) is unchanged; the
+  // uniform-mass test of the tree-order gather is then reused instead of
+  // rescanning the lane each solve. 0 = unknown: scan every solve.
+  std::uint64_t source_mass_generation = 0U;
   // Integrator split operator: evaluate ONLY the complementary short-range
   // force, without interpolating or reusing a stale PM field. Long-range kicks
   // have separate synchronized endpoint authority in hierarchical KDK.
@@ -370,6 +375,12 @@ struct TreePmDiagnostics {
   // certified refit or identical-source reuse, for this solve.
   std::uint64_t topology_cache_rebuilds = 0;
   std::uint64_t topology_cache_reuses = 0;
+  // Uniform-mass test of the tree-order gather: full lane scans versus
+  // certified reuse (TreePmOptions::source_mass_generation).
+  std::uint64_t mass_uniformity_scans = 0;
+  std::uint64_t mass_uniformity_reuses = 0;
+  // 1 when the tree-order mass lane was released for a uniform population.
+  std::uint64_t uniform_source_mass_lane_released = 0;
   std::uint64_t let_candidate_peer_count = 0;
   std::uint64_t let_exported_target_count = 0;
   std::uint64_t let_imported_target_count = 0;
@@ -619,6 +630,8 @@ class TreePmCoordinator {
     std::uint64_t graph_cache_superset_hit_count = 0;
     std::uint64_t topology_cache_rebuilds = 0;
     std::uint64_t topology_cache_reuses = 0;
+    std::uint64_t mass_uniformity_scans = 0;
+    std::uint64_t mass_uniformity_reuses = 0;
     std::uint64_t let_candidate_peer_count = 0;
     std::uint64_t let_exported_target_count = 0;
     std::uint64_t let_imported_target_count = 0;
@@ -693,6 +706,12 @@ class TreePmCoordinator {
   std::vector<double> m_tree_ordered_source_mass_code;
   bool m_tree_ordered_source_mass_uniform = false;
   double m_tree_ordered_source_uniform_mass_code = 0.0;
+  // Uniform-mass certificate keyed by TreePmOptions::source_mass_generation.
+  std::uint64_t m_mass_uniformity_generation = 0U;
+  std::size_t m_mass_uniformity_extent = 0U;
+  const double* m_mass_uniformity_data = nullptr;
+  bool m_mass_uniformity_result = false;
+  double m_mass_uniformity_value = 0.0;
   std::vector<std::uint32_t> m_tree_order_position_by_row;
   std::vector<std::uint32_t> m_target_visit_order;
   // Stable two-pass radix sort scratch for large target visit orders.

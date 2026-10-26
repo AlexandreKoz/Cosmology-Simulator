@@ -1461,6 +1461,11 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_pm_periodic_mode tests/integration/test_pm_periodic_mode.cpp)
   target_link_libraries(test_integration_pm_periodic_mode PRIVATE cosmosim_gravity)
   add_test(NAME integration_pm_periodic_mode COMMAND test_integration_pm_periodic_mode)
+  # Fine-tick cache / refit / uniform-mass regression (2026-10-26), single rank.
+  add_executable(test_integration_tree_pm_fine_tick_caches tests/integration/test_tree_pm_fine_tick_caches.cpp)
+  target_link_libraries(test_integration_tree_pm_fine_tick_caches PRIVATE cosmosim_gravity)
+  add_test(NAME integration_tree_pm_fine_tick_caches COMMAND test_integration_tree_pm_fine_tick_caches)
+  cosmosim_append_test_labels(integration_tree_pm_fine_tick_caches tree_pm)
   # In-place r2c/c2r layout regression (2026-10-26): serial modes always,
   # distributed comparisons in the MPI registrations below.
   add_executable(test_integration_pm_in_place_fft_layout tests/integration/test_pm_in_place_fft_layout.cpp)

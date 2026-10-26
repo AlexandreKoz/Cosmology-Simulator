@@ -154,3 +154,65 @@ dropped/duplicated requests, PM deferral bounded by `cadence − 1` steps, time
 checkpoints do not shorten steps. New cadence tests:
 `testCoincidentAndPendingCheckpointEventsCollapse`,
 `testTimeCheckpointCrossingSeveralEvents`.
+
+## Stage 3 — fine-tick architecture
+
+### Source-state contract (audited; prediction made fail-closed and cheaper)
+
+Authoritative state and epochs, as implemented:
+
+| Quantity | Owner / epoch | Fine-tick behaviour |
+| --- | --- | --- |
+| Positions `x` | `SimulationState::particles`, epoch `last_drift_time_code / last_drift_scale_factor` (per particle, or one common epoch for homogeneous DMO; restart-persisted in `/state/particle_sidecar/`) | Hierarchical KDK canonically drifts **every** source each fine tick (`hierarchical all-source drift`), then `updateAllParticleDriftEpoch` (O(1) for homogeneous DMO). |
+| Velocity lane | global KDK: canonical momentum `p` (drift `∫dt/a²`); hierarchical KDK: `u = p/a` at the common epoch, Hubble drag in the drift | Kicks touch active rungs only. |
+| Predicted sources | gravity scratch only (`rebuildOwnedParticleCompactView`), never written to state | Global KDK cache rebuilds predict inactive sources from their epoch. |
+
+Necessity analysis of the per-fine-tick O(N) work (no measurements; source
+reasoning only):
+
+* **Required:** an O(N) source-position update (all sources move between
+  force epochs; any lazy scheme still materializes predicted coordinates for
+  the tree), O(N) tree refit or rebuild, and LET exchange of moved boundary
+  sources. GADGET-2/4 and AREPO likewise drift or predict every particle per
+  step. The remaining alternative — node-level analytic prediction
+  (GADGET-2 style dynamic tree update with velocity-bounded extents) — is a
+  separate tree design and **not implemented**.
+* **Avoidable and removed:**
+  * Per-source 64-point cosmological drift quadrature in the predictor, now
+    memoized exactly per `(source epoch, evaluation epoch)` bit pattern
+    (`source_prediction_drift_integrals` telemetry); predicted coordinates
+    are bitwise unchanged.
+  * The per-solve O(N) uniform-mass scan (round 2), now certified by
+    `TreePmOptions::source_mass_generation`. The gravity runtime passes
+    `particleIndexGeneration() + 1` for borrowed homogeneous DMO, where masses
+    change only by reorder or migration, and 0 (rescan every solve)
+    otherwise. Telemetry: `mass_uniformity_scans / reuses`,
+    `uniform_source_mass_lane_released`.
+  * Topology-only metadata: row→tree-position and leaf maps are cached by
+    topology generation (round 2). Visit ordering is O(T) in the active
+    target count.
+* **Fail-closed contract:** the global-KDK momentum predictor is invalid for
+  hierarchical `u = p/a` lanes; it now throws if a hierarchical source would
+  need a non-zero predicted drift (cannot happen with the all-source drift,
+  and so becomes an enforced invariant instead of an assumption).
+* Repeated consensus: one fixed-size batched reduction at gravity entry and
+  one for PM decisions (Stage 1).
+* Certified refit (`treepm_topology_refit_enabled`) remains opt-in; with it
+  off every fine tick rebuilds the tree (O(N log N)). The performance deck
+  enables it.
+
+Tests: `tests/integration/test_tree_pm_fine_tick_caches.cpp`. It covers:
+
+* Retained caches versus an eager fresh-coordinator reference across 12 ticks
+  with active fractions of 100%, 25%, ~3% and one target.
+* Certified refit and topology-cache reuse, plus certified mass reuse.
+* Seam-crossing refit rejection, which forces a rebuild.
+* A dense-row reorder, which forces a rebuild with reason 8.
+* Uniform scalar mass versus the explicit mass lane, and exact mass scaling.
+* OpenMP thread-count determinism with and without the group walk.
+
+**Not implemented:** per-particle lazy drift, which would leave inactive
+canonical positions at their own epochs. It would need per-bin epoch
+derivation in the drift stage, analysis and output. The saving would be only
+the canonical write pass, since the tree still reads every predicted
+position. The current all-source drift is exact and is kept.
