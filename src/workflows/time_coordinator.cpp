@@ -1951,6 +1951,18 @@ void TimeCoordinator::runHierarchicalSegment(
       bool closes = false;
       if (coarse_dt >= remaining * (1.0 - 1.0e-12)) {
         coarse_dt = remaining;
+        // Endpoint rounding: the driver ends the block at t + quantum*periods
+        // = t + coarse_dt (periods is a power of two, so the split is exact),
+        // but fl(t + fl(end - t)) can miss the cycle end by an ulp, leaving an
+        // unrepresentable sliver before t_end. Nudge the interval by at most a
+        // few ulps so the closing tick lands exactly on the planned end.
+        for (int nudge = 0; nudge < 4 && t_now + coarse_dt != pm_cycle.end_time_code; ++nudge) {
+          coarse_dt = std::nextafter(coarse_dt, t_now + coarse_dt < pm_cycle.end_time_code
+              ? std::numeric_limits<double>::infinity() : 0.0);
+        }
+        if (t_now + coarse_dt != pm_cycle.end_time_code) {
+          profiler.counters().addCount("time.hierarchical_multirate_cycle_end_inexact");
+        }
         coarse_limiter = "multirate_cycle_end";
         closes = true;
       } else if (remaining - coarse_dt < 0.25 * coarse_dt) {
