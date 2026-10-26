@@ -1774,12 +1774,18 @@ class PmSolver::Impl {
     [[nodiscard]] std::span<double> realView() noexcept {
       return {reinterpret_cast<double*>(fourier.data()), 2U * fourier.size()};
     }
+    // Offset of the first physical z cell of (local_ix, iy) in the padded real
+    // view. Physical cells are [base, base + nz); [base + nz, base +
+    // real_z_stride) is r2c padding and is never read as mesh data.
+    [[nodiscard]] std::size_t realRowBase(std::size_t local_ix, std::size_t iy) const noexcept {
+      return (local_ix * layout.global_ny + iy) * real_z_stride;
+    }
     // Pristine phi_k copy for the spectral gradient backend only (complex-to-
     // real transforms destroy their input). Allocated on the first spectral
     // solve and retained; never allocated by kFiniteDifference4.
     std::vector<std::complex<double>> potential_k;
     // kFiniteDifference4 distributed x halo planes: [left -2, left -1,
-    // right +1, right +2], each ny*nz doubles.
+    // right +1, right +2] followed by two send-staging planes; each ny*nz doubles.
     std::vector<double> fd_halo_planes;
     // M48-09 derives the Poisson operator from small per-axis metadata rather
     // than retaining one scalar per allocated spectral coefficient.
@@ -2272,6 +2278,17 @@ class PmSolver::Impl {
       throw std::runtime_error(
           "PM logical spectral extent exceeds the backend allocation");
     }
+    // In-place layout invariant (every backend, including the naive DFT): the
+    // aliased real view must cover every physical row of this rank's x slab
+    // at the padded stride 2 (nz/2 + 1), so realRowBase() + nz never leaves
+    // the complex allocation.
+    if (plan.real_z_stride != checkedProduct(2U, nz_complex, "PM padded real stride") ||
+        checkedProduct(checkedProduct(layout.local_nx(), m_shape.ny, "PM padded real coverage"),
+                       plan.real_z_stride, "PM padded real coverage") >
+            checkedProduct(2U, plan.fourier.size(), "PM padded real coverage")) {
+      throw std::logic_error(
+          "PM in-place real view does not cover the owned slab at the padded r2c stride");
+    }
 
 #if COSMOSIM_ENABLE_FFTW && COSMOSIM_ENABLE_MPI
     if (layout.world_size > 1) {
@@ -2313,7 +2330,8 @@ class PmSolver::Impl {
   }
   [[nodiscard]] std::span<double> finiteDifferenceHaloPlanes(std::size_t plane_values) {
     auto& plan = activePlan();
-    const std::size_t required = checkedProduct(4U, plane_values, "PM finite-difference halo planes");
+    // [left -2, left -1, right +1, right +2, send staging x2]
+    const std::size_t required = checkedProduct(6U, plane_values, "PM finite-difference halo planes");
     if (plan.fd_halo_planes.size() != required) plan.fd_halo_planes.assign(required, 0.0);
     return plan.fd_halo_planes;
   }
@@ -3262,10 +3280,11 @@ PmPlanResourcesMemoryEstimate estimatePmPlanResourcesMemory(
       spectral_bytes,
       "PM plan-memory total byte sum");
   // Finite-difference gradients exchange two x planes per side with the
-  // neighboring slab ranks; the four halo planes are retained per plan.
+  // neighboring slab ranks; four halo planes plus two send-staging planes
+  // are retained per plan (no per-solve allocation).
   if (force_gradient_backend == PmForceGradientBackend::kFiniteDifference4 && layout.world_size > 1) {
     estimate.finite_difference_halo_bytes = checked_bytes(
-        checkedProduct(4U, checkedProduct(shape.ny, shape.nz, "PM finite-difference halo plane"),
+        checkedProduct(6U, checkedProduct(shape.ny, shape.nz, "PM finite-difference halo plane"),
                        "PM finite-difference halo planes"),
         sizeof(double), "PM finite-difference halo bytes");
     estimate.total_owned_bytes = checked_add_bytes(
@@ -4549,7 +4568,7 @@ void PmSolver::solvePoissonPeriodicImpl(
       for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
         const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
         const std::size_t fft_base =
-            (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+            plan.realRowBase(local_ix, iy);
         std::copy_n(
             compact_density.begin() + static_cast<std::ptrdiff_t>(compact_base),
             m_shape.nz,
@@ -4564,7 +4583,7 @@ void PmSolver::solvePoissonPeriodicImpl(
   for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
     for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
       const std::size_t fft_base =
-          (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+          plan.realRowBase(local_ix, iy);
       for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
         local_density_sum += real[fft_base + iz];
       }
@@ -4584,7 +4603,7 @@ void PmSolver::solvePoissonPeriodicImpl(
   for (std::size_t local_ix = 0; local_ix < grid.slabLayout().local_nx(); ++local_ix) {
     for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
       const std::size_t fft_base =
-          (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+          plan.realRowBase(local_ix, iy);
       for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
         real[fft_base + iz] -= mean_density;
       }
@@ -4654,7 +4673,7 @@ void PmSolver::solvePoissonPeriodicImpl(
         throw std::overflow_error("PM finite-difference halo exchange exceeds MPI int count");
       }
       halo = m_impl->finiteDifferenceHaloPlanes(plane_values);
-      std::vector<double> send_planes(2U * plane_values);
+      const std::span<double> send_planes = halo.subspan(4U * plane_values, 2U * plane_values);
       const int world_size = grid.slabLayout().world_size;
       const int world_rank = grid.slabLayout().world_rank;
       const int left = (world_rank + world_size - 1) % world_size;
@@ -4768,7 +4787,7 @@ void PmSolver::solvePoissonPeriodicImpl(
       const std::size_t global_ix = plan.layout.globalXFromLocal(local_ix);
       for (std::size_t iy = 0; iy < m_shape.ny; ++iy) {
         const std::size_t compact_base = grid.linearIndex(global_ix, iy, 0);
-        const std::size_t fftw_base = (local_ix * m_shape.ny + iy) * plan.real_z_stride;
+        const std::size_t fftw_base = plan.realRowBase(local_ix, iy);
         for (std::size_t iz = 0; iz < m_shape.nz; ++iz) {
           dst[compact_base + iz] = real_values[fftw_base + iz] * normalization;
         }

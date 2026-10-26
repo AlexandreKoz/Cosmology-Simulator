@@ -82,3 +82,75 @@ coordinate mutation, routing-option change, assignment-scheme change and
 decomposition change, rank-divergent plan presence, density and interpolation
 agreement with the serial reference, and measured reservation ≥ observed wire
 high-water.
+
+## Stage 2 — reference-path integrity
+
+### P1 in-place FFT audit (*Implemented — uncompiled and untested*)
+
+Audited every consumer of the aliased padded real view: plan creation (serial
+FFTW, FFTW-MPI slab and transposed-out pencil, naive DFT fallback), FFT-backed
+density deposition and normalization (`density_z_stride`), compact→FFT density
+copy, mean subtraction, spectral gradient (`potential_k` copy, per-axis
+inverse into compact lanes), finite-difference gradient (`plane_row`),
+naive forward/inverse DFT staging, plan cache move (vector move preserves the
+FFTW-planned buffer), isolated/open path (separate zero-padded workspace, no
+alias) and memory reports. All physical accesses use the padded stride; FFT
+padding is never read as mesh data; `fourier` is never reallocated after
+planning. Findings and changes:
+
+* Raw `(local_ix·ny + iy)·real_z_stride` arithmetic replaced by
+  `PlanResources::realRowBase()` in the periodic solve paths.
+* New plan-creation invariant (all backends): stride `== 2(nz/2+1)` and the
+  aliased view covers `local_nx · ny · stride` doubles, else `logic_error`.
+* FD gradient: the per-solve `send_planes` vector (an allocation outside
+  governed plan storage) now lives in the retained halo buffer (6 planes);
+  `estimatePmPlanResourcesMemory` counts 6 planes.
+* Alignment: `fourier` keeps `std::allocator` (16-byte on glibc, same as the
+  former out-of-place real array). FFTW plans are created on the exact buffer
+  they execute on, so alignment affects only SIMD codelet choice, not
+  correctness. No change.
+* The FFT-backed density token is already consumed before the forward
+  transform (in-place r2c destroys the density, by design).
+
+Tests: `tests/integration/test_pm_in_place_fft_layout.cpp` (serial and 2/4-rank
+MPI): analytic Fourier-mode response on 16×8×8, 15×9×7, 12×10×6, 8×6×9 for
+every axis and two modes; uniform-density zero force; linear normalization;
+bitwise repeated solves on the cached plan; isolated point-mass antisymmetry;
+in-place memory ownership; distributed versus serial spectral forces on even,
+uneven (`4P+1`, `P+1`) and zero-width slabs; distributed versus serial FD.
+
+### P4 remote group walk (defect repaired)
+
+Audit: exactly-once accumulation holds (a group returns before its first emit
+when any member is ineligible); the shared MAC uses the group box and the
+minimum member acceleration, so acceptance is conservative for every member;
+periodic deltas are nearest-image relative to the first member.
+**Defect:** the group pair kernel excludes `r2 == 0` (needed to drop the self
+pair of owned targets), but a remote target has no self pair in the local
+tree, so an exactly coincident distinct source was dropped from the pair count
+and `nearest_pair_r2` (forces unaffected). The remote path now uses a kernel
+copy with `include_coincident = true`; owned targets are bitwise unchanged.
+
+Test: `tests/integration/test_tree_pm_remote_group_walk_mpi.cpp` (2 and 4
+ranks; fails on one rank; requires the grouped remote path and the remote
+history fallback to have run): grouped versus per-target remote walk under
+slab, 80/20 asymmetric and round-robin ownership, seam clusters, sparse
+background, a coincident cross-rank pair, group sizes 0/16/32/64, leaf sizes
+4/8/16, two softenings and mixed history fallback; component-wise forces
+(1e-9 rel) and exact owned/incoming pair-count agreement in an all-direct
+configuration.
+
+### Topology caches (*Existing functionality retained*)
+
+Refit is certified only for an unchanged source-layout generation, so the
+cached row→tree-position and leaf maps (keyed by `topologyGeneration()`) are
+valid across certified refits; a full build changes the generation and a
+failed construction zeroes it.
+
+### P7 checkpoint semantics (*audited; tests added*)
+
+See `docs/restart_checkpointing.md` "Checkpoint request semantics": no
+dropped/duplicated requests, PM deferral bounded by `cadence − 1` steps, time
+checkpoints do not shorten steps. New cadence tests:
+`testCoincidentAndPendingCheckpointEventsCollapse`,
+`testTimeCheckpointCrossingSeveralEvents`.

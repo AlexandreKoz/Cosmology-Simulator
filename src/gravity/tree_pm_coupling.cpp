@@ -4242,6 +4242,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   // any accumulation, when a group cannot use one shared interaction list;
   // the caller then evaluates those targets with the per-target walk.
   internal::TreePmGroupPairKernel group_kernel{};
+  // Same kernel for incoming remote targets, with coincident pairs counted
+  // (no self pair exists for a remote target in the local tree).
+  internal::TreePmGroupPairKernel remote_group_kernel{};
   internal::TreePmGroupWalkParameters group_parameters{};
   if (group_walk_active && !lookup_scaling_representable) {
     group_walk_active = false;
@@ -4264,6 +4267,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         .table_value = m_gaussian_table->knotValues(),
         .table_slope = m_gaussian_table->knotSlopes(),
         .gravitational_constant = options.tree_options.gravitational_constant_code};
+    remote_group_kernel = group_kernel;
+    remote_group_kernel.include_coincident = true;
     group_parameters = internal::TreePmGroupWalkParameters{
         .cutoff_radius2 = cutoff_radius2_comoving,
         .relative_tolerance_over_g = options.tree_options.relative_force_tolerance /
@@ -4287,7 +4292,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   // Generic shared-list evaluation for `count` targets. sample(i) returns the
   // i-th target; emit(i, ax, ay, az, nearest_pair_r2) receives its residual.
   // Used by owned targets (visit order) and incoming remote LET targets.
-  const auto evaluate_target_group = [&](std::size_t count, const auto& sample, const auto& emit,
+  const auto evaluate_target_group = [&](std::size_t count, bool remote_targets, const auto& sample, const auto& emit,
                                          ResidualTraversalCounters& counters, BoundedTreeStack& stack,
                                          TreePmGroupWalkWorkerScratch& scratch, double& sum_sq) -> GroupEvaluation {
     const double uniform_epsilon = source_softening.uniform_epsilon_comoving;
@@ -4342,7 +4347,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           internal::treePmGroupNearestImage(px - group.center[0], lengths[0]),
           internal::treePmGroupNearestImage(py - group.center[1], lengths[1]),
           internal::treePmGroupNearestImage(pz - group.center[2], lengths[2])};
-      internal::accumulateTreePmGroupCulledLeaves(group_kernel, scratch, target_offset, px, py, pz,
+      internal::accumulateTreePmGroupCulledLeaves(remote_targets ? remote_group_kernel : group_kernel, scratch, target_offset, px, py, pz,
           ax, ay, az, pairs, nearest_pair_r2, cull_counts);
       counters.direct_pair_evaluations += pairs;
       const std::array<double, 3> position{px, py, pz};
@@ -4398,7 +4403,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       accumulator.addShortRangeToActiveSlot(active_i, ax, ay, az);
       accumulator.noteNearestPairToActiveSlot(active_i, nearest_pair_r2);
     };
-    return evaluate_target_group(visit_end - visit_begin, sample, emit, counters, stack, scratch, sum_sq);
+    return evaluate_target_group(visit_end - visit_begin, /*remote_targets=*/false, sample, emit, counters, stack, scratch, sum_sq);
   };
 
   // Owned-target evaluation of visit positions [visit_begin, visit_end) of
@@ -5783,7 +5788,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                     response.nearest_pair_r2_comoving = nearest_pair_r2;
                   };
                   const GroupEvaluation evaluation = evaluate_target_group(
-                      group_end - group_begin, sample, emit, counters, stack,
+                      group_end - group_begin, /*remote_targets=*/true, sample, emit, counters, stack,
                       m_worker_group_scratch[worker_slot], incoming_sum_sq);
                   if (evaluation != GroupEvaluation::kEvaluated) {
                     const std::uint64_t group_targets = static_cast<std::uint64_t>(group_end - group_begin);

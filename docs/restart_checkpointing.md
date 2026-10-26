@@ -558,3 +558,26 @@ checkpoint is deferred (counter `io.restart.deferred_for_pm_cadence`) until
 the step immediately preceding a PM refresh opportunity, so a resumed run
 refreshes the long-range field at the same step as the uninterrupted run;
 the pending flags clear only when a checkpoint is actually written.
+
+## Checkpoint request semantics (2026-10-26 audit, untested)
+
+* **Step cadence** (`restart_interval_steps = N`): due at the first completed
+  global step whose index is `>= next`, `next` = first multiple of `N` after
+  the last checkpoint step (derived on resume from the persisted step index).
+* **Code-time cadence** (`restart_interval_time_code = T`): due at the first
+  completed global step whose end time is at or after the next event.
+  **Timesteps are not shortened** for checkpoint events (science-snapshot time
+  events are still clipped as before); a checkpoint is therefore *not*
+  exactly aligned with `t_begin + kT`. A step crossing several events raises a
+  single request; the next event is re-derived strictly after the write time
+  (missed events are not back-filled).
+* **Pending vs completed.** A request stays latched (`checkpoint_due`) until a
+  checkpoint is actually written at an output- and restart-safe boundary.
+  Concurrent step and time events, and events arriving while a request is
+  pending, collapse into one checkpoint; both next events are recomputed only
+  after the write. Requests are never dropped or duplicated.
+* **PM-aligned deferral** (`treepm_pm_reuse_policy = stale_within_cadence`
+  only): the pending request is held until the step before a PM refresh
+  opportunity. The delay is bounded by `treepm_update_cadence_steps - 1`
+  global steps (opportunities advance once per global step in that mode,
+  which requires `hierarchical_max_rung = 0`).

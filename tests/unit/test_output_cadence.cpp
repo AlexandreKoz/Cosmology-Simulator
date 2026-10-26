@@ -106,6 +106,48 @@ void testIndependentTimeCheckpointCadence() {
   CHUI_REQUIRE(resumed.next_restart_time_code <= integrator.current_time_code + 0.25 + 1.0e-12);
 }
 
+
+// Step and time checkpoint events falling on the same completed step, or on
+// consecutive steps while an earlier request is still pending (for example
+// deferred to a PM-aligned boundary), collapse into one pending checkpoint:
+// requests are never duplicated and never dropped.
+void testCoincidentAndPendingCheckpointEventsCollapse() {
+  const auto frozen = loadOutput(
+      "snapshot_interval_steps = 1000\nwrite_restarts = true\n"
+      "restart_interval_steps = 4\nrestart_interval_time_code = 0.5\n");
+  cosmosim::workflows::ReferenceWorkflowOptions options;
+  cosmosim::core::IntegratorState integrator;
+  integrator.step_index = 0U;
+  integrator.current_time_code = frozen.config.numerics.t_code_begin;
+  PendingOutputBoundary pending = initializeOutputCadence(frozen.config, options, integrator, nullptr);
+  const double time_event = pending.next_restart_time_code;
+  latchOutputRequestForCompletedStep(frozen.config, options, 4U, time_event + 1.0e-3, pending);
+  CHUI_REQUIRE(pending.checkpoint_due && pending.restart_step_event_due && pending.restart_time_event_due);
+  // Still pending (not written): a later event keeps a single request.
+  latchOutputRequestForCompletedStep(frozen.config, options, 8U, time_event + 0.6, pending);
+  CHUI_REQUIRE(pending.checkpoint_due && pending.restart_step_event_due && pending.restart_time_event_due);
+  CHUI_REQUIRE(cosmosim::workflows::internal::requestedBoundaryForPendingOutput(pending) == cosmosim::core::StepBoundaryKind::kCheckpointPoint);
+}
+
+// Time cadence is first-completed-step-at-or-after-event: one long step that
+// crosses several events raises exactly one request, and the re-derived next
+// event is strictly after the step end (missed events are not back-filled).
+// Timesteps are not shortened for checkpoint time events.
+void testTimeCheckpointCrossingSeveralEvents() {
+  const auto frozen = loadOutput(
+      "snapshot_interval_steps = 1000\nwrite_restarts = true\nrestart_interval_time_code = 0.1\n");
+  cosmosim::workflows::ReferenceWorkflowOptions options;
+  cosmosim::core::IntegratorState integrator;
+  integrator.step_index = 0U;
+  integrator.current_time_code = frozen.config.numerics.t_code_begin;
+  PendingOutputBoundary pending = initializeOutputCadence(frozen.config, options, integrator, nullptr);
+  const double step_end = frozen.config.numerics.t_code_begin + 0.35;
+  latchOutputRequestForCompletedStep(frozen.config, options, 1U, step_end, pending);
+  CHUI_REQUIRE(pending.checkpoint_due && pending.restart_time_event_due);
+  const double next_event = cosmosim::workflows::internal::nextOrderedTimeEvent(
+      frozen.config.numerics.t_code_begin, step_end, 0.1);
+  CHUI_REQUIRE(next_event > step_end && next_event <= step_end + 0.1 + 1.0e-12);
+}
 }  // namespace
 
 int main() {
@@ -113,5 +155,7 @@ int main() {
   testIndependentCheckpointCadence();
   testResumedCheckpointCadenceIsDerived();
   testIndependentTimeCheckpointCadence();
+  testCoincidentAndPendingCheckpointEventsCollapse();
+  testTimeCheckpointCrossingSeveralEvents();
   return 0;
 }

@@ -1461,6 +1461,26 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_pm_periodic_mode tests/integration/test_pm_periodic_mode.cpp)
   target_link_libraries(test_integration_pm_periodic_mode PRIVATE cosmosim_gravity)
   add_test(NAME integration_pm_periodic_mode COMMAND test_integration_pm_periodic_mode)
+  # In-place r2c/c2r layout regression (2026-10-26): serial modes always,
+  # distributed comparisons in the MPI registrations below.
+  add_executable(test_integration_pm_in_place_fft_layout tests/integration/test_pm_in_place_fft_layout.cpp)
+  target_link_libraries(test_integration_pm_in_place_fft_layout PRIVATE cosmosim_gravity)
+  add_test(NAME integration_pm_in_place_fft_layout COMMAND test_integration_pm_in_place_fft_layout)
+  cosmosim_append_test_labels(integration_pm_in_place_fft_layout pm)
+  if(COSMOSIM_ENABLE_MPI)
+    add_test(
+      NAME integration_pm_in_place_fft_layout_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_in_place_fft_layout> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_pm_in_place_fft_layout_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_in_place_fft_layout> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_pm_in_place_fft_layout_mpi_two_rank mpi distributed pm)
+    cosmosim_append_test_labels(integration_pm_in_place_fft_layout_mpi_four_rank mpi distributed pm)
+    set_tests_properties(integration_pm_in_place_fft_layout_mpi_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(integration_pm_in_place_fft_layout_mpi_four_rank PROPERTIES PROCESSORS 4)
+  endif()
 
   add_executable(test_integration_pm_scale_factor_regression tests/integration/test_pm_scale_factor_regression.cpp)
   target_link_libraries(test_integration_pm_scale_factor_regression PRIVATE cosmosim_gravity)
@@ -1544,6 +1564,22 @@ if(COSMOSIM_ENABLE_TESTS)
       NAME integration_pm_routing_admission_mpi_four_rank
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:test_integration_pm_routing_admission_mpi> ${MPIEXEC_POSTFLAGS})
+    # Remote (incoming LET) group walk versus per-target walk (2026-10-26).
+    add_executable(test_integration_tree_pm_remote_group_walk_mpi
+      tests/integration/test_tree_pm_remote_group_walk_mpi.cpp)
+    target_link_libraries(test_integration_tree_pm_remote_group_walk_mpi PRIVATE cosmosim_gravity)
+    add_test(
+      NAME integration_tree_pm_remote_group_walk_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pm_remote_group_walk_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_tree_pm_remote_group_walk_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pm_remote_group_walk_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_tree_pm_remote_group_walk_mpi_two_rank mpi distributed tree_pm)
+    cosmosim_append_test_labels(integration_tree_pm_remote_group_walk_mpi_four_rank mpi distributed tree_pm)
+    set_tests_properties(integration_tree_pm_remote_group_walk_mpi_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(integration_tree_pm_remote_group_walk_mpi_four_rank PROPERTIES PROCESSORS 4)
     cosmosim_append_test_labels(integration_pm_routing_admission_mpi_two_rank mpi distributed pm collective_safety)
     cosmosim_append_test_labels(integration_pm_routing_admission_mpi_four_rank mpi distributed pm collective_safety)
     set_tests_properties(integration_pm_routing_admission_mpi_two_rank PROPERTIES PROCESSORS 2 TIMEOUT 600)

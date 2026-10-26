@@ -117,7 +117,8 @@ struct PmPlanResourcesMemoryEstimate {
   // remains for source compatibility and is always zero.
   std::uint64_t scalar_spectral_array_bytes = 0U;
   std::uint64_t spectral_axis_metadata_bytes = 0U;
-  // kFiniteDifference4 on distributed slabs: four retained x halo planes.
+  // kFiniteDifference4 on distributed slabs: four retained x halo planes
+  // plus two send-staging planes (2026-10-26; no per-solve allocation).
   std::uint64_t finite_difference_halo_bytes = 0U;
   std::uint64_t total_owned_bytes = 0U;
   std::uint64_t logical_local_complex_cells = 0U;
