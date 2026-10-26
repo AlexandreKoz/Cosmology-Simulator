@@ -289,6 +289,10 @@ struct TreePmOptions {
   // force, without interpolating or reusing a stale PM field. Long-range kicks
   // have separate synchronized endpoint authority in hierarchical KDK.
   bool short_range_only = false;
+  // Diagnostic-only global reductions (empty source/target rank counts).
+  // Collective when true; the runtime disables them on hierarchical fine
+  // ticks so no collective runs per tick solely for telemetry.
+  bool reduce_global_diagnostics = true;
   // Experimental PM reuse (core::TreePmPmReusePolicy::kStaleWithinCadence):
   // admit a long-range field built from an earlier source generation / force
   // epoch, provided field version, decomposition epoch, build scale factor,
@@ -351,6 +355,10 @@ struct TreePmDiagnostics {
   std::uint64_t local_active_target_count = 0;
   std::uint64_t empty_source_rank_count = 0;
   std::uint64_t empty_target_rank_count = 0;
+  // 1 when the two empty-rank counts above are global (one diagnostic
+  // reduction); 0 when TreePmOptions::reduce_global_diagnostics skipped it
+  // and they are rank-local.
+  std::uint64_t global_diagnostics_reduced = 0;
   std::uint64_t local_tree_node_count = 0;
   std::uint64_t remote_hierarchy_packet_count = 0;
   std::uint64_t communicating_peer_count = 0;

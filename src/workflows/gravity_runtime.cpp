@@ -2157,6 +2157,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
     publishAuthoritativeTopDomainLeavesSpan();
     m_tree_pm_options.pm_field_version = gravity::PmFieldVersion{decision.field_version};
     m_tree_pm_options.short_range_only = hierarchical && !capture_pm;
+    // Fine-tick solves skip telemetry-only collectives; coarse PM endpoints and
+    // global KDK keep them (option must be rank-uniform: it derives from the
+    // collectively agreed hierarchical directive).
+    m_tree_pm_options.reduce_global_diagnostics = !hierarchical || capture_pm;
     m_tree_pm_options.force_epoch = gravity::ForceEvaluationEpoch{
         .sequence = hierarchical ? context.state.gravitySourceGeneration() : decision.gravity_kick_opportunity,
         .scale_factor = force_evaluation_scale_factor,

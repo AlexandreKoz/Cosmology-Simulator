@@ -329,3 +329,49 @@ first candidate, kept for the owner:
 | Drift-factor memo | Fixed 16-entry stack array (no heap). |
 | Consensus batch | Fixed-size stack arrays (no heap). |
 | Multirate cycle | Scalars only. |
+
+## Stage 6 — distributed scalability
+
+### Audit results
+
+* **LET graph subset reuse (round 1): correct.** The graph is symmetric
+  (built from the union of out- and in-flags). A new incoming edge makes the
+  requesting rank's `includes` test fail, and the MIN agreement turns that
+  into a collective rebuild. The decomposition epoch and world size
+  invalidate the cache.
+* **Consensus batch:** fixed in Stage 1 (fixed lane count and failure lanes).
+* **Routing admission and plan validity:** fixed in Stage 1.
+* **Classic-MPI count overflow:** existing `planSparseTreePmRound`
+  (aggregate-displacement-aware) plus agreed MIN round size; checked
+  narrowing at batch-token and request-id boundaries.
+* **Zero-message peers:** neighbour collectives with zero counts are valid.
+  Graph construction uses a non-null dummy address for degree 0.
+* **Failure propagation:** coordinated phases (`coordinate_protocol_failure`,
+  `runPmCoordinatedPhase`, `FailureCoordinator`) precede every collective.
+  MPI errors themselves are unrecoverable (`MPI_ERRORS_RETURN` + throw).
+
+### Defects repaired
+
+1. **O(world_size × batch) LET bookkeeping per rank.**
+   * Before: setup reserved `reserved_batch_targets` request packets (≈ 96 B
+     each) plus two byte masks for **every** rank, and every batch re-sized
+     the masks of every rank.
+   * Now: capacity is reserved once per sparse-graph neighbour at the first
+     batch; masks exist only for neighbours. Coverage checks iterate
+     neighbours only.
+   * A target owner outside the graph, or an out-of-range or unrequested
+     response, now fails explicitly instead of indexing an unsized mask.
+   * Per-rank bookkeeping is now O(degree × batch).
+2. **Telemetry-only collective on every fine tick.** The empty-rank
+   diagnostic reduction is now controlled by
+   `TreePmOptions::reduce_global_diagnostics`. The runtime enables it for
+   global KDK and coarse PM endpoints, and disables it on hierarchical fine
+   ticks (`global_diagnostics_reduced` reports which).
+
+### Not implemented
+
+* LET source-payload delta exchange (the payload is still re-sent every
+  solve).
+* Asynchronous neighbour collectives overlapping traversal beyond the
+  existing owned-target overlap.
+* Low-memory degradation, beyond the existing governor refusal paths.

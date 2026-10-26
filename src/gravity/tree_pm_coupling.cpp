@@ -3283,7 +3283,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 
   std::uint64_t empty_source_rank_count = pos_x_comoving.empty() ? 1U : 0U;
   std::uint64_t empty_target_rank_count = active_count == 0U ? 1U : 0U;
-  if (m_grid.slabLayout().world_size > 1) {
+  const bool reduce_global_diagnostics =
+      m_grid.slabLayout().world_size > 1 && options.reduce_global_diagnostics;
+  if (reduce_global_diagnostics) {
     // Diagnostic-only counts: one fused collective instead of two.
     std::array<std::uint64_t, 2U> empty_rank_counts{empty_source_rank_count, empty_target_rank_count};
     m_mpi_context.allreduceSumUint64sInPlace(empty_rank_counts);
@@ -3355,6 +3357,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->pm_local_nz = static_cast<std::uint64_t>(m_shape.nz);
     diagnostics->empty_source_rank_count = empty_source_rank_count;
     diagnostics->empty_target_rank_count = empty_target_rank_count;
+    diagnostics->global_diagnostics_reduced = reduce_global_diagnostics ? 1U : 0U;
     diagnostics->zoom_high_res_allgather_bytes = zoom_high_res_allgather_bytes;
     diagnostics->zoom_high_res_allgather_limit_bytes = options.zoom_high_res_allgather_limit_bytes;
     diagnostics->residual_pruned_nodes = m_last_residual_stats.pruned_nodes;
@@ -4988,11 +4991,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
       response_seen_by_peer.emplace_back(
           std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
-      if (peer != mpi_world_rank) {
-        requests_by_peer.back().reserve(reserved_batch_targets);
-      }
-      response_expected_by_peer.back().reserve(reserved_batch_targets);
-      response_seen_by_peer.back().reserve(reserved_batch_targets);
+      // Capacity is reserved per sparse-graph neighbour at the first batch
+      // (once; later batches are no larger), not for every rank up front.
     }
 
     // The domain hierarchy is a decomposition object, not a tree-build object.
@@ -5242,12 +5242,20 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         for (auto& peer_requests : requests_by_peer) {
           peer_requests.clear();
         }
+        // Per-request bookkeeping only for sparse-graph neighbours (2026-10-26):
+        // requests go to ownersWithinCutoff() peers, which are a subset of the
+        // symmetric graph, and responses arrive only from neighbours. Sizing
+        // every rank's masks was O(world_size x batch) per batch.
         for (int peer = 0; peer < mpi_world_size; ++peer) {
+          response_expected_by_peer[static_cast<std::size_t>(peer)].clear();
+          response_seen_by_peer[static_cast<std::size_t>(peer)].clear();
+        }
+        for (const int peer : sparse_peer_graph->outgoing_peers) {
           response_expected_by_peer[static_cast<std::size_t>(peer)].assign(batch_size, 0U);
           response_seen_by_peer[static_cast<std::size_t>(peer)].assign(batch_size, 0U);
-          if (peer != mpi_world_rank) {
-            requests_by_peer[static_cast<std::size_t>(peer)].reserve(batch_size);
-          }
+          requests_by_peer[static_cast<std::size_t>(peer)].reserve(reserved_batch_targets);
+          response_expected_by_peer[static_cast<std::size_t>(peer)].reserve(reserved_batch_targets);
+          response_seen_by_peer[static_cast<std::size_t>(peer)].reserve(reserved_batch_targets);
         }
 
         expected_response_count.assign(batch_size, 0U);
@@ -5280,6 +5288,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                   sparse_peer_graph->outgoing_peers.size() - target_peers.size());
         }
         for (const int peer : target_peers) {
+          if (response_expected_by_peer[static_cast<std::size_t>(peer)].size() != batch_size) {
+            throw std::logic_error("TreePM short-range target peer is outside the sparse peer graph");
+          }
           requests_by_peer[static_cast<std::size_t>(peer)].push_back(ShortRangeTargetRequestPacket{
               .wire_version = k_short_range_wire_version,
               .origin_rank = mpi_world_rank,
@@ -6075,7 +6086,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               response.target_identity != static_cast<std::uint64_t>(batch_begin + response.request_id)) {
             throw std::runtime_error("TreePM short-range response protocol identity mismatch");
           }
-          if (response_expected_by_peer[static_cast<std::size_t>(peer)][response.request_id] == 0U) {
+          if (response.request_id >= response_expected_by_peer[static_cast<std::size_t>(peer)].size() ||
+              response_expected_by_peer[static_cast<std::size_t>(peer)][response.request_id] == 0U) {
             throw std::runtime_error("TreePM short-range response was not requested from its source peer");
           }
           if (response_seen_by_peer[static_cast<std::size_t>(peer)][response.request_id] != 0U) {
@@ -6102,10 +6114,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         }
       }
 
-      for (int peer = 0; peer < mpi_world_size; ++peer) {
-        if (peer == mpi_world_rank) {
-          continue;
-        }
+      for (const int peer : sparse_peer_graph->outgoing_peers) {
         for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
           if (response_expected_by_peer[static_cast<std::size_t>(peer)][batch_slot] !=
               response_seen_by_peer[static_cast<std::size_t>(peer)][batch_slot]) {
