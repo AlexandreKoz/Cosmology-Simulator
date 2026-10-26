@@ -503,14 +503,19 @@ class PmSolver {
       const PmSolveOptions& options,
       PmProfileEvent* profile = nullptr) const;
 
-  // Workload-aware distributed routing (2026-10-25). Collective on
-  // MPI_COMM_WORLD for distributed slabs (one MAX reduction that replaces the
-  // routing call's own max-count reduction); returns zeros for serial meshes.
-  // Measures this rank's remote x-plane records per peer per round, agrees on
-  // the global per-peer maximum, caches the agreement for the next
-  // assignDensity*/interpolateForces call on the same arrays (consumed once),
-  // and returns the communication-arena bytes that phase will need, so the
-  // caller can grow its arena at the idle boundary before leasing.
+  // Workload-aware distributed routing (2026-10-25; admission contract
+  // repaired 2026-10-26). Collective on MPI_COMM_WORLD for distributed slabs:
+  // every rank performs its local validation (span extents, index ranges,
+  // box lengths, options) inside one transaction and then exactly one
+  // MPI_Allreduce(MAX); a local failure on any rank makes every rank throw
+  // (the failing rank rethrows its own exception, peers report the lowest
+  // failing rank). Serial meshes validate locally and return zeros.
+  // The returned plan sizes the communication arena before leasing. The
+  // cached agreement is withdrawn by the next routing call of the same kind,
+  // which re-measures its own workload and fails collectively if the plan
+  // does not bound it (changed coordinates, decomposition or options), so a
+  // stale plan can never undersize a reservation. Must be called by every
+  // rank or by none before the matching routing call.
   struct PmRoutingWorkloadPlan {
     std::uint64_t phase_arena_bytes = 0U;
     std::uint64_t send_reservation_bytes = 0U;

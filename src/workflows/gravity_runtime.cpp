@@ -57,32 +57,73 @@ namespace {
 
 constexpr std::array<core::IntegrationStage, 1> k_hydro_stage = {core::IntegrationStage::kHydroUpdate};
 
-// Rank-agreement checks gathered into one collective. Each equality entry v
-// occupies lanes v and ~v of a single MPI_MIN allreduce, so min(v) and
-// max(v) = ~min(~v) arrive together; min-only entries return the global
-// minimum. Every rank must append the same entries in the same order: callers
-// only append conditionally on values a previous batch already verified.
+// Rank-agreement checks gathered into one collective (2026-10-25; hardened
+// 2026-10-26). Each equality entry v occupies lanes v and ~v of a single
+// MPI_MIN allreduce; ~ is an order-reversing bijection on uint64, so
+// min(~v) = ~max(v) and min(v) == max(v) iff every rank holds v.
+// Min-only entries return the global minimum.
+//
+// The lane layout has a fixed capacity, so the MPI element count never
+// depends on how many entries a rank appended. Structural lanes make a
+// mismatched entry count / order (name fingerprint), a capacity overflow and
+// rank-local failures captured by recordLocalFailure() visible on every rank:
+// verify() then throws identically everywhere (the failing rank rethrows its
+// own exception) instead of deadlocking or reducing misaligned lanes.
 class RankConsensusBatch {
  public:
-  void requireEqual(std::string_view name, std::uint64_t value) {
-    m_entries.push_back({name, value, true});
-  }
+  static constexpr std::size_t k_capacity = 32U;
+
+  void requireEqual(std::string_view name, std::uint64_t value) { append(name, value, true); }
   // Returns an index into the verified results for a global-minimum entry.
   std::size_t globalMinimum(std::string_view name, std::uint64_t value) {
-    m_entries.push_back({name, value, false});
-    return m_entries.size() - 1U;
+    append(name, value, false);
+    return m_count - 1U;
   }
+  // Captures a rank-local failure raised while the batched facts were being
+  // assembled; reported collectively by verify().
+  void recordLocalFailure(std::exception_ptr failure) noexcept {
+    if (!m_local_failure) m_local_failure = std::move(failure);
+  }
+
   void verify(const parallel::MpiContext& mpi_context, std::uint64_t world_size) {
-    const std::size_t n = m_entries.size();
-    m_lanes.assign(2U * n, 0U);
-    for (std::size_t i = 0; i < n; ++i) {
-      m_lanes[i] = m_entries[i].value;
-      m_lanes[n + i] = ~m_entries[i].value;
+    constexpr std::size_t c = k_capacity;
+    const std::size_t used = std::min(m_count, c);
+    // [values | complements | count, ~count | fingerprint, ~fingerprint |
+    //  ~overflow | ~failure | failing rank (UINT64_MAX when none)]
+    std::array<std::uint64_t, 2U * c + 7U> lanes{};
+    for (std::size_t i = 0; i < c; ++i) {
+      const std::uint64_t value = i < used ? m_entries[i].value : 0U;
+      lanes[i] = value;
+      lanes[c + i] = ~value;
     }
-    mpi_context.allreduceMinUint64sInPlace(m_lanes);
-    for (std::size_t i = 0; i < n; ++i) {
-      const std::uint64_t global_min = m_lanes[i];
-      const std::uint64_t global_max = ~m_lanes[n + i];
+    const std::uint64_t rank = static_cast<std::uint64_t>(std::max(mpi_context.worldRank(), 0));
+    lanes[2U * c + 0U] = m_count;
+    lanes[2U * c + 1U] = ~static_cast<std::uint64_t>(m_count);
+    lanes[2U * c + 2U] = m_fingerprint;
+    lanes[2U * c + 3U] = ~m_fingerprint;
+    lanes[2U * c + 4U] = ~static_cast<std::uint64_t>(m_count > c ? 1U : 0U);
+    lanes[2U * c + 5U] = ~static_cast<std::uint64_t>(m_local_failure ? 1U : 0U);
+    lanes[2U * c + 6U] = m_local_failure ? rank : std::numeric_limits<std::uint64_t>::max();
+    mpi_context.allreduceMinUint64sInPlace(lanes);
+    if (~lanes[2U * c + 5U] != 0U) {
+      if (m_local_failure) std::rethrow_exception(m_local_failure);
+      throw std::runtime_error(
+          "TreePM rank-consensus batch: a peer rank failed while assembling consensus facts "
+          "(first failing rank=" + std::to_string(lanes[2U * c + 6U]) +
+          ", world_size=" + std::to_string(world_size) + ")");
+    }
+    if (lanes[2U * c + 0U] != ~lanes[2U * c + 1U] || lanes[2U * c + 2U] != ~lanes[2U * c + 3U]) {
+      throw std::logic_error(
+          "TreePM rank-consensus batch structure differs across ranks (entry count or order); local entries=" +
+          std::to_string(m_count));
+    }
+    if (~lanes[2U * c + 4U] != 0U) {
+      throw std::logic_error(
+          "TreePM rank-consensus batch exceeds its fixed capacity of " + std::to_string(c) + " entries");
+    }
+    for (std::size_t i = 0; i < used; ++i) {
+      const std::uint64_t global_min = lanes[i];
+      const std::uint64_t global_max = ~lanes[c + i];
       if (m_entries[i].equality && global_min != global_max) {
         throw std::runtime_error(
             "TreePM cadence rank-consensus failure for " + std::string(m_entries[i].name) +
@@ -91,20 +132,18 @@ class RankConsensusBatch {
             ", global_max=" + std::to_string(global_max) +
             ", world_size=" + std::to_string(world_size));
       }
+      m_minimum[i] = global_min;
+      m_maximum[i] = global_max;
     }
     m_verified = true;
   }
   [[nodiscard]] std::uint64_t minimum(std::size_t index) const {
-    if (!m_verified || index >= m_entries.size()) {
-      throw std::logic_error("rank consensus result requested before verification");
-    }
-    return m_lanes[index];
+    requireVerified(index);
+    return m_minimum[index];
   }
   [[nodiscard]] std::uint64_t maximum(std::size_t index) const {
-    if (!m_verified || index >= m_entries.size()) {
-      throw std::logic_error("rank consensus result requested before verification");
-    }
-    return ~m_lanes[m_entries.size() + index];
+    requireVerified(index);
+    return m_maximum[index];
   }
 
  private:
@@ -113,8 +152,27 @@ class RankConsensusBatch {
     std::uint64_t value = 0U;
     bool equality = true;
   };
-  std::vector<Entry> m_entries;
-  std::vector<std::uint64_t> m_lanes;
+  void append(std::string_view name, std::uint64_t value, bool equality) noexcept {
+    // FNV-1a over (name, kind) in append order: detects reordered or
+    // differently named entry sequences across ranks.
+    for (const char ch : name) {
+      m_fingerprint = (m_fingerprint ^ static_cast<unsigned char>(ch)) * 1099511628211ULL;
+    }
+    m_fingerprint = (m_fingerprint ^ (equality ? 0x45U : 0x4DU)) * 1099511628211ULL;
+    if (m_count < k_capacity) m_entries[m_count] = Entry{name, value, equality};
+    ++m_count;  // overflow is reported collectively by verify()
+  }
+  void requireVerified(std::size_t index) const {
+    if (!m_verified || index >= std::min(m_count, k_capacity)) {
+      throw std::logic_error("rank consensus result requested before verification");
+    }
+  }
+  std::array<Entry, k_capacity> m_entries{};
+  std::array<std::uint64_t, k_capacity> m_minimum{};
+  std::array<std::uint64_t, k_capacity> m_maximum{};
+  std::size_t m_count = 0U;
+  std::uint64_t m_fingerprint = 14695981039346656037ULL;
+  std::exception_ptr m_local_failure;
   bool m_verified = false;
 };
 
@@ -1975,74 +2033,81 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .field_built_scale_factor = context.integrator_state.pm_sync_state.lastRefreshScaleFactor(),
     };
 
-    if (context.pm_refresh_directive.has_sync_event) {
-      if (!context.pm_refresh_directive.cadence_opportunity_allowed) {
-        throw std::runtime_error(
-            "TreePM received a PM sync event outside an integrator-authorized refresh opportunity");
-      }
-      const core::PmSyncEvent sync_event{
-          .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
-          .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
-          .field_version = context.pm_refresh_directive.field_version,
-          .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
-          .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
-          .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
-      };
-      pm_decision_consensus.requireEqual(
-          "pm_sync_stage", static_cast<std::uint64_t>(context.pm_refresh_directive.sync_stage));
-      pm_decision_consensus.requireEqual(
-          "pm_refresh_reason", static_cast<std::uint64_t>(context.pm_refresh_directive.reason));
-      pm_decision_consensus.requireEqual("gravity_kick_opportunity", sync_event.gravity_kick_opportunity);
-      // Refresh vote equality across ranks replaces the former sum vote: the
-      // decision is either unanimous refresh or unanimous reuse.
-      pm_decision_consensus.requireEqual(
-          "pm_refresh_vote", sync_event.refresh_long_range_field ? 1ULL : 0ULL);
+    double force_evaluation_scale_factor = 0.0;
+    try {
+      if (context.pm_refresh_directive.has_sync_event) {
+        if (!context.pm_refresh_directive.cadence_opportunity_allowed) {
+          throw std::runtime_error(
+              "TreePM received a PM sync event outside an integrator-authorized refresh opportunity");
+        }
+        const core::PmSyncEvent sync_event{
+            .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
+            .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
+            .field_version = context.pm_refresh_directive.field_version,
+            .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
+            .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
+            .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
+        };
+        pm_decision_consensus.requireEqual(
+            "pm_sync_stage", static_cast<std::uint64_t>(context.pm_refresh_directive.sync_stage));
+        pm_decision_consensus.requireEqual(
+            "pm_refresh_reason", static_cast<std::uint64_t>(context.pm_refresh_directive.reason));
+        pm_decision_consensus.requireEqual("gravity_kick_opportunity", sync_event.gravity_kick_opportunity);
+        // Refresh vote equality across ranks replaces the former sum vote: the
+        // decision is either unanimous refresh or unanimous reuse.
+        pm_decision_consensus.requireEqual(
+            "pm_refresh_vote", sync_event.refresh_long_range_field ? 1ULL : 0ULL);
 
-      decision.gravity_kick_opportunity = sync_event.gravity_kick_opportunity;
-      decision.refresh_long_range_field = sync_event.refresh_long_range_field;
-      decision.field_version = sync_event.field_version;
-      decision.last_refresh_opportunity = sync_event.last_refresh_opportunity;
-      decision.field_built_step_index = sync_event.field_built_step_index;
-      decision.field_built_scale_factor = sync_event.field_built_scale_factor;
-    } else {
-      if (!context.integrator_state.pm_long_range_field_valid || decision.field_version == 0U) {
-        throw std::runtime_error(
-            "TreePM local force refresh attempted before a valid long-range PM field existed");
+        decision.gravity_kick_opportunity = sync_event.gravity_kick_opportunity;
+        decision.refresh_long_range_field = sync_event.refresh_long_range_field;
+        decision.field_version = sync_event.field_version;
+        decision.last_refresh_opportunity = sync_event.last_refresh_opportunity;
+        decision.field_built_step_index = sync_event.field_built_step_index;
+        decision.field_built_scale_factor = sync_event.field_built_scale_factor;
+      } else {
+        if (!context.integrator_state.pm_long_range_field_valid || decision.field_version == 0U) {
+          throw std::runtime_error(
+              "TreePM local force refresh attempted before a valid long-range PM field existed");
+        }
+        if (context.pm_refresh_directive.cadence_opportunity_allowed) {
+          throw std::runtime_error(
+              "TreePM cadence opportunity was declared without an accompanying integrator-owned PM sync event");
+        }
       }
-      if (context.pm_refresh_directive.cadence_opportunity_allowed) {
-        throw std::runtime_error(
-            "TreePM cadence opportunity was declared without an accompanying integrator-owned PM sync event");
-      }
-    }
 
-    pm_decision_consensus.requireEqual("long_range_field_version", decision.field_version);
-    pm_decision_consensus.requireEqual(
-        "last_long_range_refresh_opportunity", decision.last_refresh_opportunity);
-    pm_decision_consensus.requireEqual(
-        "long_range_field_built_step_index", decision.field_built_step_index);
-    pm_decision_consensus.requireEqual(
-        "long_range_field_built_scale_factor_bits",
-        std::bit_cast<std::uint64_t>(decision.field_built_scale_factor));
-    double force_evaluation_scale_factor = hierarchical
-        ? context.pm_refresh_directive.force_evaluation_scale_factor : decision.field_built_scale_factor;
-    if (decision.refresh_long_range_field) {
-      force_evaluation_scale_factor =
-          context.pm_refresh_directive.force_evaluation_scale_factor;
+      pm_decision_consensus.requireEqual("long_range_field_version", decision.field_version);
+      pm_decision_consensus.requireEqual(
+          "last_long_range_refresh_opportunity", decision.last_refresh_opportunity);
+      pm_decision_consensus.requireEqual(
+          "long_range_field_built_step_index", decision.field_built_step_index);
+      pm_decision_consensus.requireEqual(
+          "long_range_field_built_scale_factor_bits",
+          std::bit_cast<std::uint64_t>(decision.field_built_scale_factor));
+      force_evaluation_scale_factor = hierarchical
+          ? context.pm_refresh_directive.force_evaluation_scale_factor : decision.field_built_scale_factor;
+      if (decision.refresh_long_range_field) {
+        force_evaluation_scale_factor =
+            context.pm_refresh_directive.force_evaluation_scale_factor;
+        if (!std::isfinite(force_evaluation_scale_factor) ||
+            force_evaluation_scale_factor <= 0.0 ||
+            force_evaluation_scale_factor != decision.field_built_scale_factor) {
+          throw std::runtime_error(
+              "TreePM refresh force-evaluation scale factor disagrees with integrator field-build metadata");
+        }
+      }
       if (!std::isfinite(force_evaluation_scale_factor) ||
-          force_evaluation_scale_factor <= 0.0 ||
-          force_evaluation_scale_factor != decision.field_built_scale_factor) {
+          force_evaluation_scale_factor <= 0.0) {
         throw std::runtime_error(
-            "TreePM refresh force-evaluation scale factor disagrees with integrator field-build metadata");
+            "TreePM force evaluation requires a finite positive scale factor");
       }
+      pm_decision_consensus.requireEqual(
+          "force_evaluation_scale_factor_bits",
+          std::bit_cast<std::uint64_t>(force_evaluation_scale_factor));
+    } catch (...) {
+      // Rank-local failure: reported on every rank by verify() below, so no
+      // rank throws while its peers wait in the consensus collective.
+      pm_decision_consensus.recordLocalFailure(std::current_exception());
     }
-    if (!std::isfinite(force_evaluation_scale_factor) ||
-        force_evaluation_scale_factor <= 0.0) {
-      throw std::runtime_error(
-          "TreePM force evaluation requires a finite positive scale factor");
-    }
-    pm_decision_consensus.requireEqual(
-        "force_evaluation_scale_factor_bits",
-        std::bit_cast<std::uint64_t>(force_evaluation_scale_factor));
     // One collective for every PM decision lane (formerly up to eighteen
     // min/max allreduces plus a refresh-vote sum per force solve).
     pm_decision_consensus.verify(mpi_context, world_size);

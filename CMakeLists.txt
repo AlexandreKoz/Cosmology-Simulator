@@ -1531,6 +1531,23 @@ if(COSMOSIM_ENABLE_TESTS)
     set_tests_properties(integration_pm_slab_halo_exchange_mpi_three_rank PROPERTIES PROCESSORS 3)
     set_tests_properties(integration_pm_slab_halo_exchange_mpi_four_rank PROPERTIES PROCESSORS 4)
     set_tests_properties(integration_pm_slab_halo_exchange_mpi_eight_rank PROPERTIES PROCESSORS 8)
+    # PM routing admission / workload-plan validity (2026-10-26). The test
+    # carries its own deadlock watchdog; the ctest TIMEOUT is a second bound.
+    add_executable(test_integration_pm_routing_admission_mpi
+      tests/integration/test_pm_routing_admission_mpi.cpp)
+    target_link_libraries(test_integration_pm_routing_admission_mpi PRIVATE cosmosim_gravity Threads::Threads)
+    add_test(
+      NAME integration_pm_routing_admission_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_routing_admission_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_pm_routing_admission_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_routing_admission_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_pm_routing_admission_mpi_two_rank mpi distributed pm collective_safety)
+    cosmosim_append_test_labels(integration_pm_routing_admission_mpi_four_rank mpi distributed pm collective_safety)
+    set_tests_properties(integration_pm_routing_admission_mpi_two_rank PROPERTIES PROCESSORS 2 TIMEOUT 600)
+    set_tests_properties(integration_pm_routing_admission_mpi_four_rank PROPERTIES PROCESSORS 4 TIMEOUT 600)
     add_executable(test_integration_distributed_sfc_rebalance_mpi
       tests/integration/test_distributed_sfc_rebalance_mpi.cpp)
     target_link_libraries(test_integration_distributed_sfc_rebalance_mpi PRIVATE cosmosim_parallel)
