@@ -551,3 +551,80 @@ existing linear-response envelope, and targets only `k=2*pi/L` (six Cartesian
 modes of the 4^3 fixture). Broader growth, power, nonlinear orbit stability and
 large-rung qualification remain pending. `hierarchical_max_rung=0` and all
 provisional capability classifications are retained.
+
+## Multirate outer PM level (2026-10-26; IMPLEMENTED — UNCOMPILED AND UNTESTED)
+
+`numerics.treepm_pm_reuse_policy = multirate_outer_kick` (hierarchical KDK
+only; `treepm_update_cadence_steps = M` in `[2, 64]` is the number of coarse
+blocks per PM cycle). It is **experimental and scientifically unqualified**.
+The reference remains `exact` (one PM cycle per coarse block); the global-KDK
+`stale_within_cadence` window is a different, non-symplectic approximation and
+is not used here.
+
+**Equations.** With the hierarchical convention above
+(`ẋ = p/a²`, `ṗ = A/a`, `u = p/a` stored at the common position epoch) and the
+Gaussian TreePM split `A = A_PM,long + A_tree,short`, the Hamiltonian splits as
+`H = H_kin + H_tree + H_PM` (time-dependent through `a(t)`). Let `B_j` be the
+existing coarse block operator *without* PM (fine-rung tree kicks around
+all-source drifts, power-of-two rungs, second-order KDK within the block). One
+PM cycle of length `T = Σ_j Δc_j` starting at `t0` is the r-RESPA composition
+
+```
+K_PM[t0, t0+T/2] ∘ B_1 ∘ … ∘ B_M ∘ K_PM[t0+T/2, t0+T]
+```
+
+with `K_PM[t_a, t_b]: u ← u + A_PM(x) ∫_{t_a}^{t_b} dt/a / a_now` evaluated at
+the cycle endpoint positions (`a_now` = scale factor at the kick epoch, as for
+every hierarchical kick). The opening kick uses the PM field built at the
+previous cycle end (endpoint reuse) or a synchronized bootstrap. The closing
+kick refreshes PM at the cycle end. For `M = 1` this reduces exactly to the
+reference scheme. The composition is time-symmetric. For a fixed cycle
+interval and slowly varying `a(t)` it has the second-order accuracy of
+symmetric RESPA, with the usual RESPA resonance caveat. No convergence order
+has been measured.
+
+**Cycle planning** (`TimeCoordinator`, `core::HierarchicalPmCyclePlan`):
+
+* The RESPA opening kick needs `T` in advance. At the cycle start the coarse
+  interval `Δc` is chosen once and frozen for the cycle.
+* The PM displacement criterion and the output/end boundary are applied to
+  the whole cycle: `Δc ≤ displacement_dt / M` and `Δc ≤ (t_boundary − t0) / M`.
+  The particle, expansion and explicit-dt criteria apply per block.
+* When the boundary clips the cycle, the cycle ends exactly on it. The last
+  block absorbs the accumulated roundoff of the block sums.
+* `M` is truncated to the remaining step budget, so a run segment never ends
+  with an open outer kick.
+* Inside a cycle the rungs are still reassigned at every block boundary. A
+  particle that asks for a quantum below the frozen one is clamped to the
+  finest rung. This is counted (`time.hierarchical_multirate_quantum_clamped_blocks`),
+  not hidden.
+
+**Force and cache validity:**
+
+* PM is solved only at cycle ends (`pm_sync_state` cadence 1, one opportunity
+  per cycle).
+* Interior blocks close with Tree-only solves (`short_range_only`). The total
+  history used for timestep criteria is the current Tree force plus the PM
+  component of the cycle opening; it is never used to kick.
+* An interior block starts from a Tree-only endpoint
+  (`hierarchicalShortRangeEndpointReusable`), or after a migration from a
+  synchronized Tree-only bootstrap. PM kicks require the PM field and source
+  generation of their own endpoint, so double or missing PM kicks are
+  rejected by the existing generation checks.
+
+**Output and restart:**
+
+* Interior block boundaries are synchronized but carry
+  `multirate_pm_cycle_interior`. They are neither output- nor restart-safe,
+  because momenta contain an open half-kick.
+* Pending step-cadence snapshots and checkpoints stay latched and are written
+  at the cycle end (`io.output.deferred_to_multirate_pm_cycle_end`).
+  Code-time snapshot events are planned onto cycle ends.
+* Every checkpoint is therefore at a closed cycle. A resumed segment opens a
+  new cycle exactly as the uninterrupted run does, so no restart schema change
+  is needed.
+* A restart that is not restart-safe is refused at segment start.
+
+**Not implemented:** an adaptive mid-cycle termination with retroactive
+correction of the opening kick. Such a correction would not be time-symmetric,
+so the clamp-and-count policy above was chosen instead.

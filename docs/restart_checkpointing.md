@@ -581,3 +581,18 @@ the pending flags clear only when a checkpoint is actually written.
   opportunity. The delay is bounded by `treepm_update_cadence_steps - 1`
   global steps (opportunities advance once per global step in that mode,
   which requires `hierarchical_max_rung = 0`).
+
+## Multirate outer PM cycles (2026-10-26, untested)
+
+With `numerics.treepm_pm_reuse_policy = multirate_outer_kick`, coarse-block
+boundaries strictly inside a PM cycle are synchronized but **not**
+restart- or output-safe (`StepBoundaryState::multirate_pm_cycle_interior`):
+momenta carry an open outer PM half-kick. Pending checkpoints and step-cadence
+snapshots are held to the cycle end (counter
+`io.output.deferred_to_multirate_pm_cycle_end`, at most `M − 1` blocks);
+code-time snapshot events are planned onto cycle ends. Every checkpoint
+therefore closes a cycle, and a resumed segment opens a new cycle exactly as
+the uninterrupted run does — no additional persistent state and no restart
+schema change. Segment step budgets truncate the final cycle so a run never
+stops inside one. A restart whose integrator state is not restart-safe is
+refused when a multirate segment starts.

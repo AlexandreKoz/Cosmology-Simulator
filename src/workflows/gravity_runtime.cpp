@@ -990,12 +990,19 @@ class GravityRuntimeImpl final : public GravityRuntime {
   // the current source positions, with the PM component from one committed
   // field. Only an all-active synchronization endpoint establishes this.
   [[nodiscard]] bool hierarchicalEndpointCompleteAt(const core::SimulationState& state) const noexcept {
+    const std::uint64_t generation = state.gravitySourceGeneration();
+    return m_hierarchical_pm_source_generation == generation && m_hierarchical_pm_field_version != 0U &&
+        hierarchicalTreeEndpointCompleteAt(state);
+  }
+
+  // Tree component and total history of every row at the current positions;
+  // the PM lanes must exist (cycle-opening field) but need not be current.
+  [[nodiscard]] bool hierarchicalTreeEndpointCompleteAt(const core::SimulationState& state) const noexcept {
     const std::size_t n = state.particles.size();
     const std::uint64_t generation = state.gravitySourceGeneration();
     if (!m_force_cache_valid || state.cells.size() != 0U ||
         m_force_cache_particle_index_generation != state.particleIndexGeneration() ||
-        m_force_cache_source_generation != generation ||
-        m_hierarchical_pm_source_generation != generation || m_hierarchical_pm_field_version == 0U ||
+        m_force_cache_source_generation != generation || m_hierarchical_pm_field_version == 0U ||
         m_hierarchical_force_generation.size() != n || m_particle_force_cache_valid.size() != n ||
         m_particle_accel_x.size() != n || m_particle_accel_y.size() != n || m_particle_accel_z.size() != n ||
         m_hierarchical_tree_x.size() != n || m_hierarchical_tree_y.size() != n ||
@@ -1017,6 +1024,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
     return integrator.pm_long_range_field_valid &&
         m_hierarchical_pm_field_version == integrator.pm_sync_state.fieldVersion() &&
         hierarchicalEndpointCompleteAt(state);
+  }
+
+  [[nodiscard]] bool hierarchicalShortRangeEndpointReusable(
+      const core::SimulationState& state) const override {
+    return hierarchicalTreeEndpointCompleteAt(state);
   }
 
   [[nodiscard]] std::span<const double> hierarchicalNearestPairR2() const noexcept override {
@@ -2426,7 +2438,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
                           context.pm_refresh_directive.requires_predicted_inactive_sources ? "true" : "false"},
                       {"pm_refresh_reason", std::string(pmRefreshReasonName(context.pm_refresh_directive.reason))},
                       {"pm_refresh_force_eval_scale_factor", formatRuntimeDouble(context.pm_refresh_directive.force_evaluation_scale_factor)},
-                      {"pm_reuse_policy", m_tree_pm_options.allow_stale_long_range_field ? "stale_within_cadence" : "exact"},
+                      {"pm_reuse_policy", m_config.numerics.treepm_pm_reuse_policy == core::TreePmPmReusePolicy::kMultirateOuterKick
+                           ? "multirate_outer_kick"
+                           : (m_tree_pm_options.allow_stale_long_range_field ? "stale_within_cadence" : "exact")},
                       {"pm_field_age_steps", std::to_string(
                           context.integrator_state.step_index >= decision.field_built_step_index
                               ? context.integrator_state.step_index - decision.field_built_step_index : 0U)},

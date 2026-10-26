@@ -46,9 +46,15 @@ enum class TreePmForceGradient {
 //   field built at a refresh step is interpolated at current target positions
 //   for the next N-1 global KDK force evaluations (first-order in N dt in the
 //   long-range force); decomposition epoch, mesh and split must be unchanged.
+// kMultirateOuterKick (experimental, unqualified; hierarchical KDK only): an
+//   r-RESPA outer PM level. One PM cycle spans N = treepm_update_cadence_steps
+//   coarse blocks of equal duration; the field is evaluated only at cycle
+//   endpoints and applied as two half-cycle kicks (core::HierarchicalPmCyclePlan).
+//   Second-order time-symmetric splitting; not a stale-field interpolation.
 enum class TreePmPmReusePolicy {
   kExactSourceState,
   kStaleWithinCadence,
+  kMultirateOuterKick,
 };
 
 enum class TreePmOpeningCriterion {

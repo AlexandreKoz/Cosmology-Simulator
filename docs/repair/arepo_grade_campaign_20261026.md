@@ -216,3 +216,59 @@ canonical positions at their own epochs. It would need per-bin epoch
 derivation in the drift stage, analysis and output. The saving would be only
 the canonical write pass, since the tree still reads every predicted
 position. The current all-source drift is exact and is kept.
+
+## Stage 4 — hierarchical PM integration (*Implemented — uncompiled and untested; scientifically unqualified*)
+
+The existing hierarchical scheme was already a defined two-level split:
+r-RESPA with PM half kicks at both endpoints of every coarse block and tree
+kicks on the fine rungs. Round 2's `stale_within_cadence` is a global-KDK
+field-reuse approximation and stays restricted to `hierarchical_max_rung = 0`.
+
+The new policy `multirate_outer_kick` adds an outer PM level spanning
+`M = treepm_update_cadence_steps` coarse blocks. Equations, the cycle
+planning rules, cache validity and restart behaviour are derived in
+`docs/time_integration.md` ("Multirate outer PM level"). Changes:
+
+* `core::HierarchicalPmCyclePlan` drives the block driver's PM surfaces: the
+  opening kick only in a cycle-opening block, refresh plus closing kick only
+  in a cycle-closing block. A disabled plan gives the bit-for-bit reference.
+* `StepBoundaryState::multirate_pm_cycle_interior`; interior boundaries are
+  not restart- or output-safe.
+* `TimeCoordinator` plans each cycle:
+  * Δc is frozen for the cycle, and the PM displacement and boundary limits
+    apply to the whole cycle.
+  * The last block lands exactly on the planned end.
+  * The cycle is truncated to the step budget.
+  * Interior blocks start from a Tree-only endpoint reuse or bootstrap.
+* `GravityRuntime::hierarchicalShortRangeEndpointReusable`.
+* `OutputRestartRuntime` holds pending output at interior boundaries.
+* The PM sync cadence is 1, so there is one refresh per cycle.
+* Config: the enum value `kMultirateOuterKick` and the key value
+  `multirate_outer_kick`, with validation and normalized dump.
+* Telemetry: event payload `pm_policy` / `pm_cycle_blocks` /
+  `pm_cycle_block_index`, and the counters
+  `time.hierarchical_multirate_pm_cycles`,
+  `time.hierarchical_multirate_tree_bootstrap` and
+  `time.hierarchical_multirate_quantum_clamped_blocks`.
+
+Restart: no schema change (checkpoints only at cycle ends).
+
+Tests:
+
+* `test_hierarchical_treepm_workflow` (serial and MPI registrations) gains
+  multirate checks:
+  * Synchronized endpoints.
+  * Refinement convergence toward the fine global reference, with a
+    provisional bound of `1e-3`.
+  * Fewer PM refreshes than the exact scheme at the same Δc.
+  * Bit-identical resume from a cycle-end checkpoint.
+  * Step-budget truncation of a cycle.
+* `test_config_parser`: validation of `multirate_outer_kick`.
+
+**Not implemented:**
+
+* Analytic two-body and energy-drift gates. The workflow comparison above is
+  the trajectory gate.
+* An MPI decomposition-consistency run specific to multirate. The existing
+  hierarchical MPI registrations run the same test file on 2 ranks.
+* Adaptive mid-cycle termination (see the docs for why).

@@ -673,13 +673,23 @@ parseInitialConditionMissingFieldPolicy(
       "' (supported: cic, tsc)");
 }
 
+[[nodiscard]] const char* treePmPmReusePolicyName(TreePmPmReusePolicy policy) noexcept {
+  switch (policy) {
+    case TreePmPmReusePolicy::kStaleWithinCadence: return "stale_within_cadence";
+    case TreePmPmReusePolicy::kMultirateOuterKick: return "multirate_outer_kick";
+    case TreePmPmReusePolicy::kExactSourceState: break;
+  }
+  return "exact";
+}
+
 [[nodiscard]] TreePmPmReusePolicy parseTreePmPmReusePolicy(const std::string& value) {
   const std::string lower = toLower(trim(value));
   if (lower == "exact") return TreePmPmReusePolicy::kExactSourceState;
   if (lower == "stale_within_cadence") return TreePmPmReusePolicy::kStaleWithinCadence;
+  if (lower == "multirate_outer_kick") return TreePmPmReusePolicy::kMultirateOuterKick;
   throw ConfigError(
       "key 'numerics.treepm_pm_reuse_policy': invalid value '" + value +
-      "' (supported: exact, stale_within_cadence)");
+      "' (supported: exact, stale_within_cadence, multirate_outer_kick)");
 }
 
 [[nodiscard]] TreePmForceGradient parseTreePmForceGradient(const std::string& value) {
@@ -2025,6 +2035,15 @@ void validateConfig(const SimulationConfig& config) {
         "numerics.treepm_pm_reuse_policy=stale_within_cadence requires treepm_update_cadence_steps in [2,64] "
         "and global KDK (hierarchical_max_rung=0; hierarchical KDK already applies PM at coarse endpoints)");
   }
+  // Multirate outer PM level: a cycle of N coarse hierarchical blocks with PM
+  // at the cycle endpoints only. Requires the hierarchical integrator.
+  if (config.numerics.treepm_pm_reuse_policy == TreePmPmReusePolicy::kMultirateOuterKick &&
+      (config.numerics.treepm_update_cadence_steps < 2 || config.numerics.treepm_update_cadence_steps > 64 ||
+       config.numerics.hierarchical_max_rung <= 0)) {
+    throw ConfigError(
+        "numerics.treepm_pm_reuse_policy=multirate_outer_kick requires treepm_update_cadence_steps in [2,64] "
+        "(coarse blocks per PM cycle) and hierarchical KDK (hierarchical_max_rung > 0)");
+  }
   if (config.numerics.treepm_pm_force_gradient == TreePmForceGradient::kFiniteDifference4) {
     const bool periodic_gravity =
         config.mode.gravity_boundary == ModeGravityBoundary::kPeriodic ||
@@ -2548,8 +2567,7 @@ class NormalizedConfigStream {
          << (frozen.config.numerics.treepm_enable_window_deconvolution ? "true" : "false") << '\n';
   stream << "treepm_update_cadence_steps = " << frozen.config.numerics.treepm_update_cadence_steps << '\n';
   stream << "treepm_pm_reuse_policy = "
-         << (frozen.config.numerics.treepm_pm_reuse_policy == TreePmPmReusePolicy::kStaleWithinCadence
-                 ? "stale_within_cadence" : "exact")
+         << treePmPmReusePolicyName(frozen.config.numerics.treepm_pm_reuse_policy)
          << '\n';
   stream << "treepm_allow_diagnostic_naive_dft = "
          << (frozen.config.numerics.treepm_allow_diagnostic_naive_dft ? "true" : "false") << '\n';
