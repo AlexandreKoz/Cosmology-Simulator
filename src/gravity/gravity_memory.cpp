@@ -647,6 +647,19 @@ GravityMemoryEstimate estimateGravityMemory(const GravityMemoryEstimateInput& in
    addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
                "gravity.estimate.treepm_tree_ordered_source_lanes", treepm_tree_order_bytes,
                "tree-order copies of source position/mass, row->tree-position map, target visit order and the optional group-walk leaf map; regathered every residual evaluation");
+   // Remote (incoming LET) group walk (2026-10-25/26): per-peer Morton order
+   // (uint32) and keys (uint64) for the incoming targets of one exchange batch.
+   // Incoming targets per peer are bounded by the tree exchange batch; 64 B is
+   // a lower bound on the encoded request size (actual > 90 B), so this term
+   // is an upper bound independent of the population.
+   if (input.mpi_rank_count > 1U) {
+     const std::uint64_t incoming_targets_bound = input.tree_exchange_batch_bytes / 64U + 1U;
+     addEstimate(builder, core::MemorySubsystem::kTree, core::MemoryLifetime::kTransient,
+                 "gravity.estimate.treepm_incoming_group_order",
+                 checkedMul(incoming_targets_bound, sizeof(std::uint32_t) + sizeof(std::uint64_t),
+                            "TreePM incoming group order estimate overflow"),
+                 "incoming LET target Morton order and keys for one peer batch (bounded by tree_exchange_batch_bytes)");
+   }
    if (treepm_block_diagnostic_bytes > 0U) {
      addEstimate(builder, core::MemorySubsystem::kScratch, core::MemoryLifetime::kTransient,
                  "gravity.estimate.treepm_residual_block_diagnostics", treepm_block_diagnostic_bytes,

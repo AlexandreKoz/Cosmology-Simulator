@@ -272,3 +272,60 @@ Tests:
 * An MPI decomposition-consistency run specific to multirate. The existing
   hierarchical MPI registrations run the same test file on 2 ranks.
 * Adaptive mid-cycle termination (see the docs for why).
+
+## Stage 5 — memory architecture
+
+### Lossless structural compaction (audit; source-level verdicts)
+
+| Candidate | Verdict |
+| --- | --- |
+| Species-wide constant mass | **Implemented** (round 2 lane release + Stage 3 certified reuse, no per-tick scan for DMO). |
+| Uniform softening | Existing: scalar `uniform_epsilon` path; per-source lanes only when non-uniform. |
+| Oversized local indices | Existing: `TreeLocalIndex = uint32` with `checkedIntegralNarrow` at every global→local boundary (48 sites); TreePM rejects > 2³²−1 local sources. |
+| Duplicate unwrapped periodic lanes (`treepm.periodic_tree_source_*`, 24 B/source) | Retained by design. They are rewritten every build or refit; releasing them per tick would turn into allocation and page-fault churn on every fine tick. A zero-copy identity unwrap (only when the canonical input needs no shift) would help only seam-free axes. Not implemented. |
+| Hierarchical total-force history (`m_particle_accel_*`, 24 B/particle) beside the Tree/PM component lanes | **Not removed.** Recomputing total as Tree+PM differs from the coupling's accumulated total at roundoff. It would change rung decisions and the restart-persisted v24 endpoint bitwise. A candidate for a versioned follow-up. |
+| `m_hierarchical_force_generation` (uint64/particle) | Retained: the exact-epoch kick guard, restart persisted. |
+| FD gradient halo staging | **Fixed** (Stage 2): the per-solve allocation moved into the governed plan storage. |
+| PM real array | **Removed** (round 2 in-place FFT; Stage 2 invariant). |
+
+### Canonical identity (audit)
+
+Authoritative IDs are `uint64` (`particle_sidecar.particle_id`,
+`gas_cell_id`, `parent_particle_id`) through migration, HDF5 snapshots
+(`ParticleIDs`), restart and species conversion. No ID was narrowed in this
+campaign. Compact indices (`TreeLocalIndex`, `uint32` rows) are rank-local, are
+never persisted as identity, and are produced only by checked narrowing.
+
+### Experimental precision policies (*Not implemented*; design contract)
+
+No lossy representation was introduced, because none could be made both
+useful and safe without owner error budgets. The design contract for the
+first candidate, kept for the owner:
+
+* **Candidate: float32 hierarchical total-force history.** Quantity: scale-free
+  comoving acceleration, code units, used only for rung criteria and
+  relative-MAC tolerances, never for kicks. Dynamic range: about 10⁻⁸–10⁸ of
+  the force scale, within float32 normal range. Rounding: round-to-nearest
+  narrowing, relative error ≤ 2⁻²⁴. Conversion boundaries: written at the
+  scatter after a solve, widened in `criterion()` and in the previous-
+  acceleration lane. Accumulation: none, since history is overwritten every
+  solve. Forbidden in global KDK, where kicks read this lane. Periodic
+  boundaries: not applicable. Restart: persisted widened (exact), so resumed
+  runs are bitwise identical to uninterrupted runs. Saving: 12 B/particle.
+  Effect: rung decisions near bin thresholds may flip relative to the double
+  reference.
+* Rejected for now: fixed-point periodic coordinates (they would change every
+  force), narrowed LET packets (they would change remote forces), and compact
+  PM routing records (they would change deposited density).
+
+### MemoryGovernor coverage of campaign allocations
+
+| Allocation | Accounting |
+| --- | --- |
+| PM routing reservations | Communication arena, governed. Sized by the routing plan before configure. |
+| FD halo planes | PM plan storage. Live report and estimate (6 planes). |
+| Topology caches, radix scratch | Live report plus preflight estimate (round 2). |
+| Incoming remote group order/keys | Live report; **new** preflight term `gravity.estimate.treepm_incoming_group_order`, bounded by `tree_exchange_batch_bytes`. |
+| Drift-factor memo | Fixed 16-entry stack array (no heap). |
+| Consensus batch | Fixed-size stack arrays (no heap). |
+| Multirate cycle | Scalars only. |
