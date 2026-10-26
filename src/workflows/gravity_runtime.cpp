@@ -3737,11 +3737,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   << " evaluation_scale=" << evaluation_scale;
           throw std::runtime_error(message.str());
         }
-        // Prediction contract: the velocity lane holds the global-KDK
-        // canonical momentum p (drift factor ∫dt/a²). Hierarchical KDK stores
-        // u = p/a at the common position epoch and drifts every source
-        // canonically each fine tick, so a hierarchical source can never
-        // require a non-zero predicted drift here; fail closed if it would.
+        // Prediction contract: this predictor applies the global-KDK drift
+        // operator x += u * integral(dt/a) (computeComovingDriftFactor, the
+        // same factor as CosmologicalTimeline::drift_factor_code) to the
+        // stored peculiar-velocity lane. Hierarchical KDK instead stores
+        // u = p/a at the common position epoch with an explicit Hubble drag
+        // and drift a_begin * integral(dt/a^2), and it drifts every source
+        // canonically each fine tick; a hierarchical source must therefore
+        // never need a non-zero predicted drift here. Fail closed if it would.
         if (context.hierarchical_kdk.enabled &&
             (source_scale != evaluation_scale || source_time != evaluation_time)) {
           throw std::logic_error(

@@ -58,6 +58,11 @@ struct ReferenceWorkflowOptions {
   // A bounded execution segment for tests/benchmarks. Zero retains the
   // configuration's max_global_steps. This is intentionally not persisted.
   std::uint64_t max_steps_override = 0;
+  // Test-only seam (multirate_outer_kick): the first N PM cycles that reach an
+  // interior boundary are rejected once and retried with the identical outer
+  // interval, exercising the transactional rollback; the final state must equal
+  // an uninterrupted run. 0 (default) in production; never weakens a check.
+  std::uint64_t multirate_test_forced_cycle_rollbacks = 0;
 
   // Test/embedding composition seam. Built-in production descriptors are
   // registered first; callers may add independent descriptors before the
@@ -133,6 +138,36 @@ struct ReferenceWorkflowReport {
   // Lifetime counts remain in the profiler and refresh/reuse totals.
   std::vector<std::string> stage_sequence;
   std::vector<TreePmCadenceRecord> treepm_cadence_records;
+  // Hierarchical coarse-block evidence (2026-10-26 stabilization; recent 512
+  // executed blocks). Additive report fields; not persisted. Rejected
+  // multirate attempts are rolled back and never appear here.
+  struct HierarchicalBlockRecord {
+    std::uint64_t step_index = 0U;
+    double time_begin_code = 0.0;
+    double time_end_code = 0.0;
+    double coarse_interval_time_code = 0.0;
+    double quantum_time_code = 0.0;
+    // Global minimum per-particle criterion (gravity, encounter, growth
+    // limiter) at the block's opening synchronization point.
+    double global_min_particle_criterion_time_code = 0.0;
+    std::string coarse_limiter;
+    bool multirate = false;
+    std::uint64_t pm_cycle_index = 0U;
+    std::uint64_t pm_cycle_block_index = 0U;
+    bool opens_pm_cycle = true;
+    bool closes_pm_cycle = true;
+    double pm_cycle_opening_time_code = 0.0;
+    double pm_cycle_end_time_code = 0.0;
+    unsigned pm_cycle_retries = 0U;
+  };
+  std::vector<HierarchicalBlockRecord> hierarchical_block_records;
+  std::uint64_t multirate_pm_cycles_completed = 0U;
+  std::uint64_t multirate_pm_cycle_rollbacks = 0U;
+  std::uint64_t multirate_forced_test_rollbacks = 0U;
+  // Blocks executed beyond the requested step budget to close an open PM
+  // cycle (soft stop); completed_steps includes them.
+  std::uint64_t multirate_soft_stop_extension_blocks = 0U;
+  std::uint64_t requested_steps = 0U;
   std::filesystem::path shared_run_directory;
   std::filesystem::path run_directory;
   std::filesystem::path normalized_config_snapshot_path;
