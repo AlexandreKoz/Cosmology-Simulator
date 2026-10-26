@@ -1,5 +1,23 @@
 # Repair open issues
 
+20261026 round 3 (source only; NOT compiled, NOT tested; owner validation
+required):
+
+* Explicit checked AREPO ParticleID translation (`--arepo-id-offset`).
+* Multirate timestep invariants enforced: per-block criteria, transactional
+  cycle rollback/retry.
+* Soft stop at PM cycle ends for segmentation invariance.
+* Exact cycle-end rounding.
+* Strengthened multirate contract.
+
+Open:
+
+* Interior-cycle restart is unsupported (by design).
+* Convergence order is unmeasured.
+* No isolated PM-only/tree-only or analytic convergence suite.
+
+See the [round-3 record](repair/multirate_stabilization_round3_20261026.md).
+
 20261026 AREPO-grade campaign (source only; NOT compiled, NOT tested; owner
 validation required). Repairs:
 

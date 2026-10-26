@@ -582,17 +582,39 @@ the pending flags clear only when a checkpoint is actually written.
   global steps (opportunities advance once per global step in that mode,
   which requires `hierarchical_max_rung = 0`).
 
-## Multirate outer PM cycles (2026-10-26, untested)
+## Multirate outer PM cycles (2026-10-26 round 3; IMPLEMENTED — NOT COMPILED — NOT TESTED)
 
-With `numerics.treepm_pm_reuse_policy = multirate_outer_kick`, coarse-block
-boundaries strictly inside a PM cycle are synchronized but **not**
-restart- or output-safe (`StepBoundaryState::multirate_pm_cycle_interior`):
-momenta carry an open outer PM half-kick. Pending checkpoints and step-cadence
-snapshots are held to the cycle end (counter
-`io.output.deferred_to_multirate_pm_cycle_end`, at most `M − 1` blocks);
-code-time snapshot events are planned onto cycle ends. Every checkpoint
-therefore closes a cycle, and a resumed segment opens a new cycle exactly as
-the uninterrupted run does — no additional persistent state and no restart
-schema change. Segment step budgets truncate the final cycle so a run never
-stops inside one. A restart whose integrator state is not restart-safe is
-refused when a multirate segment starts.
+With `numerics.treepm_pm_reuse_policy = multirate_outer_kick`, the coarse-block
+boundaries strictly inside a PM cycle are synchronized, but they are **not**
+restart-safe or output-safe (`StepBoundaryState::multirate_pm_cycle_interior`),
+because momenta carry an open outer PM half-kick. At those boundaries:
+
+* Pending checkpoints and step-cadence snapshots are held until the cycle end
+  (counter `io.output.deferred_to_multirate_pm_cycle_end`).
+* Analysis hooks are skipped.
+* Code-time snapshot events are not reached mid-cycle, because the cycle
+  length is clipped exactly to the next event or `t_end`.
+
+**Soft stop (round 3).** The segment step budget no longer shortens the PM
+cycle. If the budget is reached while a cycle is open, the segment keeps
+running to the cycle end. The extra blocks are reported in
+`ReferenceWorkflowReport::multirate_soft_stop_extension_blocks` and counter
+`time.hierarchical_multirate_soft_stop_extension_blocks`, alongside
+`requested_steps` and `completed_steps`. A segment that ends with a cycle open
+is a `logic_error`.
+
+Every checkpoint therefore closes a cycle. A resumed segment opens its next
+cycle exactly as the uninterrupted run does, from state that is already
+persisted:
+
+* the scheduler;
+* the integrator, including the previous quantum;
+* the v24 force endpoint;
+* pending output.
+
+There is no persisted interior-cycle state and **no restart schema change**.
+Restarting inside a cycle is unsupported by design. A restart whose integrator
+state is not restart-safe is refused when a multirate segment starts.
+
+The transactional cycle rollback (see `docs/time_integration.md`) is
+in-memory only. It never writes or reads a checkpoint.
