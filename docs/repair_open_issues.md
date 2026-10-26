@@ -1,5 +1,21 @@
 # Repair open issues
 
+20261026 round 4: final pre-validation completion. Engineering code-complete
+at source level; NOT compiled, NOT tested; owner validation required.
+
+* Transactional multirate rollback with an explicit restoration/invalidation
+  contract and a state inventory.
+* Governed reusable rollback store.
+* Collective memory-pressure policy
+  (`numerics.treepm_multirate_rollback_memory_policy`).
+* Transactional accepted-trajectory diagnostics.
+* Cosmological driver suites, plus rollback, fallback, failure-injection and
+  skewed-rank workflow tests.
+
+No known unresolved source-level defect. Limitations are classified in the
+[round-4 record](repair/multirate_round4_completion_20261026.md), §E, which
+also contains the owner validation manifest.
+
 20261026 round 3 (source only; NOT compiled, NOT tested; owner validation
 required):
 
