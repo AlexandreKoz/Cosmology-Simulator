@@ -9,7 +9,9 @@ same initial conditions at the same scale factor through the validated
 markers are checked there), then reports:
 
   * mass conservation (total mass of each code and their relative difference);
-  * particle displacement statistics between codes (matched by ParticleIDs,
+  * particle displacement statistics between codes (matched by ParticleIDs
+    after the explicit translation normalized_arepo_id = arepo_id + offset,
+    see --arepo-id-offset;
     minimum-image, in units of the mean interparticle spacing);
   * matter power spectra P(k) (CIC deposit, CIC window deconvolution,
     Poisson shot-noise subtraction) and their ratio;
@@ -27,7 +29,7 @@ informational only.
 Example:
   python3 tools/compare_dmo_arepo.py \
       --chui output/run/snapshots/snap_010.complete \
-      --arepo arepo_run/snap_010.hdf5 --arepo-dialect arepo_format3 \
+      --arepo arepo_run/snap_010.hdf5 --arepo-dialect arepo_format3 --arepo-id-offset 1 \
       --legacy-length-unit kpc --legacy-mass-unit msun --legacy-velocity-unit km_s \
       --grid 256 --json comparison_snap_010.json
 """
@@ -59,6 +61,148 @@ PROVISIONAL = {
     'median_displacement_over_spacing': 0.10,
 }
 
+
+# ---------------------------------------------------------------------------
+# Particle identity (2026-10-26 repair).
+#
+# CHUI and AREPO number the same matched-IC particles differently (the
+# project's DMO comparison: AREPO zero-based, CHUI one-based, CHUI = AREPO + 1).
+# The comparison normalizes AREPO IDs explicitly:
+#
+#     normalized_arepo_id = original_arepo_id + arepo_id_offset
+#
+# The offset is never inferred. Normalization is exact unsigned 64-bit integer
+# arithmetic with explicit overflow/underflow checks (no floating point), the
+# original IDs are kept untouched, and the normalized sets must be identical
+# and duplicate-free: an offset can only rename IDs, never hide a missing,
+# duplicated or unrelated particle.
+# ---------------------------------------------------------------------------
+UINT64_MAX = (1 << 64) - 1
+ID_CONVENTION = 'normalized_arepo_id = original_arepo_id + arepo_id_offset (CHUI IDs unchanged)'
+
+
+class IdentityMatchError(ValueError):
+    """Particle identity sets cannot be put in one-to-one correspondence."""
+
+
+def _checked_offset(offset):
+    if isinstance(offset, bool) or not isinstance(offset, (int, np.integer)):
+        raise IdentityMatchError('arepo_id_offset must be an integer, got %r' % (offset,))
+    offset = int(offset)
+    if not -UINT64_MAX <= offset <= UINT64_MAX:
+        raise IdentityMatchError('arepo_id_offset %d is outside the 64-bit ID range' % offset)
+    return offset
+
+
+def normalize_ids(ids, offset, label):
+    """Return ``ids + offset`` as a new uint64 array (exact, checked)."""
+    offset = _checked_offset(offset)
+    array = np.asarray(ids)
+    if array.ndim != 1:
+        raise IdentityMatchError('%s: ParticleIDs must be one-dimensional' % label)
+    if array.dtype.kind not in 'ui' or array.dtype.itemsize not in (1, 2, 4, 8):
+        raise IdentityMatchError('%s: unsupported ParticleID dtype %s (integer IDs required)' % (label, array.dtype))
+    if array.size == 0:
+        return array.astype(np.uint64)
+    low, high = int(array.min()), int(array.max())  # exact Python integers
+    if low < 0:
+        raise IdentityMatchError('%s: negative ParticleID %d' % (label, low))
+    if low + offset < 0:
+        raise IdentityMatchError('%s: offset %d underflows ParticleID %d below zero' % (label, offset, low))
+    if high + offset > UINT64_MAX:
+        raise IdentityMatchError('%s: offset %d overflows ParticleID %d beyond 2^64-1' % (label, offset, high))
+    unsigned = array.astype(np.uint64)  # lossless: checked non-negative integers
+    if offset >= 0:
+        return unsigned + np.uint64(offset)
+    return unsigned - np.uint64(-offset)
+
+
+def _first_duplicates(sorted_ids, limit=5):
+    dup = sorted_ids[1:][sorted_ids[1:] == sorted_ids[:-1]]
+    return [int(v) for v in np.unique(dup)[:limit]]
+
+
+def match_identities(chui_ids, arepo_ids, arepo_id_offset=0, examples=10):
+    """Strict one-to-one correspondence between CHUI and normalized AREPO IDs.
+
+    Returns ``(order_chui, order_arepo, matched_ids, record)`` such that
+    ``chui_ids[order_chui][i]`` and ``arepo_ids[order_arepo][i] + offset`` are
+    the same particle ``matched_ids[i]`` for every ``i``. Raises
+    IdentityMatchError with diagnostics otherwise.
+    """
+    offset = _checked_offset(arepo_id_offset)
+    chui_original = np.asarray(chui_ids)
+    arepo_original = np.asarray(arepo_ids)
+    chui = normalize_ids(chui_original, 0, 'chui')
+    arepo = normalize_ids(arepo_original, offset, 'arepo')
+    order_chui = np.argsort(chui, kind='stable')
+    order_arepo = np.argsort(arepo, kind='stable')
+    sorted_chui = chui[order_chui]
+    sorted_arepo = arepo[order_arepo]
+    for label, values in (('chui', sorted_chui), ('arepo (normalized)', sorted_arepo)):
+        duplicates = _first_duplicates(values)
+        if duplicates:
+            raise IdentityMatchError('%s: duplicate ParticleIDs, e.g. %s' % (label, duplicates))
+    if sorted_chui.size != sorted_arepo.size or not np.array_equal(sorted_chui, sorted_arepo):
+        only_chui = np.setdiff1d(sorted_chui, sorted_arepo, assume_unique=True)
+        only_arepo = np.setdiff1d(sorted_arepo, sorted_chui, assume_unique=True)
+        message = ('ParticleID sets differ after normalization (%s, offset=%d): chui=%d arepo=%d '
+                   'only_in_chui=%d %s only_in_arepo=%d %s' % (
+                       ID_CONVENTION, offset, sorted_chui.size, sorted_arepo.size,
+                       only_chui.size, [int(v) for v in only_chui[:examples]],
+                       only_arepo.size, [int(v) for v in only_arepo[:examples]]))
+        if sorted_chui.size == sorted_arepo.size and sorted_chui.size > 0:
+            # Diagnostic only (never applied): a constant shift between the
+            # sorted sets suggests a numbering convention, not lost particles.
+            raw_arepo = np.sort(normalize_ids(arepo_original, 0, 'arepo'))
+            shift = int(sorted_chui[0]) - int(raw_arepo[0])
+            shifted_ok = (-UINT64_MAX <= shift <= UINT64_MAX and
+                          int(raw_arepo[0]) + shift >= 0 and int(raw_arepo[-1]) + shift <= UINT64_MAX)
+            if shifted_ok and np.array_equal(sorted_chui, normalize_ids(raw_arepo, shift, 'arepo')):
+                message += '; the sets differ by a constant shift: --arepo-id-offset %d would match' % shift
+        raise IdentityMatchError(message)
+    if not np.array_equal(chui[order_chui], arepo[order_arepo]):  # one-to-one check
+        raise IdentityMatchError('internal: sorted correspondence is not one-to-one')
+    record = {
+        'convention': ID_CONVENTION,
+        'arepo_id_offset': offset,
+        'matched_particles': int(sorted_chui.size),
+        'chui_id_range': [int(sorted_chui[0]), int(sorted_chui[-1])] if sorted_chui.size else None,
+        'arepo_original_id_range': ([int(arepo_original.min()), int(arepo_original.max())]
+                                    if arepo_original.size else None),
+        'normalized_id_range': [int(sorted_arepo[0]), int(sorted_arepo[-1])] if sorted_arepo.size else None,
+    }
+    return order_chui, order_arepo, sorted_chui, record
+
+
+def match_halo_catalogues(halos_chui, halos_arepo, matched_ids, box, spacing, min_shared_fraction=0.5):
+    """Match halos by shared normalized identities.
+
+    Halo ``members`` are positions in the common matched order produced by
+    ``match_identities`` (the same index is the same normalized particle ID in
+    both codes), so membership overlap is evaluated on normalized identity.
+    """
+    n = len(matched_ids)
+    owner = np.full(n, -1, dtype=np.int64)
+    for label, halo in halos_chui.items():
+        owner[halo['members']] = label
+    matches = []
+    for label, halo in halos_arepo.items():
+        owners = owner[halo['members']]
+        owners = owners[owners >= 0]
+        if owners.size == 0:
+            continue
+        values, counts = np.unique(owners, return_counts=True)
+        best = int(values[np.argmax(counts)])
+        if counts.max() >= min_shared_fraction * len(halo['members']):
+            offset = periodic_delta(halos_chui[best]['com'][None, :], halo['com'][None, :], box)[0]
+            shared = np.intersect1d(matched_ids[halos_chui[best]['members']], matched_ids[halo['members']],
+                                    assume_unique=True)
+            matches.append({'arepo_halo': int(label), 'chui_halo': best,
+                            'shared_members': int(shared.size),
+                            'mass_ratio': halos_chui[best]['mass'] / halo['mass'],
+                            'offset_over_spacing': float(np.sqrt((offset ** 2).sum()) / spacing)})
+    return matches
 
 def periodic_delta(a, b, box):
     d = a - b
@@ -179,6 +323,15 @@ def halo_catalogue(labels, x, mass, box, min_members):
     return halos
 
 
+
+def _json_default(value):
+    """JSON encoding for numpy scalars/arrays and paths in provenance records."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return str(value)
+
 def mass_function(halos, edges):
     masses = np.array([h['mass'] for h in halos.values()])
     counts, _ = np.histogram(masses, bins=edges)
@@ -190,6 +343,9 @@ def main():
     parser.add_argument('--chui', required=True, help='CHUI snapshot (.complete marker, member or directory)')
     parser.add_argument('--arepo', required=True, help='AREPO/GADGET-4 snapshot')
     parser.add_argument('--arepo-dialect', choices=('arepo_format3', 'gadget4_hdf5'), default='arepo_format3')
+    parser.add_argument('--arepo-id-offset', type=int, default=0,
+                        help='explicit ID translation: normalized_arepo_id = arepo_id + OFFSET (never inferred; '
+                             'the project DMO convention is AREPO zero-based, CHUI one-based: use 1)')
     parser.add_argument('--legacy-length-unit', choices=('m', 'cm', 'kpc', 'mpc'))
     parser.add_argument('--legacy-mass-unit', choices=('kg', 'g', 'msun'))
     parser.add_argument('--legacy-velocity-unit', choices=('m_s', 'cm_s', 'km_s'))
@@ -222,13 +378,22 @@ def main():
     if abs(chui['a'] - arepo['a']) > 1e-6 * max(1.0, abs(arepo['a'])):
         record['warning_scale_factor_mismatch'] = True
 
-    ids_c, ids_a = np.asarray(chui['ids']), np.asarray(arepo['ids'])
-    if len(ids_c) != len(ids_a) or not np.array_equal(np.sort(ids_c), np.sort(ids_a)):
-        raise SystemExit('ParticleIDs differ: matched-IC comparison requires identical identity sets')
-    oc, oa = np.argsort(ids_c, kind='stable'), np.argsort(ids_a, kind='stable')
+    # Original IDs stay untouched in chui['ids'] / arepo['ids']; every
+    # identity-dependent quantity below uses the common matched order.
+    try:
+        oc, oa, matched_ids, identity_record = match_identities(
+            chui['ids'], arepo['ids'], args.arepo_id_offset)
+    except IdentityMatchError as error:
+        raise SystemExit('particle identity matching failed: ' + str(error))
+    identity_record['chui_particle_id_sha256_le_u64'] = chui['provenance'].get('particle_id_sha256_le_u64')
+    identity_record['arepo_original_particle_id_sha256_le_u64'] = arepo['provenance'].get('particle_id_sha256_le_u64')
+    record['identity_mapping'] = identity_record
+    record['provenance'] = {'chui': chui['provenance'], 'arepo': arepo['provenance'],
+                            'arepo_id_offset': identity_record['arepo_id_offset'],
+                            'id_convention': identity_record['convention']}
     xc, xa = np.asarray(chui['x'])[oc], np.asarray(arepo['x'])[oa]
     mc, ma = np.asarray(chui['mass'])[oc], np.asarray(arepo['mass'])[oa]
-    n = len(ids_c)
+    n = len(matched_ids)
     spacing = L / n ** (1.0 / 3.0)
 
     total_c, total_a = float(mc.sum()), float(ma.sum())
@@ -272,34 +437,21 @@ def main():
                 mf.append(row)
             record['mass_function'] = mf
             record['verdicts']['mass_function'] = ok
-            # Halo matching by shared members (>= 50 % of the AREPO halo).
-            owner_c = np.full(n, -1, dtype=np.int64)
-            for label, h in hc.items():
-                owner_c[h['members']] = label
-            matches = []
-            for label, h in ha.items():
-                owners = owner_c[h['members']]
-                owners = owners[owners >= 0]
-                if owners.size == 0:
-                    continue
-                values, counts = np.unique(owners, return_counts=True)
-                best = int(values[np.argmax(counts)])
-                if counts.max() >= 0.5 * len(h['members']):
-                    offset = periodic_delta(hc[best]['com'][None, :], h['com'][None, :], L)[0]
-                    matches.append({'mass_ratio': hc[best]['mass'] / h['mass'],
-                                    'offset_over_spacing': float(np.sqrt((offset ** 2).sum()) / spacing)})
+            # Halo matching by shared normalized identities (>= 50 % of the
+            # AREPO halo); members index the common matched order.
+            matches = match_halo_catalogues(hc, ha, matched_ids, L, spacing)
             record['halo_matching'] = {
                 'arepo_halos': len(ha), 'chui_halos': len(hc), 'matched': len(matches),
                 'median_mass_ratio': float(np.median([m['mass_ratio'] for m in matches])) if matches else None,
                 'median_offset_over_spacing': float(np.median([m['offset_over_spacing'] for m in matches])) if matches else None}
 
     record['all_provisional_gates_pass'] = all(record['verdicts'].values())
-    text = json.dumps(record, indent=2, default=float)
+    text = json.dumps(record, indent=2, default=_json_default)
     if args.json:
         Path(args.json).write_text(text + '\n')
     print(json.dumps({'verdicts': record['verdicts'], 'power_band': record.get('power_band'),
                       'displacement_over_mean_spacing': record['displacement_over_mean_spacing'],
-                      'halo_matching': record.get('halo_matching')}, indent=2, default=float))
+                      'halo_matching': record.get('halo_matching')}, indent=2, default=_json_default))
     if args.enforce and not record['all_provisional_gates_pass']:
         return 1
     return 0

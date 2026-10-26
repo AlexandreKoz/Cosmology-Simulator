@@ -552,79 +552,303 @@ modes of the 4^3 fixture). Broader growth, power, nonlinear orbit stability and
 large-rung qualification remain pending. `hierarchical_max_rung=0` and all
 provisional capability classifications are retained.
 
-## Multirate outer PM level (2026-10-26; IMPLEMENTED — UNCOMPILED AND UNTESTED)
+## Multirate outer PM level — numerical contract (2026-10-26 stabilization; IMPLEMENTED — NOT COMPILED — NOT TESTED — OWNER VALIDATION REQUIRED)
 
-`numerics.treepm_pm_reuse_policy = multirate_outer_kick` (hierarchical KDK
-only; `treepm_update_cadence_steps = M` in `[2, 64]` is the number of coarse
-blocks per PM cycle). It is **experimental and scientifically unqualified**.
-The reference remains `exact` (one PM cycle per coarse block); the global-KDK
-`stale_within_cadence` window is a different, non-symplectic approximation and
-is not used here.
+`numerics.treepm_pm_reuse_policy = multirate_outer_kick` is **experimental and
+scientifically unqualified**. Hierarchical KDK only. `treepm_update_cadence_steps = M`
+in `[2, 64]` is the *target* number of coarse blocks per PM cycle. The scientific
+reference remains `exact` (PM at both endpoints of every coarse block).
+`stale_within_cadence` is an unrelated global-KDK field-reuse approximation.
 
-**Equations.** With the hierarchical convention above
-(`ẋ = p/a²`, `ṗ = A/a`, `u = p/a` stored at the common position epoch) and the
-Gaussian TreePM split `A = A_PM,long + A_tree,short`, the Hamiltonian splits as
-`H = H_kin + H_tree + H_PM` (time-dependent through `a(t)`). Let `B_j` be the
-existing coarse block operator *without* PM (fine-rung tree kicks around
-all-source drifts, power-of-two rungs, second-order KDK within the block). One
-PM cycle of length `T = Σ_j Δc_j` starting at `t0` is the r-RESPA composition
+The stabilization round replaced the original fixed-interval design. That
+design froze the coarse interval for a whole cycle, so it could run a block
+whose quantum was coarser than the current particle criterion, and it let
+the external step budget truncate the cycle.
+
+### 1. Phase-space variables and operators
+
+The hierarchical integrator uses the convention above: `ẋ = p/a²`,
+`ṗ = A/a`. It stores `u = p/a` at the common position epoch, and `A` is the
+scale-free comoving acceleration.
+
+| Operator | Modifies | Law (code) |
+| --- | --- | --- |
+| Drift `D[t0,t1]` | `x` (all sources, every fine tick) and `u` | `x += a0 u ∫dt/a²`, `u ← u a0/a1` (p fixed) |
+| Tree kick `K_T` | `u` of active rungs | `u += A_tree ∫dt/a / a_now` over the rung half interval |
+| PM kick `K_PM[t_a,t_b]` | `u` of **all** particles | `u += A_PM(x) ∫_{t_a}^{t_b} dt/a / a_now` |
+
+`∫dt/a` is `computeComovingDriftFactor(a_a, a_b, 64)/time_si_per_code`, the
+midpoint rule in `a` of `1/(a² H)`. `a_now` is the scale factor at which `u`
+is stored when the kick is applied. The PM kick modifies momenta only. Tree
+kicks and drifts never use `A_PM`.
+
+### 2. Composition actually executed
+
+One PM cycle opening at `t0`, of length `T`, with end `tE = t0 + T`:
 
 ```
-K_PM[t0, t0+T/2] ∘ B_1 ∘ … ∘ B_M ∘ K_PM[t0+T/2, t0+T]
+K_PM[t0, t0+T/2] ∘ B_1 ∘ B_2 ∘ … ∘ B_m ∘ K_PM[t0+T/2, tE]
 ```
 
-with `K_PM[t_a, t_b]: u ← u + A_PM(x) ∫_{t_a}^{t_b} dt/a / a_now` evaluated at
-the cycle endpoint positions (`a_now` = scale factor at the kick epoch, as for
-every hierarchical kick). The opening kick uses the PM field built at the
-previous cycle end (endpoint reuse) or a synchronized bootstrap. The closing
-kick refreshes PM at the cycle end. For `M = 1` this reduces exactly to the
-reference scheme. The composition is time-symmetric. For a fixed cycle
-interval and slowly varying `a(t)` it has the second-order accuracy of
-symmetric RESPA, with the usual RESPA resonance caveat. No convergence order
-has been measured.
+* `A_PM` in the opening kick is evaluated at the cycle-opening positions. This
+  is the endpoint of the previous cycle (endpoint reuse, restart v24) or a
+  synchronized bootstrap.
+* `A_PM` in the closing kick comes from a PM refresh at the closing
+  positions.
+* Each `B_j` is the reference power-of-two block without its PM surfaces:
+  tree half-kicks per rung around all-source drifts.
 
-**Cycle planning** (`TimeCoordinator`, `core::HierarchicalPmCyclePlan`):
+In code, `StepOrchestrator::executeHierarchicalBlockWithDispatcher` receives a
+`HierarchicalPmCyclePlan`:
 
-* The RESPA opening kick needs `T` in advance. At the cycle start the coarse
-  interval `Δc` is chosen once and frozen for the cycle.
-* The PM displacement criterion and the output/end boundary are applied to
-  the whole cycle: `Δc ≤ displacement_dt / M` and `Δc ≤ (t_boundary − t0) / M`.
-  The particle, expansion and explicit-dt criteria apply per block.
-* When the boundary clips the cycle, the cycle ends exactly on it. The last
-  block absorbs the accumulated roundoff of the block sums.
-* `M` is truncated to the remaining step budget, so a run segment never ends
-  with an open outer kick.
-* Inside a cycle the rungs are still reassigned at every block boundary. A
-  particle that asks for a quantum below the frozen one is clamped to the
-  finest rung. This is counted (`time.hierarchical_multirate_quantum_clamped_blocks`),
-  not hidden.
+* `opens_cycle` attaches the opening PM factor at offset 0 of the first block.
+* `closes_cycle` turns on the PM refresh, the closing PM factor, the sync
+  event and restart/output safety at the final tick of the last block.
+* Interior force evaluations use `short_range_only`.
 
-**Force and cache validity:**
+The opening factor uses `a(t0+T/2)` from
+`advanceScaleFactorByCosmicTime(a0, T/2)`. The closing factor integrates from
+that same `a_mid` to the *actual* closing scale factor, so the two PM
+half-intervals cover `[a0, a_end]` with no gap or overlap.
 
-* PM is solved only at cycle ends (`pm_sync_state` cadence 1, one opportunity
-  per cycle).
-* Interior blocks close with Tree-only solves (`short_range_only`). The total
-  history used for timestep criteria is the current Tree force plus the PM
-  component of the cycle opening; it is never used to kick.
-* An interior block starts from a Tree-only endpoint
-  (`hierarchicalShortRangeEndpointReusable`), or after a migration from a
-  synchronized Tree-only bootstrap. PM kicks require the PM field and source
-  generation of their own endpoint, so double or missing PM kicks are
-  rejected by the existing generation checks.
+### 3. Time coordinate and scheduling
 
-**Output and restart:**
+Scheduling uses integrator code time `t`. `T` is fixed when the cycle opens,
+from physical criteria only:
+
+```
+T = min( M · Δc_open,  Δt_PMdisp(open),  t_boundary − t0,  [retry bound] )
+```
+
+where `Δc_open` is the reference per-block interval:
+
+```
+Δc_open = min( 2^maxBin · min_i dt_i(particle criteria incl. encounter and growth limiter),
+               expansion limit,
+               explicit dt )
+```
+
+`t_boundary` is the next code-time snapshot event or `t_end`, and a cycle
+clipped by it ends exactly on it. The execution step budget does **not**
+enter `T` (section 8).
+
+Inner blocks are re-planned at every block by the reference rules:
+`Δc_j = min(particle·2^maxBin, expansion, explicit)`, clipped to the
+remaining cycle time. A remainder shorter than a quarter block is split in
+two to avoid slivers. The blocks therefore tile `[t0, tE]` exactly, and the
+number of blocks `m` is determined by the dynamics (≈ M when the criteria
+are steady).
+
+Endpoint rounding: the driver ends a block at `t + quantum·2^maxBin`, and
+splitting by a power of two is exact. The closing block of a cycle still
+nudges its interval by at most four ulps so that `fl(t + Δc)` equals the
+planned cycle end exactly. Without this, `fl(t + fl(tE − t))` could miss
+`tE` by an ulp and leave an unrepresentable sliver before `t_end`. If the
+nudge fails, counter `time.hierarchical_multirate_cycle_end_inexact` is
+incremented.
+
+The reference (non-multirate) path keeps its unchanged end-boundary clip.
+
+### 4. Timestep invariants (enforced)
+
+1. **Particle criteria are never violated.** Every block's quantum is
+   `Δc_j / 2^maxBin ≤ min_i dt_i`, the same guarantee as the reference.
+   `HierarchicalBlockRecord` reports both the quantum and the global minimum
+   criterion so tests can assert it.
+2. **No unrepresentable intervals.** A non-finite, non-positive or
+   unrepresentable quantum or cycle length throws on every rank before any
+   state changes (`time.hierarchical_quantum_unrepresentable`,
+   `…_recovery_failures`).
+3. **Rung transitions** only happen at block synchronization points, as in
+   the reference. Rungs are fixed within a block, so no KDK half-kick history
+   is reinterpreted. Changing the block interval between blocks changes only
+   the next block's quantum.
+4. **The PM interval honours the PM displacement criterion.** It is checked
+   at the opening and **re-checked at every interior block** with the
+   current velocities. If `Δt_PMdisp(now) < T`, the cycle is rejected
+   (section 5).
+5. **Cosmological factors** are computed from the actual block (tree kicks,
+   drifts) and the actual cycle endpoints (PM kicks).
+
+### 5. Recovery: transactional rollback and retry
+
+At a multi-block cycle opening, after the endpoint force is available and
+before rung assignment and the opening PM kick, the coordinator captures a
+governed **lane-level** snapshot (`time.multirate_cycle_rollback_snapshot`).
+Hierarchical KDK is homogeneous DMO with ownership frozen inside a cycle, so
+a block can mutate only a small set of lanes. The snapshot holds:
+
+* the six phase-space lanes and the SFC-key lane;
+* `StateMetadata` and the common drift epoch;
+* `IntegratorState`;
+* both schedulers' persistent states;
+* the synchronized force endpoint: total, Tree and PM components, the
+  nearest-pair lane and the PM field version. Particle IDs are stored only if
+  the cache row order differs from the state row order.
+* pending output requests;
+* a mark of the gravity diagnostics.
+
+It costs about `17·8 + 3·8` bytes per particle, which replaces the earlier full
+`SimulationState` copy.
+
+Everything outside the snapshot lanes is covered by an FNV-1a fingerprint
+taken at the opening:
+
+* identity, mass, species, flags and rank;
+* softening and its override mask;
+* particle index generation and metadata representation;
+* cell and gas container sizes.
+
+If the fingerprint differs at rollback, the rollback fails closed instead of
+restoring a partial state.
+
+**Memory-pressure fallback.** If the governor refuses the snapshot on any rank
+(the admission flag is reduced collectively), the cycle opens as a single
+block with limiter `rollback_memory`. A single-block cycle has no interior
+boundary and cannot be rejected. The fallback is recorded in counter
+`time.hierarchical_multirate_cycle_memory_limited` and report field
+`multirate_memory_limited_cycles`. Under memory pressure the schedule
+therefore depends on the available memory: segmentation invariance holds
+only for runs with the same memory admission outcomes.
+
+On rejection, every rank does the following. The decision comes from
+globally reduced criteria, and failures are coordinated through
+`FailureCoordinator`.
+
+1. Verify the fingerprint, then restore the snapshot lanes and records.
+2. Advance the gravity source generation strictly beyond every generation the
+   rejected attempt used, so no generation-keyed cache (tree reuse or refit,
+   ghosts, LET geometry) can confuse retried positions with rejected ones.
+3. Re-import the endpoint stamped with that generation.
+4. Move the attempt's PM refresh and reuse counts and its cadence records out
+   of the trajectory diagnostics (`GravityRuntime::discardDiagnosticsSince`).
+5. Reinstall the domain geometry and reconcile memory.
+6. Reopen with `T ← min(T/2, Δt_PMdisp(now))`.
+
+Ownership is frozen inside a cycle: no rebalance or migration happens at
+interior boundaries. That is why decomposition state does not need to be
+part of the snapshot.
+
+A single-block cycle has no interior boundary and cannot be rejected, so
+retries terminate after at most ⌈log₂ M⌉ + 1 attempts. The hard bound of 64
+fails closed. DMO hierarchical runs have no stochastic state.
+
+Diagnostics:
+
+* `time.hierarchical_coarse_limited_by.<criterion>`
+* `time.hierarchical_multirate_cycle_limited_by.<limiter>`
+* `…_cycle_shortened_by_boundary`
+* `…_cycle_rejected_retried`
+* `…_cycle_memory_limited`
+* `…_cycles_completed`
+* `…_recovery_failures`
+* `…_soft_stop_extension_blocks`
+* `time.hierarchical_quantum_unrepresentable`
+
+**Accounting of rejected attempts.** The trajectory diagnostics exclude
+rejected attempts:
+
+* `treepm_long_range_refresh_count` and `…_reuse_count`;
+* the TreePM cadence records;
+* `hierarchical_block_records`.
+
+They equal an uninterrupted run's. The rejected work is reported separately in
+`multirate_rejected_blocks`, `multirate_rejected_pm_refreshes` and
+`multirate_rejected_pm_reuses`. The last two are expected to stay zero,
+because interior blocks are short-range only.
+
+Profiler timings and stage counters still include the rejected work, because
+they measure cost. Cadence records evicted from the bounded recent window
+(256) during an attempt are not restored.
+
+Each `HierarchicalBlockRecord` carries `pm_displacement_limit_time_code`. For
+every accepted block, `T ≤ Δt_PMdisp` within `1e-12` relative.
+
+### 6. Interior PM values, source prediction and authoritative epochs
+
+* Interior PM values are needed only as the accuracy scale (total history =
+  current Tree + cycle-opening PM) for rung criteria and the relative MAC.
+  They are never kicked.
+* Source prediction is not used. Every source is canonically drifted at
+  every fine tick (section above). The global-KDK predictor fails closed for
+  hierarchical lanes.
+* The authoritative epochs are:
+  * the PM field version and source generation of the cycle opening, which
+    the opening kick requires;
+  * the closing refresh at the cycle end;
+  * the per-row Tree generation, equal to the current source generation for
+    every tree kick.
+
+  These checks reject a double or missing PM kick.
+
+### 7. Approximation order (what can and cannot be claimed)
+
+* With a fixed outer `T`, fixed inner block intervals and fixed rungs, the
+  composition is a symmetric r-RESPA splitting of time-symmetric inner KDK
+  blocks. For autonomous Hamiltonians this is time-reversible and second
+  order in `T` and in the inner steps.
+* The cosmological system is non-autonomous through `a(t)`. Kick coefficients
+  are exact integrals over each half interval with `A` frozen, so the
+  splitting remains formally second order. Reversibility holds only in the
+  extended phase space with `t` as a coordinate.
+* **Adaptive inner blocks, adaptive rungs, a retried `T` and the sliver split
+  all break strict time-reversibility.** The adaptive reference scheme has
+  the same limitation. No reversibility or symplecticity claim is made under
+  adaptive stepping.
+* Accuracy is expected to remain second order in the maximum step size for
+  smooth criteria. **This has not been measured.** The owner gates are:
+  * `test_hierarchical_multirate_convergence` (CPU-only). It drives the
+    production block driver with analytic split forces and gates the observed
+    order in `[1.8, 2.2]` for:
+    * PM-only, which must also equal leapfrog at step `T`;
+    * tree-only, which must also equal the reference scheme;
+    * combined fast/slow oscillators with uniform and variable block
+      intervals, including the splitting error relative to the reference;
+    * adaptive and changing rungs;
+    * a circular two-body orbit under a smooth Tree/PM split. Linear and
+      angular momentum must also be conserved to roundoff.
+  * `test_hierarchical_treepm_workflow` (HDF5/FFTW, np 1/2/4). It gates
+    monotone convergence of the full TreePM workflow.
+* The known RESPA resonance limitation applies for large `T` relative to
+  short-range dynamical times. The PM displacement criterion is the
+  safeguard. It bounds displacement relative to `r_s`, not resonance.
+
+### 8. Stop and restart policy (cycle-boundary-only, enforced)
 
 * Interior block boundaries are synchronized but carry
-  `multirate_pm_cycle_interior`. They are neither output- nor restart-safe,
-  because momenta contain an open half-kick.
-* Pending step-cadence snapshots and checkpoints stay latched and are written
-  at the cycle end (`io.output.deferred_to_multirate_pm_cycle_end`).
-  Code-time snapshot events are planned onto cycle ends.
-* Every checkpoint is therefore at a closed cycle. A resumed segment opens a
-  new cycle exactly as the uninterrupted run does, so no restart schema change
-  is needed.
-* A restart that is not restart-safe is refused at segment start.
+  `multirate_pm_cycle_interior`. They are neither output- nor restart-safe.
+  Pending snapshots and checkpoints stay latched until the cycle end, and
+  analysis is skipped at interior boundaries.
+* **Soft stop.** A segment whose requested step budget is reached inside an
+  open cycle keeps running to the cycle end
+  (`multirate_soft_stop_extension_blocks`, `report.completed_steps` and
+  `report.requested_steps`). A segment ending with an open cycle throws a
+  `logic_error`. There is no wall-clock or operator hard stop in the
+  hierarchical segment. A future one must defer to the cycle end in the same
+  way.
+* Every checkpoint is therefore at a closed cycle. A resumed segment opens
+  its next cycle from restart-persisted state only:
+  * the scheduler;
+  * the integrator, including the previous quantum for the growth limiter;
+  * the v24 force endpoint;
+  * the pending output.
 
-**Not implemented:** an adaptive mid-cycle termination with retroactive
-correction of the opening kick. Such a correction would not be time-symmetric,
-so the clamp-and-count policy above was chosen instead.
+  This is exactly what the uninterrupted run does at the same boundary.
+* **Interior-cycle restart is not supported**, by design. No schema change
+  was made, and none is needed. A restart that is not restart-safe is
+  refused at segment start.
+
+**Segmentation invariance claim.** For a fixed configuration, the
+cycle-opening times, `T`, the block intervals and the PM refresh sequence
+depend only on the state at cycle boundaries and on physical criteria. They
+are therefore identical for:
+
+* one uninterrupted run;
+* runs split at any cycle boundary;
+* runs with different step budgets, compared at a common cycle-end
+  synchronization point.
+
+States are expected to agree bitwise when the tree is rebuilt every solve
+(the default). With topology refit or identical-source reuse enabled, the
+force summation order can differ after a restart or rollback. That gives a
+roundoff-level difference, not a different schedule.

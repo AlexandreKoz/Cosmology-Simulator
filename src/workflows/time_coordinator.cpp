@@ -23,6 +23,7 @@
 #include "cosmosim/core/retained_capacity_transaction.hpp"
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/simulation_state.hpp"
+#include "cosmosim/core/time_scheduler.hpp"
 #include "cosmosim/core/units.hpp"
 #include "cosmosim/io/restart_checkpoint.hpp"
 #include "cosmosim/physics/effective_multiphase_ism.hpp"
@@ -1453,25 +1454,254 @@ void TimeCoordinator::runHierarchicalSegment(
   const std::uint64_t run_start_step = integrator.step_index;
   const std::uint64_t final_step = integrator.step_index + requested_steps;
   // Multirate outer PM cycle state (TreePmPmReusePolicy::kMultirateOuterKick;
-  // core::HierarchicalPmCyclePlan). A cycle opens at a restart-safe boundary
-  // and output/checkpoints are held to cycle ends, so every run segment —
-  // fresh or resumed — starts with a new cycle and no cycle state persists.
-  // The cycle length is truncated to the remaining step budget so a segment
-  // never ends with an open outer PM half-kick.
+  // core::HierarchicalPmCyclePlan; contract in docs/time_integration.md).
+  //
+  // * The OUTER interval T (PM half-kick lengths) is fixed when the cycle
+  //   opens, from physical criteria only: target blocks x the opening block
+  //   interval, the PM displacement criterion, and output/end boundaries.
+  //   The external step budget never shortens a cycle (segmentation
+  //   invariance); a budget reached inside a cycle is extended to the cycle
+  //   end (soft stop) and the executed step count is reported.
+  // * INNER blocks are re-planned at every block from the reference criteria
+  //   (particle gravity/encounter/growth, expansion, explicit dt) and clipped
+  //   to the cycle end, so no block ever uses a quantum coarser than the
+  //   current global particle criterion.
+  // * A PM displacement requirement discovered inside an open cycle rejects
+  //   the cycle: the authoritative state captured at the cycle opening is
+  //   restored transactionally on every rank and the cycle is retried with a
+  //   shorter T. A single-block cycle cannot be rejected, so retries
+  //   terminate; exceeding the retry bound fails closed.
+  // * Checkpoints/output occur only at cycle ends; a segment always starts
+  //   and ends at a closed cycle, so no cycle state is persisted.
   const bool multirate_pm =
       config.numerics.treepm_pm_reuse_policy == core::TreePmPmReusePolicy::kMultirateOuterKick;
   const std::uint64_t multirate_blocks_per_cycle = multirate_pm
       ? static_cast<std::uint64_t>(std::max(config.numerics.treepm_update_cadence_steps, 1)) : 1U;
-  std::uint64_t pm_cycle_blocks = 1U;
-  std::uint64_t pm_cycle_block_index = 0U;
-  double pm_cycle_coarse_dt = 0.0;
-  double pm_cycle_plan_end_time = 0.0;
+  constexpr unsigned k_multirate_max_retries_per_cycle = 64U;
+  // Lane-level rollback point. Hierarchical KDK runs homogeneous DMO with
+  // frozen ownership inside a cycle (no rebalance/migration at interior
+  // boundaries), so a block can only mutate the phase-space lanes, the SFC
+  // key lane, the common drift epoch, the metadata and the gravity source
+  // generation. Everything else (identity, mass, species/flags/rank,
+  // softening, index generation, cell/gas containers) must be unchanged at
+  // rollback; a fingerprint taken at the opening verifies it and the
+  // rollback fails closed otherwise. This replaces the earlier full
+  // SimulationState copy (identity, mass and metadata lanes are no longer
+  // duplicated).
+  struct MultirateCycleSnapshot {
+    std::vector<double> position_x_comoving;
+    std::vector<double> position_y_comoving;
+    std::vector<double> position_z_comoving;
+    std::vector<double> velocity_x_peculiar;
+    std::vector<double> velocity_y_peculiar;
+    std::vector<double> velocity_z_peculiar;
+    std::vector<std::uint64_t> sfc_key;
+    core::StateMetadata metadata{};
+    double drift_time_code = 0.0;
+    double drift_scale_factor = 0.0;
+    std::uint64_t frozen_fingerprint = 0U;
+    core::IntegratorState integrator{};
+    core::TimeBinPersistentState particle_scheduler{};
+    core::TimeBinPersistentState cell_scheduler{};
+    // Endpoint force; particle_id is left empty when the cache rows follow
+    // the state row order (refilled from the frozen identity lane).
+    io::GravityForceCachePersistentState force_cache{};
+    internal::PendingOutputBoundary pending{};
+    GravityRuntime::DiagnosticsMark diagnostics{};
+    core::MemoryReservation reservation;
+  };
+  struct MultirateCycle {
+    bool open = false;
+    std::uint64_t index = 0U;            // cycles opened in this segment (diagnostic)
+    std::uint64_t completed_blocks = 0U;
+    double opening_time_code = 0.0;
+    double end_time_code = 0.0;
+    double length_time_code = 0.0;
+    const char* length_limiter = "target_blocks";
+    unsigned retries = 0U;               // rejections of the current opening
+    double retry_length_limit = 0.0;     // > 0 after a rejection: bound on T at reopening
+    bool forced_rollback_used = false;   // test seam bookkeeping (see ReferenceWorkflowOptions)
+    std::optional<MultirateCycleSnapshot> snapshot;
+    // Block evidence of the open attempt; published when the cycle closes,
+    // discarded by a rollback (rejected attempts never reach the report).
+    std::vector<ReferenceWorkflowReport::HierarchicalBlockRecord> staged_records;
+  } pm_cycle;
+  std::uint64_t forced_rollbacks_remaining =
+      multirate_pm ? options.multirate_test_forced_cycle_rollbacks : 0U;
   core::HierarchicalPmCyclePlan pm_cycle_plan{};
+  std::uint64_t soft_stop_extension_blocks = 0U;
   if (multirate_pm && !integrator.last_completed_restart_safe && integrator.step_index > 0U) {
     throw std::logic_error("multirate PM cycle must open at a restart-safe synchronization boundary");
   }
-  while (integrator.step_index < final_step && integrator.current_time_code < config.numerics.t_code_end) {
-    const bool pm_cycle_interior_start = multirate_pm && pm_cycle_block_index != 0U;
+  // FNV-1a over everything a cycle must leave unchanged (see above).
+  const auto frozen_state_fingerprint = [&]() {
+    std::uint64_t hash = 14695981039346656037ULL;
+    const auto mix_bytes = [&hash](const void* data, std::size_t bytes) {
+      const auto* p = static_cast<const unsigned char*>(data);
+      for (std::size_t i = 0U; i < bytes; ++i) { hash ^= p[i]; hash *= 1099511628211ULL; }
+    };
+    const auto mix_value = [&](std::uint64_t value) { mix_bytes(&value, sizeof(value)); };
+    const auto mix_lane = [&](const auto& lane) {
+      mix_value(static_cast<std::uint64_t>(lane.size()));
+      if (!lane.empty()) mix_bytes(lane.data(), lane.size() * sizeof(lane[0]));
+    };
+    mix_value(static_cast<std::uint64_t>(state.particles.size()));
+    mix_lane(state.particles.mass_code);
+    mix_lane(state.particle_sidecar.particle_id);
+    mix_lane(state.particle_sidecar.species_tag);
+    mix_lane(state.particle_sidecar.particle_flags);
+    mix_lane(state.particle_sidecar.owning_rank);
+    mix_lane(state.particle_sidecar.gravity_softening_comoving);
+    mix_lane(state.particle_sidecar.has_gravity_softening_override);
+    mix_value(static_cast<std::uint64_t>(state.cells.size()));
+    mix_value(static_cast<std::uint64_t>(state.gas_cells.size()));
+    mix_value(state.particleIndexGeneration());
+    mix_value(static_cast<std::uint64_t>(state.particleMetadataRepresentation()));
+    return hash;
+  };
+  // Captures the rollback point. Returns false (on every rank) when the
+  // governor refuses the snapshot on any rank: the caller then opens a
+  // single-block cycle, which has no interior boundary and cannot be
+  // rejected. Any other failure is collective and fatal.
+  const auto take_cycle_snapshot = [&]() -> bool {
+    std::exception_ptr failure;
+    bool admitted_local = true;
+    try {
+      MultirateCycleSnapshot snapshot;
+      if (!state.hasHomogeneousDmoMetadata()) {
+        throw std::logic_error("multirate PM cycle rollback requires homogeneous DMO particle metadata");
+      }
+      const std::uint64_t n = static_cast<std::uint64_t>(state.particles.size());
+      // Governed: 6 phase-space lanes + SFC key, the force endpoint (total,
+      // Tree and PM vectors + nearest pair = 10 doubles, ids only when the
+      // cache order differs) and both schedulers' persistent lanes.
+      const std::uint64_t bytes = core::checkedSizeMultiply(
+          n, 17U * sizeof(double) + 3U * sizeof(std::uint64_t), "multirate rollback snapshot bytes");
+      if (m_services.memory_governor != nullptr) {
+        try {
+          snapshot.reservation = m_services.memory_governor->reserve(
+              core::MemoryClass::kPhaseResident, bytes, "time.multirate_cycle_rollback_snapshot");
+          snapshot.reservation.commit();
+        } catch (const core::MemoryAdmissionError&) {
+          admitted_local = false;
+        }
+      }
+      if (admitted_local) {
+        const auto copy = [](const auto& lane, auto& out) { out.assign(lane.begin(), lane.end()); };
+        copy(state.particles.position_x_comoving, snapshot.position_x_comoving);
+        copy(state.particles.position_y_comoving, snapshot.position_y_comoving);
+        copy(state.particles.position_z_comoving, snapshot.position_z_comoving);
+        copy(state.particles.velocity_x_peculiar, snapshot.velocity_x_peculiar);
+        copy(state.particles.velocity_y_peculiar, snapshot.velocity_y_peculiar);
+        copy(state.particles.velocity_z_peculiar, snapshot.velocity_z_peculiar);
+        copy(state.particle_sidecar.sfc_key, snapshot.sfc_key);
+        snapshot.metadata = state.metadata;
+        snapshot.drift_time_code = state.homogeneousDmoLastDriftTimeCode();
+        snapshot.drift_scale_factor = state.homogeneousDmoLastDriftScaleFactor();
+        snapshot.frozen_fingerprint = frozen_state_fingerprint();
+        snapshot.integrator = integrator;
+        snapshot.particle_scheduler = particles.exportPersistentState();
+        snapshot.cell_scheduler = cells.exportPersistentState();
+        snapshot.pending = pending;
+        snapshot.diagnostics = m_gravity.diagnosticsMark();
+        const io::GravityForceCachePersistentView view = m_gravity.restartForceCacheView(state);
+        if (!view.valid || !view.hierarchical_endpoint_valid) {
+          throw std::logic_error("multirate PM cycle opening lacks a complete synchronized force endpoint");
+        }
+        auto& cache = snapshot.force_cache;
+        cache.valid = true;
+        const auto& ids = state.particle_sidecar.particle_id;
+        if (view.particle_id.size() != ids.size() ||
+            !std::equal(view.particle_id.begin(), view.particle_id.end(), ids.begin())) {
+          cache.particle_id.assign(view.particle_id.begin(), view.particle_id.end());
+        }
+        cache.gas_cell_id.assign(view.gas_cell_id.begin(), view.gas_cell_id.end());
+        cache.particle_accel_x_comoving.assign(view.particle_accel_x_comoving.begin(), view.particle_accel_x_comoving.end());
+        cache.particle_accel_y_comoving.assign(view.particle_accel_y_comoving.begin(), view.particle_accel_y_comoving.end());
+        cache.particle_accel_z_comoving.assign(view.particle_accel_z_comoving.begin(), view.particle_accel_z_comoving.end());
+        cache.cell_accel_x_comoving.assign(view.cell_accel_x_comoving.begin(), view.cell_accel_x_comoving.end());
+        cache.cell_accel_y_comoving.assign(view.cell_accel_y_comoving.begin(), view.cell_accel_y_comoving.end());
+        cache.cell_accel_z_comoving.assign(view.cell_accel_z_comoving.begin(), view.cell_accel_z_comoving.end());
+        cache.hierarchical_endpoint_valid = true;
+        cache.hierarchical_pm_field_version = view.hierarchical_pm_field_version;
+        cache.hierarchical_tree_accel_x_comoving.assign(view.hierarchical_tree_accel_x_comoving.begin(), view.hierarchical_tree_accel_x_comoving.end());
+        cache.hierarchical_tree_accel_y_comoving.assign(view.hierarchical_tree_accel_y_comoving.begin(), view.hierarchical_tree_accel_y_comoving.end());
+        cache.hierarchical_tree_accel_z_comoving.assign(view.hierarchical_tree_accel_z_comoving.begin(), view.hierarchical_tree_accel_z_comoving.end());
+        cache.hierarchical_pm_accel_x_comoving.assign(view.hierarchical_pm_accel_x_comoving.begin(), view.hierarchical_pm_accel_x_comoving.end());
+        cache.hierarchical_pm_accel_y_comoving.assign(view.hierarchical_pm_accel_y_comoving.begin(), view.hierarchical_pm_accel_y_comoving.end());
+        cache.hierarchical_pm_accel_z_comoving.assign(view.hierarchical_pm_accel_z_comoving.begin(), view.hierarchical_pm_accel_z_comoving.end());
+        cache.hierarchical_nearest_pair_r2_comoving.assign(
+            view.hierarchical_nearest_pair_r2_comoving.begin(), view.hierarchical_nearest_pair_r2_comoving.end());
+        pm_cycle.snapshot.emplace(std::move(snapshot));
+      }
+    } catch (...) { failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(failure, "multirate PM cycle snapshot");
+    // Collective admission: every rank opens the same cycle shape.
+    const bool admitted = mpi.allreduceMinUint64(admitted_local ? 1U : 0U) == 1U;
+    if (!admitted) pm_cycle.snapshot.reset();
+    return admitted;
+  };
+  // Transactional rollback to the cycle opening. Every rank executes it (the
+  // decision derives from globally reduced criteria). The source generation
+  // is advanced strictly beyond every generation used by the rejected attempt
+  // so no generation-keyed cache (tree reuse/refit, ghosts, LET geometry) can
+  // mistake retried positions for rejected ones; the restored force endpoint
+  // is re-stamped with that generation (it describes the restored positions).
+  // Diagnostics of the rejected attempt move to the rejected-attempt totals.
+  const auto rollback_cycle = [&]() {
+    std::exception_ptr failure;
+    try {
+      if (!pm_cycle.snapshot.has_value()) {
+        throw std::logic_error("multirate PM cycle rollback requested without an opening snapshot");
+      }
+      auto& snapshot = *pm_cycle.snapshot;
+      if (state.particles.size() != snapshot.position_x_comoving.size() ||
+          frozen_state_fingerprint() != snapshot.frozen_fingerprint) {
+        throw std::logic_error(
+            "multirate PM cycle rollback: state outside the rollback lanes changed inside the cycle");
+      }
+      const std::uint64_t generation_reached = state.gravitySourceGeneration();
+      const auto restore = [](const auto& saved, auto& lane) { std::copy(saved.begin(), saved.end(), lane.begin()); };
+      restore(snapshot.position_x_comoving, state.particles.position_x_comoving);
+      restore(snapshot.position_y_comoving, state.particles.position_y_comoving);
+      restore(snapshot.position_z_comoving, state.particles.position_z_comoving);
+      restore(snapshot.velocity_x_peculiar, state.particles.velocity_x_peculiar);
+      restore(snapshot.velocity_y_peculiar, state.particles.velocity_y_peculiar);
+      restore(snapshot.velocity_z_peculiar, state.particles.velocity_z_peculiar);
+      state.particle_sidecar.sfc_key.assign(snapshot.sfc_key.begin(), snapshot.sfc_key.end());
+      state.metadata = snapshot.metadata;
+      state.updateAllParticleDriftEpoch(snapshot.drift_time_code, snapshot.drift_scale_factor);
+      integrator = snapshot.integrator;
+      particles.importPersistentState(snapshot.particle_scheduler);
+      cells.importPersistentState(snapshot.cell_scheduler);
+      pending = snapshot.pending;
+      while (state.gravitySourceGeneration() <= generation_reached) state.bumpGravitySourceGeneration();
+      if (snapshot.force_cache.particle_id.empty()) {
+        snapshot.force_cache.particle_id.assign(state.particle_sidecar.particle_id.begin(),
+                                                state.particle_sidecar.particle_id.end());
+      }
+      m_gravity.importRestartForceCache(snapshot.force_cache, state);
+      integrator.pm_source_generation = state.gravitySourceGeneration();
+      syncTimeBinsFromSchedulers(particles, cells, state);
+      m_gravity.discardDiagnosticsSince(snapshot.diagnostics);
+      report.multirate_rejected_blocks += pm_cycle.completed_blocks;
+      pm_cycle.snapshot.reset();
+    } catch (...) { failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(failure, "multirate PM cycle rollback");
+    install_geometry();
+    std::exception_ptr reconcile_failure;
+    try { reconcile_runtime(); } catch (...) { reconcile_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(reconcile_failure, "multirate PM cycle rollback reconciliation");
+  };
+  while ((integrator.step_index < final_step || pm_cycle.open) &&
+         integrator.current_time_code < config.numerics.t_code_end) {
+    const bool pm_cycle_interior_start = multirate_pm && pm_cycle.open;
+    if (pm_cycle_interior_start && integrator.step_index >= final_step) {
+      // Soft stop: the step budget was reached inside an open cycle. Finish
+      // the cycle (never shorten it for an execution budget).
+      ++soft_stop_extension_blocks;
+      profiler.counters().addCount("time.hierarchical_multirate_soft_stop_extension_blocks");
+    }
     const auto console_begin = RuntimeConsoleReporter::Clock::now();
     const double block_a_begin = integrator.current_scale_factor;
     std::exception_ptr preparation_failure;
@@ -1713,74 +1943,172 @@ void TimeCoordinator::runHierarchicalSegment(
         coarse_limiter = name;
       }
     };
-    // Multirate outer PM: the PM displacement bound and output/end boundaries
-    // constrain the whole cycle of planned_cycle_blocks blocks; the per-block
-    // particle and expansion criteria still bound each block.
-    const std::uint64_t planned_cycle_blocks = pm_cycle_interior_start
-        ? pm_cycle_blocks
-        : std::max<std::uint64_t>(1U, std::min(multirate_blocks_per_cycle, final_step - integrator.step_index));
-    const double cycle_blocks_real = static_cast<double>(planned_cycle_blocks);
-    limit_coarse(displacement_dt / cycle_blocks_real, "pm_displacement");
     const double expansion_dt = background != nullptr
         ? core::computeCosmologyExpansionTimeStep(*background, integrator.current_scale_factor,
               config.numerics.cosmology_max_delta_ln_a, config.numerics.cosmology_max_hubble_time_fraction,
               integrator.time_si_per_code)
         : std::numeric_limits<double>::infinity();
-    limit_coarse(expansion_dt, "cosmology_expansion");
-    if (options.dt_time_code > 0.0) limit_coarse(options.dt_time_code, "explicit_dt");
     double boundary_time = config.numerics.t_code_end;
     if (pending.snapshot_interval_time_code > 0.0 && pending.next_snapshot_time_code > integrator.current_time_code) {
       boundary_time = std::min(boundary_time, pending.next_snapshot_time_code);
     }
-    limit_coarse((boundary_time - integrator.current_time_code) / cycle_blocks_real, "output_or_end_boundary");
-    if (pm_cycle_interior_start) {
-      // Frozen cycle interval: RESPA needs the outer PM interval fixed when
-      // the opening half-kick is applied. The last block lands exactly on the
-      // planned cycle end (absorbs accumulated roundoff of the block sums).
-      if (particle_coarse_dt < pm_cycle_coarse_dt * (1.0 - 1.0e-12)) {
-        // Some particle asks for a quantum below the frozen one: it is clamped
-        // to the finest rung for this block. Counted, not hidden.
-        profiler.counters().addCount("time.hierarchical_multirate_quantum_clamped_blocks");
-      }
-      coarse_dt = pm_cycle_block_index + 1U == pm_cycle_blocks
-          ? pm_cycle_plan_end_time - integrator.current_time_code : pm_cycle_coarse_dt;
-      coarse_limiter = "multirate_frozen_cycle_interval";
-      if (!(coarse_dt > 0.0) || integrator.current_time_code + coarse_dt > boundary_time *
-              (1.0 + 8.0 * std::numeric_limits<double>::epsilon()) + 8.0 * std::numeric_limits<double>::epsilon()) {
-        throw std::logic_error("multirate PM cycle interval crosses an output/end boundary planned at cycle start");
-      }
-    } else if (multirate_pm) {
-      pm_cycle_blocks = planned_cycle_blocks;
-      pm_cycle_coarse_dt = coarse_dt;
-      const bool boundary_clipped =
-          (boundary_time - integrator.current_time_code) / cycle_blocks_real <= coarse_dt;
-      pm_cycle_plan_end_time = boundary_clipped
-          ? boundary_time : integrator.current_time_code + cycle_blocks_real * coarse_dt;
-      const double half_cycle_time_code = 0.5 * (pm_cycle_plan_end_time - integrator.current_time_code);
-      pm_cycle_plan = {};
-      pm_cycle_plan.enabled = true;
-      if (background != nullptr) {
-        const double a0 = integrator.current_scale_factor;
-        pm_cycle_plan.cycle_mid_scale_factor = core::advanceScaleFactorByCosmicTime(
-            *background, a0, half_cycle_time_code * integrator.time_si_per_code);
-        pm_cycle_plan.opening_pm_kick_factor_code = core::computeComovingDriftFactor(
-            *background, a0, pm_cycle_plan.cycle_mid_scale_factor, 64U) / (integrator.time_si_per_code * a0);
+    if (!multirate_pm) {
+      // Reference hierarchical scheme: one coarse block = one PM interval.
+      limit_coarse(displacement_dt, "pm_displacement");
+      limit_coarse(expansion_dt, "cosmology_expansion");
+      if (options.dt_time_code > 0.0) limit_coarse(options.dt_time_code, "explicit_dt");
+      limit_coarse(boundary_time - integrator.current_time_code, "output_or_end_boundary");
+    } else {
+      // Inner block bound: the per-block reference criteria only. The PM
+      // displacement criterion and output/end boundaries bound the outer
+      // cycle instead (below).
+      limit_coarse(expansion_dt, "cosmology_expansion");
+      if (options.dt_time_code > 0.0) limit_coarse(options.dt_time_code, "explicit_dt");
+      const double t_now = integrator.current_time_code;
+      if (!pm_cycle.open) {
+        double length = coarse_dt * static_cast<double>(multirate_blocks_per_cycle);
+        const char* limiter = "target_blocks";
+        if (displacement_dt < length) { length = displacement_dt; limiter = "pm_displacement"; }
+        if (pm_cycle.retry_length_limit > 0.0 && pm_cycle.retry_length_limit < length) {
+          length = pm_cycle.retry_length_limit;
+          limiter = "rollback_retry";
+        }
+        bool boundary_clipped = false;
+        if (boundary_time - t_now <= length) {
+          length = boundary_time - t_now;
+          limiter = "output_or_end_boundary";
+          boundary_clipped = true;
+        }
+        if (!std::isfinite(length) || !(length > 0.0) || t_now + length <= t_now) {
+          profiler.counters().addCount("time.hierarchical_multirate_recovery_failures");
+          throw std::runtime_error("multirate PM cycle length is not finite positive representable");
+        }
+        // Rollback point, before rung assignment and the opening PM kick.
+        // A cycle whose first block reaches its end has no interior boundary
+        // and cannot be rejected: no snapshot is needed. When the governor
+        // refuses the snapshot on any rank, the cycle opens as one block
+        // (no rollback can be needed) instead of failing the run.
+        if (coarse_dt < length * (1.0 - 1.0e-12) && !take_cycle_snapshot()) {
+          length = coarse_dt;
+          limiter = "rollback_memory";
+          boundary_clipped = false;
+          ++report.multirate_memory_limited_cycles;
+          profiler.counters().addCount("time.hierarchical_multirate_cycle_memory_limited");
+        }
+        pm_cycle.open = true;
+        ++pm_cycle.index;
+        pm_cycle.completed_blocks = 0U;
+        pm_cycle.opening_time_code = t_now;
+        pm_cycle.end_time_code = boundary_clipped ? boundary_time : t_now + length;
+        pm_cycle.length_time_code = pm_cycle.end_time_code - t_now;
+        pm_cycle.length_limiter = limiter;
+        // Reset per cycle, not per attempt: a retried opening keeps its
+        // rejection history (retries, forced-rollback bookkeeping).
+        if (pm_cycle.retries == 0U) pm_cycle.forced_rollback_used = false;
+        profiler.counters().addCount(std::string("time.hierarchical_multirate_cycle_limited_by.") + limiter);
+        if (boundary_clipped) profiler.counters().addCount("time.hierarchical_multirate_cycle_shortened_by_boundary");
+        const double half_cycle_time_code = 0.5 * pm_cycle.length_time_code;
+        pm_cycle_plan = {};
+        pm_cycle_plan.enabled = true;
+        if (background != nullptr) {
+          const double a0 = integrator.current_scale_factor;
+          pm_cycle_plan.cycle_mid_scale_factor = core::advanceScaleFactorByCosmicTime(
+              *background, a0, half_cycle_time_code * integrator.time_si_per_code);
+          pm_cycle_plan.opening_pm_kick_factor_code = core::computeComovingDriftFactor(
+              *background, a0, pm_cycle_plan.cycle_mid_scale_factor, 64U) / (integrator.time_si_per_code * a0);
+        } else {
+          pm_cycle_plan.opening_pm_kick_factor_code = half_cycle_time_code;
+          pm_cycle_plan.closing_half_interval_time_code = half_cycle_time_code;
+        }
       } else {
-        pm_cycle_plan.opening_pm_kick_factor_code = half_cycle_time_code;
-        pm_cycle_plan.closing_half_interval_time_code = half_cycle_time_code;
+        // Interior boundary: the outer interval fixed at the opening must still
+        // satisfy the PM displacement criterion with the current velocities.
+        const bool displacement_violated = displacement_dt < pm_cycle.length_time_code * (1.0 - 1.0e-12);
+        const bool forced = !displacement_violated && forced_rollbacks_remaining > 0U && !pm_cycle.forced_rollback_used;
+        if (displacement_violated || forced) {
+          ++pm_cycle.retries;
+          if (pm_cycle.retries > k_multirate_max_retries_per_cycle) {
+            profiler.counters().addCount("time.hierarchical_multirate_recovery_failures");
+            throw std::runtime_error(
+                "multirate PM cycle could not satisfy the PM displacement criterion after " +
+                std::to_string(k_multirate_max_retries_per_cycle) + " retries");
+          }
+          // Genuine rejection: shrink T to the newly required bound (at least
+          // halving, so a single-block cycle is reached in O(log M) retries).
+          // Test seam: retry with the identical T (rollback completeness).
+          const double retry_limit = forced
+              ? pm_cycle.length_time_code
+              : std::min(0.5 * pm_cycle.length_time_code, displacement_dt);
+          const unsigned retries = pm_cycle.retries;
+          const bool forced_used = pm_cycle.forced_rollback_used || forced;
+          if (forced) --forced_rollbacks_remaining;
+          profiler.counters().addCount("time.hierarchical_multirate_cycle_rejected_retried");
+          rollback_cycle();
+          pm_cycle.staged_records.clear();
+          pm_cycle.open = false;
+          pm_cycle.retries = retries;
+          pm_cycle.retry_length_limit = retry_limit;
+          pm_cycle.forced_rollback_used = forced_used;
+          ++report.multirate_pm_cycle_rollbacks;
+          if (forced) ++report.multirate_forced_test_rollbacks;
+          continue;
+        }
       }
-      if (planned_cycle_blocks == 1U) coarse_dt = pm_cycle_plan_end_time - integrator.current_time_code;
-      profiler.counters().addCount("time.hierarchical_multirate_pm_cycles");
+      // Block interval inside the open cycle: the reference per-block bound,
+      // clipped so the blocks tile [opening, end] exactly; a sliver shorter
+      // than a quarter block is avoided by splitting the remainder in two.
+      const double remaining = pm_cycle.end_time_code - t_now;
+      bool closes = false;
+      if (coarse_dt >= remaining * (1.0 - 1.0e-12)) {
+        coarse_dt = remaining;
+        // Endpoint rounding: the driver ends the block at t + quantum*periods
+        // = t + coarse_dt (periods is a power of two, so the split is exact),
+        // but fl(t + fl(end - t)) can miss the cycle end by an ulp, leaving an
+        // unrepresentable sliver before t_end. Nudge the interval by at most a
+        // few ulps so the closing tick lands exactly on the planned end.
+        for (int nudge = 0; nudge < 4 && t_now + coarse_dt != pm_cycle.end_time_code; ++nudge) {
+          coarse_dt = std::nextafter(coarse_dt, t_now + coarse_dt < pm_cycle.end_time_code
+              ? std::numeric_limits<double>::infinity() : 0.0);
+        }
+        if (t_now + coarse_dt != pm_cycle.end_time_code) {
+          profiler.counters().addCount("time.hierarchical_multirate_cycle_end_inexact");
+        }
+        coarse_limiter = "multirate_cycle_end";
+        closes = true;
+      } else if (remaining - coarse_dt < 0.25 * coarse_dt) {
+        coarse_dt = 0.5 * remaining;
+        coarse_limiter = "multirate_cycle_end_split";
+      }
+      pm_cycle_plan.opens_cycle = pm_cycle.completed_blocks == 0U;
+      pm_cycle_plan.closes_cycle = closes;
     }
-    if (multirate_pm) {
-      pm_cycle_plan.opens_cycle = pm_cycle_block_index == 0U;
-      pm_cycle_plan.closes_cycle = pm_cycle_block_index + 1U == pm_cycle_blocks;
-    }
+    profiler.counters().addCount(std::string("time.hierarchical_coarse_limited_by.") + coarse_limiter);
     const double quantum = coarse_dt / static_cast<double>(periods);
     if (!std::isfinite(quantum) || quantum <= 0.0 || integrator.current_time_code + quantum <= integrator.current_time_code) {
+      // Fail closed before any state is committed: no representable rung can
+      // honour the required interval. Identical on every rank (global inputs).
+      profiler.counters().addCount("time.hierarchical_quantum_unrepresentable");
       throw std::runtime_error("hierarchical quantum is not finite positive representable");
     }
     integrator.dt_time_code = quantum;
+    ReferenceWorkflowReport::HierarchicalBlockRecord block_record{
+        .step_index = integrator.step_index,
+        .time_begin_code = integrator.current_time_code,
+        .time_end_code = integrator.current_time_code,
+        .coarse_interval_time_code = coarse_dt,
+        .quantum_time_code = quantum,
+        .global_min_particle_criterion_time_code = particle_coarse_dt / static_cast<double>(periods),
+        .coarse_limiter = coarse_limiter,
+        .multirate = multirate_pm,
+        .pm_cycle_index = multirate_pm ? pm_cycle.index : 0U,
+        .pm_cycle_block_index = multirate_pm ? pm_cycle.completed_blocks : 0U,
+        .opens_pm_cycle = !multirate_pm || pm_cycle_plan.opens_cycle,
+        .closes_pm_cycle = !multirate_pm || pm_cycle_plan.closes_cycle,
+        .pm_cycle_opening_time_code = multirate_pm ? pm_cycle.opening_time_code : integrator.current_time_code,
+        .pm_cycle_end_time_code = multirate_pm ? pm_cycle.end_time_code : integrator.current_time_code + coarse_dt,
+        .pm_cycle_retries = multirate_pm ? pm_cycle.retries : 0U,
+        .pm_displacement_limit_time_code = displacement_dt,
+    };
     const core::TimeStepLimits limits{.min_dt_time_code = quantum,
         .max_dt_time_code = coarse_dt, .max_bin = particles.maxBin()};
     preparation_failure = {};
@@ -1814,8 +2142,10 @@ void TimeCoordinator::runHierarchicalSegment(
                  ? "rms_split_scale" : "max_speed_mesh"},
             {"rank_local_bin_occupancy", formatBinOccupancy(particles, all_rows)},
             {"pm_policy", multirate_pm ? "multirate_outer_kick" : "coarse_endpoint_half_kicks"},
-            {"pm_cycle_blocks", std::to_string(multirate_pm ? pm_cycle_blocks : 1U)},
-            {"pm_cycle_block_index", std::to_string(pm_cycle_block_index)},
+            {"pm_cycle_index", std::to_string(multirate_pm ? pm_cycle.index : 0U)},
+            {"pm_cycle_length_time_code", formatRuntimeDouble(multirate_pm ? pm_cycle.length_time_code : coarse_dt)},
+            {"pm_cycle_length_limiter", multirate_pm ? pm_cycle.length_limiter : "coarse_block"},
+            {"pm_cycle_block_index", std::to_string(multirate_pm ? pm_cycle.completed_blocks : 0U)},
             {"rung_assignment", "fixed_within_block"}}});
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical output and event preparation");
@@ -1849,7 +2179,12 @@ void TimeCoordinator::runHierarchicalSegment(
             std::exception_ptr boundary_failure;
             try { reconcile_runtime(); } catch (...) { boundary_failure = std::current_exception(); }
             FailureCoordinator(m_services).rethrowCollectiveFailure(boundary_failure, "hierarchical pre-migration memory reconciliation");
-            const bool migrated = m_migration_balance.rebalance(state, particles, cells,
+            // Multirate: ownership is frozen inside an open PM cycle so the
+            // opening snapshot stays a complete rollback point (no decomposition
+            // epoch, geometry or row identity changes to undo). Rebalancing
+            // happens at the cycle end, a closed synchronization point.
+            const bool migrated = !context.boundary.multirate_pm_cycle_interior &&
+                m_migration_balance.rebalance(state, particles, cells,
                 block_work, context.active_set.particle_indices,
                 expected_ids, integrator.step_index);
             if (migrated) {
@@ -1893,8 +2228,37 @@ void TimeCoordinator::runHierarchicalSegment(
           FailureCoordinator(m_services).rethrowCollectiveFailure(failure, phase);
         }, pm_cycle_plan);
     if (multirate_pm) {
-      // Advance (or close) the outer PM cycle after the block completed.
-      pm_cycle_block_index = pm_cycle_plan.closes_cycle ? 0U : pm_cycle_block_index + 1U;
+      // Advance or close the outer PM cycle after the block completed.
+      if (pm_cycle_plan.closes_cycle) {
+        pm_cycle.open = false;
+        pm_cycle.snapshot.reset();
+        pm_cycle.retries = 0U;
+        pm_cycle.retry_length_limit = 0.0;
+        ++report.multirate_pm_cycles_completed;
+        profiler.counters().addCount("time.hierarchical_multirate_cycles_completed");
+      } else {
+        ++pm_cycle.completed_blocks;
+      }
+    }
+    {
+      // Bounded per-block evidence for regression tests (recent 512 blocks).
+      constexpr std::size_t k_block_record_limit = 512U;
+      const auto publish = [&](const ReferenceWorkflowReport::HierarchicalBlockRecord& record) {
+        if (report.hierarchical_block_records.size() == k_block_record_limit) {
+          report.hierarchical_block_records.erase(report.hierarchical_block_records.begin());
+        }
+        report.hierarchical_block_records.push_back(record);
+      };
+      block_record.time_end_code = integrator.current_time_code;
+      if (!multirate_pm) {
+        publish(block_record);
+      } else {
+        pm_cycle.staged_records.push_back(block_record);
+        if (pm_cycle_plan.closes_cycle) {
+          for (const auto& record : pm_cycle.staged_records) publish(record);
+          pm_cycle.staged_records.clear();
+        }
+      }
     }
     if (timeline_reservation.valid()) timeline_reservation.release();
     preparation_failure = {};
@@ -1919,6 +2283,11 @@ void TimeCoordinator::runHierarchicalSegment(
     }
   }
   report.completed_steps = integrator.step_index - run_start_step;
+  report.requested_steps = requested_steps;
+  report.multirate_soft_stop_extension_blocks = soft_stop_extension_blocks;
+  if (multirate_pm && pm_cycle.open) {
+    throw std::logic_error("hierarchical segment ended with an open multirate PM cycle");
+  }
   report.final_time_code = integrator.current_time_code;
   report.final_scale_factor = integrator.current_scale_factor;
 }
@@ -2231,6 +2600,12 @@ void TimeCoordinator::dispatchStage(
        context.stage == core::IntegrationStage::kSourceTerms ||
        ((context.stage == core::IntegrationStage::kAnalysisHooks || context.stage == core::IntegrationStage::kOutputCheck) &&
         !context.hierarchical_kdk.synchronization_end))) return;
+  // Interior multirate PM cycle boundaries carry an open outer PM half-kick:
+  // analysis would observe intermediate momenta and a rollback would make it
+  // non-reproducible. Output is held by OutputRestartRuntime; analysis waits
+  // for the cycle end.
+  if (context.hierarchical_kdk.enabled && context.boundary.multirate_pm_cycle_interior &&
+      context.stage == core::IntegrationStage::kAnalysisHooks) return;
 
   switch (context.stage) {
     case core::IntegrationStage::kGravityKickPre:

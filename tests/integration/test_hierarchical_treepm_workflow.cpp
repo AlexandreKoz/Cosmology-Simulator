@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <vector>
 #include <utility>
@@ -217,10 +218,12 @@ void run(int rank,int ranks,std::uint64_t token) {
   const auto hierarchical_config=config(2,ranks),global_config=config(0,ranks);
   workflows::ReferenceWorkflowRunner hierarchical(hierarchical_config),global(global_config);
   auto execute=[&](const workflows::ReferenceWorkflowRunner& runner,const char* label,double dt,
-                   const io::RestartReadResult* restart=nullptr,std::uint64_t max_steps=0U) {
+                   const io::RestartReadResult* restart=nullptr,std::uint64_t max_steps=0U,
+                   std::uint64_t forced_multirate_rollbacks=0U) {
     const auto report=runner.run(scratch.root()/label,workflows::ReferenceWorkflowOptions{
         .dt_time_code=dt,.write_outputs=true,.initial_state_override=restart?nullptr:&initial,
-        .restart_state_override=restart,.max_steps_override=max_steps});
+        .restart_state_override=restart,.max_steps_override=max_steps,
+        .multirate_test_forced_cycle_rollbacks=forced_multirate_rollbacks});
     require(report.restart_roundtrip_ok);
     return std::pair{report,io::readRestartCheckpointHdf5(report.restart_path)};
   };
@@ -294,50 +297,307 @@ void run(int rank,int ranks,std::uint64_t token) {
     if (record.short_range_only) require(!record.refreshed_long_range_field);
   }
   require(saw_fine && saw_pm_endpoint);
-  // Multirate outer PM level (2026-10-26, NOT RUN): treepm_pm_reuse_policy =
-  // multirate_outer_kick with two coarse blocks per PM cycle. Provisional,
-  // unqualified gates: the integrator must stay synchronized, converge toward
-  // the fine global reference with refinement, refresh PM fewer times than
-  // the exact hierarchical scheme, and resume bit-identically from a
-  // checkpoint written at a cycle end.
+  // Multirate outer PM level (2026-10-26 round 3; AUTHORED, NOT RUN):
+  // treepm_pm_reuse_policy = multirate_outer_kick. Owner gates for the
+  // stabilized contract in docs/time_integration.md:
+  //  * timestep invariants: no block quantum exceeds the global particle
+  //    criterion, blocks tile each PM cycle exactly, cycles close exactly on
+  //    their planned end and the run ends exactly on t_end;
+  //  * run-segmentation invariance: one run equals any split by step budget
+  //    (soft stop at cycle ends), including budgets that end inside a cycle;
+  //  * transactional rollback: forced rejections leave the trajectory
+  //    bit-identical to an uninterrupted run;
+  //  * convergence toward the fine global reference and toward the exact
+  //    hierarchical scheme at the same dt (splitting error) under refinement;
+  //  * cross-rank agreement of the block schedule (np 1/2/4 registrations).
   {
-    auto multirate_text=hierarchical_config.normalized_text;
-    for (const auto& [from,to] : {std::pair<std::string,std::string>{"treepm_pm_reuse_policy = exact","treepm_pm_reuse_policy = multirate_outer_kick"},
-                                   std::pair<std::string,std::string>{"treepm_update_cadence_steps = 1","treepm_update_cadence_steps = 2"}}) {
-      const auto position=multirate_text.find(from);
-      require(position!=std::string::npos);
-      multirate_text.replace(position,from.size(),to);
-    }
-    const auto multirate_config=core::loadFrozenConfigFromString(multirate_text,"multirate_hierarchical");
-    workflows::ReferenceWorkflowRunner multirate(multirate_config);
-    auto multirate_coarse=execute(multirate,"multirate_coarse",1e-5);   // 4 blocks = 2 PM cycles
-    auto multirate_refined=execute(multirate,"multirate_refined",5e-6); // 8 blocks = 4 PM cycles
-    for (const auto* checkpoint:{&multirate_coarse.second,&multirate_refined.second}) {
-      require(std::abs(checkpoint->integrator_state.current_time_code-4e-5)<1e-14);
-      assertSynchronized(*checkpoint,2U);
+    const auto multirate_config_with=[&](int blocks_per_cycle,const std::string& base,const char* label) {
+      auto text=base;
+      for (const auto& [from,to] : {std::pair<std::string,std::string>{"treepm_pm_reuse_policy = exact","treepm_pm_reuse_policy = multirate_outer_kick"},
+                                     std::pair<std::string,std::string>{"treepm_update_cadence_steps = 1","treepm_update_cadence_steps = "+std::to_string(blocks_per_cycle)}}) {
+        const auto position=text.find(from);
+        require(position!=std::string::npos);
+        text.replace(position,from.size(),to);
+      }
+      return core::loadFrozenConfigFromString(text,label);
+    };
+    workflows::ReferenceWorkflowRunner multirate(multirate_config_with(2,hierarchical_config.normalized_text,"multirate_m2"));
+    workflows::ReferenceWorkflowRunner multirate4(multirate_config_with(4,hierarchical_config.normalized_text,"multirate_m4"));
+    workflows::ReferenceWorkflowRunner multirate64(multirate_config_with(64,hierarchical_config.normalized_text,"multirate_m64"));
+    workflows::ReferenceWorkflowRunner multirate4_optimized(multirate_config_with(4,optimized_text,"multirate_m4_optimized"));
+    using Record=workflows::ReferenceWorkflowReport::HierarchicalBlockRecord;
+    const auto same_on_all_ranks=[&](double value) {
+      return mpi.allreduceMinDouble(value)==-mpi.allreduceMinDouble(-value);
+    };
+    // Per-segment invariants: criteria honoured, exact tiling, closed at the end.
+    const auto check_blocks=[&](const workflows::ReferenceWorkflowReport& report) {
+      const auto& records=report.hierarchical_block_records;
+      require(!records.empty() && records.size()<512U);
+      require(report.completed_steps==records.size());
+      require(mpi.allreduceMinUint64(records.size())==mpi.allreduceMaxUint64(records.size()));
+      std::uint64_t closed=0U;
+      for (std::size_t i=0;i<records.size();++i) {
+        const Record& block=records[i];
+        require(block.multirate);
+        require(block.quantum_time_code>0.0 &&
+                block.quantum_time_code<=block.global_min_particle_criterion_time_code*(1.0+1e-12));
+        require(block.time_end_code>block.time_begin_code);
+        require(block.pm_cycle_opening_time_code<=block.time_begin_code && block.time_end_code<=block.pm_cycle_end_time_code);
+        require(block.pm_cycle_end_time_code<=4e-5);
+        // The accepted PM interval honours the displacement criterion at every block.
+        require(block.pm_cycle_end_time_code-block.pm_cycle_opening_time_code<=
+                block.pm_displacement_limit_time_code*(1.0+1e-12));
+        require(same_on_all_ranks(block.time_end_code) && same_on_all_ranks(block.quantum_time_code));
+        if (block.opens_pm_cycle) require(block.pm_cycle_block_index==0U && block.time_begin_code==block.pm_cycle_opening_time_code);
+        if (block.closes_pm_cycle) { require(block.time_end_code==block.pm_cycle_end_time_code); ++closed; }
+        if (i>0U) {
+          const Record& previous=records[i-1U];
+          require(block.time_begin_code==previous.time_end_code);
+          require(block.opens_pm_cycle==previous.closes_pm_cycle);
+          if (!block.opens_pm_cycle) {
+            require(block.pm_cycle_index==previous.pm_cycle_index && block.pm_cycle_block_index==previous.pm_cycle_block_index+1U);
+            require(block.pm_cycle_opening_time_code==previous.pm_cycle_opening_time_code &&
+                    block.pm_cycle_end_time_code==previous.pm_cycle_end_time_code);
+          }
+        }
+      }
+      require(records.front().opens_pm_cycle && records.back().closes_pm_cycle);
+      require(report.multirate_pm_cycles_completed==closed);
+      // Soft stop: the budget is honoured or exceeded only to close a cycle.
+      require(report.completed_steps<=report.requested_steps+report.multirate_soft_stop_extension_blocks);
+      if (report.multirate_soft_stop_extension_blocks>0U) {
+        require(report.completed_steps==report.requested_steps+report.multirate_soft_stop_extension_blocks);
+      }
+    };
+    const auto refreshes=[](const workflows::ReferenceWorkflowReport& report) {
+      std::uint64_t count=0U;
+      for (const auto& record:report.treepm_cadence_records) count+=record.refreshed_long_range_field?1U:0U;
+      return count;
+    };
+    struct Segmented {
+      std::pair<workflows::ReferenceWorkflowReport,io::RestartReadResult> last;
+      std::vector<Record> records;
+      std::uint64_t refreshes=0U, extension_blocks=0U, segments=0U;
+    };
+    // Runs the listed budgets back to back from checkpoints, then the rest.
+    const auto run_segments=[&](const workflows::ReferenceWorkflowRunner& runner,const std::string& label,double dt,
+                                const std::vector<std::uint64_t>& budgets) {
+      Segmented result;
+      const io::RestartReadResult* restart=nullptr;
+      std::size_t next=0U;
+      while (true) {
+        const std::uint64_t budget=next<budgets.size()?budgets[next]:0U;
+        auto segment=execute(runner,(label+"_segment_"+std::to_string(result.segments)).c_str(),dt,restart,budget);
+        check_blocks(segment.first);
+        assertSynchronized(segment.second,2U);
+        result.records.insert(result.records.end(),segment.first.hierarchical_block_records.begin(),
+                              segment.first.hierarchical_block_records.end());
+        result.refreshes+=refreshes(segment.first);
+        result.extension_blocks+=segment.first.multirate_soft_stop_extension_blocks;
+        ++result.segments;++next;
+        result.last=std::move(segment);
+        restart=&result.last.second;
+        if (result.last.second.integrator_state.current_time_code>=4e-5) break;
+        require(result.segments<64U);
+      }
+      return result;
+    };
+    const auto same_schedule=[&](const std::vector<Record>& a,const std::vector<Record>& b) {
+      require(a.size()==b.size());
+      for (std::size_t i=0;i<a.size();++i) {
+        require(a[i].time_begin_code==b[i].time_begin_code && a[i].time_end_code==b[i].time_end_code);
+        require(a[i].coarse_interval_time_code==b[i].coarse_interval_time_code && a[i].quantum_time_code==b[i].quantum_time_code);
+        require(a[i].opens_pm_cycle==b[i].opens_pm_cycle && a[i].closes_pm_cycle==b[i].closes_pm_cycle);
+        require(a[i].pm_cycle_opening_time_code==b[i].pm_cycle_opening_time_code &&
+                a[i].pm_cycle_end_time_code==b[i].pm_cycle_end_time_code);
+      }
+    };
+    const auto same_endpoint=[&](const io::RestartReadResult& value,const io::RestartReadResult& reference,double tolerance) {
+      require(value.integrator_state.current_time_code==reference.integrator_state.current_time_code);
+      require(value.integrator_state.current_scale_factor==reference.integrator_state.current_scale_factor);
+      require(value.scheduler_state.current_tick==reference.scheduler_state.current_tick);
+      require(mpi.allreduceSumDouble(phaseError(value.state,reference.state))<tolerance);
+    };
+
+    // (1) Uninterrupted reference runs: invariants, exact end time, fewer PM solves.
+    auto multirate_coarse=execute(multirate,"multirate_coarse",1e-5);
+    auto multirate_refined=execute(multirate,"multirate_refined",5e-6);
+    for (const auto* outcome:{&multirate_coarse,&multirate_refined}) {
+      check_blocks(outcome->first);
+      // The final cycle is clipped to t_end and closes exactly on it.
+      require(outcome->second.integrator_state.current_time_code==4e-5);
+      assertSynchronized(outcome->second,2U);
     }
     const double multirate_coarse_error=mpi.allreduceSumDouble(phaseError(multirate_coarse.second.state,reference.second.state));
     const double multirate_refined_error=mpi.allreduceSumDouble(phaseError(multirate_refined.second.state,reference.second.state));
     require(multirate_refined_error<=multirate_coarse_error+1e-18);
     require(std::sqrt(multirate_refined_error/64.0)<1e-3);
-    std::uint64_t multirate_refreshes=0U, exact_refreshes=0U;
-    for (const auto& record:multirate_refined.first.treepm_cadence_records) multirate_refreshes+=record.refreshed_long_range_field?1U:0U;
+    const std::uint64_t multirate_refreshes=refreshes(multirate_refined.first);
     auto exact_same_dt=execute(hierarchical,"multirate_exact_comparison",5e-6);
-    for (const auto& record:exact_same_dt.first.treepm_cadence_records) exact_refreshes+=record.refreshed_long_range_field?1U:0U;
+    const std::uint64_t exact_refreshes=refreshes(exact_same_dt.first);
     require(multirate_refreshes<exact_refreshes);
-    // Checkpoint at a cycle end (2 blocks), then resume: identical to the
-    // uninterrupted run because cycles always open at restart-safe boundaries.
+
+    // (2) Run-segmentation invariance (M = 4, nominally 8 blocks = 2 cycles).
+    auto full4=run_segments(multirate4,"multirate4_full",5e-6,{});
+    require(full4.segments==1U && full4.extension_blocks==0U);
+    bool has_multi_block_cycle=false;
+    for (const auto& block:full4.records) has_multi_block_cycle=has_multi_block_cycle||block.pm_cycle_block_index>0U;
+    const std::vector<std::pair<std::string,std::vector<std::uint64_t>>> splits{{"multirate4_4x2",{4U,4U}},
+                                        {"multirate4_2x4",{2U,2U,2U,2U}},
+                                        {"multirate4_1x8",{1U,1U,1U,1U,1U,1U,1U,1U}},
+                                        {"multirate4_3_rest",{3U}},
+                                        {"multirate4_5_rest",{5U}}};
+    for (const auto& [label,budgets] : splits) {
+      auto split=run_segments(multirate4,label,5e-6,budgets);
+      same_schedule(split.records,full4.records);
+      same_endpoint(split.last.second,full4.last.second,1e-22);
+      require(split.refreshes==full4.refreshes);
+      // A budget that ends inside a multi-block cycle must soft-stop.
+      if (has_multi_block_cycle && budgets.front()==1U) require(split.extension_blocks>0U);
+    }
+    // Resume at a cycle boundary with the M = 2 configuration (2 blocks/cycle).
     auto multirate_first=execute(multirate,"multirate_first",1e-5,nullptr,2U);
     assertSynchronized(multirate_first.second,2U);
     auto multirate_resumed=execute(multirate,"multirate_resumed",1e-5,&multirate_first.second);
-    require(mpi.allreduceSumDouble(phaseError(multirate_resumed.second.state,multirate_coarse.second.state))<1e-22);
-    // A one-block budget truncates the cycle to one block: still synchronized.
+    same_endpoint(multirate_resumed.second,multirate_coarse.second,1e-22);
+    // A one-block budget no longer truncates the PM cycle: it soft-stops at
+    // the cycle end and reports the extension.
     auto multirate_single=execute(multirate,"multirate_single_block",1e-5,nullptr,1U);
+    check_blocks(multirate_single.first);
     assertSynchronized(multirate_single.second,2U);
-    if (rank==0) std::cout<<"hierarchical_multirate_outer_kick ranks="<<ranks
-        <<" coarse_phase_l2="<<std::sqrt(multirate_coarse_error/64.0)
-        <<" refined_phase_l2="<<std::sqrt(multirate_refined_error/64.0)
-        <<" pm_refreshes="<<multirate_refreshes<<" exact_pm_refreshes="<<exact_refreshes<<'\n';
+    require(multirate_single.first.completed_steps>=1U);
+    require(multirate_single.first.hierarchical_block_records.back().closes_pm_cycle);
+
+    // (3) Transactional rollback: forced rejections at interior boundaries are
+    // retried with the identical outer interval and must be invisible.
+    if (has_multi_block_cycle) {
+      auto forced=execute(multirate4,"multirate4_forced_rollback",5e-6,nullptr,0U,2U);
+      check_blocks(forced.first);
+      require(forced.first.multirate_forced_test_rollbacks>0U);
+      require(forced.first.multirate_pm_cycle_rollbacks>=forced.first.multirate_forced_test_rollbacks);
+      require(forced.first.multirate_rejected_blocks>=forced.first.multirate_forced_test_rollbacks);
+      // Rejected attempts are excluded from the trajectory diagnostics.
+      require(refreshes(forced.first)==full4.refreshes);
+      require(forced.first.treepm_long_range_refresh_count==full4.last.first.treepm_long_range_refresh_count);
+      same_schedule(forced.first.hierarchical_block_records,full4.records);
+      same_endpoint(forced.second,full4.last.second,1e-22);
+      // Generation-keyed tree reuse/refit may sum in a different order after
+      // a rollback: roundoff-level agreement, identical schedule.
+      auto optimized_plain=execute(multirate4_optimized,"multirate4_optimized_plain",5e-6);
+      auto optimized_forced=execute(multirate4_optimized,"multirate4_optimized_forced",5e-6,nullptr,0U,2U);
+      check_blocks(optimized_forced.first);
+      require(optimized_forced.first.multirate_forced_test_rollbacks>0U);
+      same_schedule(optimized_forced.first.hierarchical_block_records,optimized_plain.first.hierarchical_block_records);
+      same_endpoint(optimized_forced.second,optimized_plain.second,1e-18);
+    }
+
+    // (4) Boundary-limited cycle: M = 64 exceeds the run; the cycle is clipped
+    // to t_end (or shortened by PM displacement) and never truncated by budget.
+    auto multirate_long=execute(multirate64,"multirate64",1e-5);
+    check_blocks(multirate_long.first);
+    require(multirate_long.second.integrator_state.current_time_code==4e-5);
+    require(multirate_long.first.hierarchical_block_records.back().pm_cycle_end_time_code==4e-5);
+
+    // (5) Convergence under refinement (M = 4): error against the fine global
+    // reference and splitting error against exact hierarchical at the same dt.
+    std::array<double,3> global_error{},splitting_error{};
+    const std::array<double,3> ladder{1e-5,5e-6,2.5e-6};
+    for (std::size_t level=0;level<ladder.size();++level) {
+      const std::string suffix=std::to_string(level);
+      auto mr=execute(multirate4,("multirate4_convergence_"+suffix).c_str(),ladder[level]);
+      auto ex=execute(hierarchical,("exact_convergence_"+suffix).c_str(),ladder[level]);
+      check_blocks(mr.first);
+      global_error[level]=mpi.allreduceSumDouble(phaseError(mr.second.state,reference.second.state));
+      splitting_error[level]=mpi.allreduceSumDouble(phaseError(mr.second.state,ex.second.state));
+    }
+    for (std::size_t level=1;level<ladder.size();++level) {
+      require(global_error[level]<=global_error[level-1U]+1e-18);
+      // Below roundoff the splitting error carries no order information.
+      if (splitting_error[level-1U]>1e-24) require(splitting_error[level]<splitting_error[level-1U]);
+    }
+
+    // (6) Genuine PM-displacement rejection (no test seam). Particles start
+    // at rest, so the RMS displacement criterion is unbounded when the first
+    // cycle opens (T = 4 blocks) and finite once gravity has accelerated them.
+    // The criterion is linear in its factor and the dynamics before the first
+    // interior boundary t1 do not depend on it, so a calibration run at factor
+    // 1 (bound D1 at t1) fixes factor = 1.5 t1 / D1: the interior re-check at
+    // t1 then sees 1.5 t1 < T and must reject, roll back and retry with
+    // T = 1.5 t1, which the same re-check accepts.
+    {
+      const auto set_key=[](std::string text,const std::string& key,const std::string& value) {
+        const auto position=text.find("\n"+key+" = ");
+        require(position!=std::string::npos);
+        const auto line_end=text.find('\n',position+1U);
+        text.replace(position+1U,line_end-(position+1U),key+" = "+value);
+        return text;
+      };
+      const auto rejecting_runner=[&](double factor) {
+        std::ostringstream value;
+        value<<std::setprecision(17)<<factor;
+        auto text=set_key(hierarchical_config.normalized_text,"hierarchical_coarse_displacement_criterion","rms_split_scale");
+        text=set_key(text,"hierarchical_coarse_rms_displacement_factor",value.str());
+        return workflows::ReferenceWorkflowRunner(multirate_config_with(4,text,"multirate_m4_genuine_rejection"));
+      };
+      auto at_rest=initial;
+      for (auto* lane:{&at_rest.particles.velocity_x_peculiar,&at_rest.particles.velocity_y_peculiar,&at_rest.particles.velocity_z_peculiar}) {
+        std::fill(lane->begin(),lane->end(),0.0);
+      }
+      const auto run_at_rest=[&](const workflows::ReferenceWorkflowRunner& runner,const char* label) {
+        const auto report=runner.run(scratch.root()/label,workflows::ReferenceWorkflowOptions{
+            .dt_time_code=1e-5,.write_outputs=true,.initial_state_override=&at_rest});
+        require(report.restart_roundtrip_ok);
+        return std::pair{report,io::readRestartCheckpointHdf5(report.restart_path)};
+      };
+      const auto calibration_runner=rejecting_runner(1.0);
+      auto calibration=run_at_rest(calibration_runner,"multirate_rejection_calibration");
+      check_blocks(calibration.first);
+      const Record* first_interior=nullptr;
+      for (const auto& block:calibration.first.hierarchical_block_records) {
+        if (block.time_begin_code>0.0) { first_interior=&block; break; }
+      }
+      require(first_interior!=nullptr && std::isfinite(first_interior->pm_displacement_limit_time_code) &&
+              first_interior->pm_displacement_limit_time_code>0.0);
+      const double factor=1.5*first_interior->time_begin_code/first_interior->pm_displacement_limit_time_code;
+      require(std::isfinite(factor) && factor>0.0);
+      // factor >= 1: the calibration run itself already rejected at t1.
+      const auto rejecting=rejecting_runner(std::min(factor,1.0));
+      const auto run_rejecting=[&](const char* label) { return run_at_rest(rejecting,label); };
+      auto genuine=run_rejecting("multirate_genuine_rejection");
+      check_blocks(genuine.first);
+      require(genuine.first.multirate_forced_test_rollbacks==0U);
+      require(genuine.first.multirate_pm_cycle_rollbacks>0U);
+      require(genuine.first.multirate_rejected_blocks>0U);
+      // Interior blocks are short-range only: a rejected attempt never solved PM.
+      require(genuine.first.multirate_rejected_pm_refreshes==0U);
+      // Trajectory diagnostics exclude the rejected attempts.
+      require(refreshes(genuine.first)==genuine.first.treepm_long_range_refresh_count);
+      bool retried_cycle_published=false;
+      for (const auto& block:genuine.first.hierarchical_block_records) retried_cycle_published=retried_cycle_published||block.pm_cycle_retries>0U;
+      require(retried_cycle_published);
+      require(genuine.second.integrator_state.current_time_code==4e-5);
+      assertSynchronized(genuine.second,2U);
+      // Rollback/retry is deterministic.
+      auto replayed=run_rejecting("multirate_genuine_rejection_replay");
+      require(replayed.first.final_state_digest==genuine.first.final_state_digest);
+      same_schedule(replayed.first.hierarchical_block_records,genuine.first.hierarchical_block_records);
+      require(replayed.first.multirate_pm_cycle_rollbacks==genuine.first.multirate_pm_cycle_rollbacks);
+    }
+    if (rank==0) {
+      std::cout<<"hierarchical_multirate_outer_kick ranks="<<ranks
+               <<" coarse_phase_l2="<<std::sqrt(multirate_coarse_error/64.0)
+               <<" refined_phase_l2="<<std::sqrt(multirate_refined_error/64.0)
+               <<" pm_refreshes="<<multirate_refreshes<<" exact_pm_refreshes="<<exact_refreshes
+               <<" m4_blocks="<<full4.records.size()<<'\n';
+      // Observed splitting order (diagnostic only; not gated): log2 of the
+      // RMS error ratio per halving of dt.
+      for (std::size_t level=1;level<ladder.size();++level) {
+        if (splitting_error[level]>0.0) {
+          std::cout<<"hierarchical_multirate_splitting_order level="<<level
+                   <<" observed="<<0.5*std::log2(splitting_error[level-1U]/splitting_error[level])<<'\n';
+        }
+      }
+    }
   }
   double local_mass=0.0;
   for (const double mass:coarse.second.state.particles.mass_code) local_mass+=mass;

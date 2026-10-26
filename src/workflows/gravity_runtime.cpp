@@ -613,6 +613,34 @@ class GravityRuntimeImpl final : public GravityRuntime {
   [[nodiscard]] std::span<const ReferenceWorkflowReport::TreePmCadenceRecord> cadenceRecords() const noexcept {
     return m_cadence_records;
   }
+  [[nodiscard]] DiagnosticsMark diagnosticsMark() const noexcept override {
+    return DiagnosticsMark{.long_range_refreshes = m_long_range_refresh_count,
+                           .long_range_reuses = m_long_range_reuse_count,
+                           .cadence_records_appended = m_cadence_records_appended};
+  }
+  void discardDiagnosticsSince(const DiagnosticsMark& mark) noexcept override {
+    if (m_long_range_refresh_count >= mark.long_range_refreshes) {
+      m_rejected_long_range_refresh_count += m_long_range_refresh_count - mark.long_range_refreshes;
+      m_long_range_refresh_count = mark.long_range_refreshes;
+    }
+    if (m_long_range_reuse_count >= mark.long_range_reuses) {
+      m_rejected_long_range_reuse_count += m_long_range_reuse_count - mark.long_range_reuses;
+      m_long_range_reuse_count = mark.long_range_reuses;
+    }
+    if (m_cadence_records_appended >= mark.cadence_records_appended) {
+      const std::uint64_t appended = m_cadence_records_appended - mark.cadence_records_appended;
+      const std::size_t drop = static_cast<std::size_t>(
+          std::min<std::uint64_t>(appended, static_cast<std::uint64_t>(m_cadence_records.size())));
+      m_cadence_records.resize(m_cadence_records.size() - drop);
+      m_cadence_records_appended = mark.cadence_records_appended;
+    }
+  }
+  [[nodiscard]] std::uint64_t rejectedLongRangeRefreshCount() const noexcept override {
+    return m_rejected_long_range_refresh_count;
+  }
+  [[nodiscard]] std::uint64_t rejectedLongRangeReuseCount() const noexcept override {
+    return m_rejected_long_range_reuse_count;
+  }
   [[nodiscard]] const parallel::DistributedExecutionTopology& runtimeTopology() const noexcept { return m_runtime_topology; }
   [[nodiscard]] core::MemoryReport memoryReport() const {
     core::MemoryReportBuilder builder;
@@ -2314,6 +2342,7 @@ class GravityRuntimeImpl final : public GravityRuntime {
     if (m_cadence_records.size() == k_recent_cadence_limit) {
       m_cadence_records.erase(m_cadence_records.begin());
     }
+    ++m_cadence_records_appended;
     m_cadence_records.push_back(ReferenceWorkflowReport::TreePmCadenceRecord{
         .step_index = context.integrator_state.step_index,
         .stage_name = std::string(core::integrationStageName(context.stage)),
@@ -3737,11 +3766,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   << " evaluation_scale=" << evaluation_scale;
           throw std::runtime_error(message.str());
         }
-        // Prediction contract: the velocity lane holds the global-KDK
-        // canonical momentum p (drift factor ∫dt/a²). Hierarchical KDK stores
-        // u = p/a at the common position epoch and drifts every source
-        // canonically each fine tick, so a hierarchical source can never
-        // require a non-zero predicted drift here; fail closed if it would.
+        // Prediction contract: this predictor applies the global-KDK drift
+        // operator x += u * integral(dt/a) (computeComovingDriftFactor, the
+        // same factor as CosmologicalTimeline::drift_factor_code) to the
+        // stored peculiar-velocity lane. Hierarchical KDK instead stores
+        // u = p/a at the common position epoch with an explicit Hubble drag
+        // and drift a_begin * integral(dt/a^2), and it drifts every source
+        // canonically each fine tick; a hierarchical source must therefore
+        // never need a non-zero predicted drift here. Fail closed if it would.
         if (context.hierarchical_kdk.enabled &&
             (source_scale != evaluation_scale || source_time != evaluation_time)) {
           throw std::logic_error(
@@ -3973,6 +4005,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
   // (memoized per (source epoch, evaluation epoch); telemetry only).
   std::uint64_t m_source_prediction_drift_integrals = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
+  // Lifetime appends to m_cadence_records and rejected multirate attempts
+  // (diagnostics; see GravityRuntime::discardDiagnosticsSince).
+  std::uint64_t m_cadence_records_appended = 0U;
+  std::uint64_t m_rejected_long_range_refresh_count = 0U;
+  std::uint64_t m_rejected_long_range_reuse_count = 0U;
 };
 
 }  // namespace

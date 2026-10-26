@@ -1038,6 +1038,11 @@ if(COSMOSIM_ENABLE_TESTS)
     # backend, so it must not carry those backend labels (label audit).
     set_tests_properties(python_treepm_snapshot_tools PROPERTIES
       SKIP_RETURN_CODE 77 LABELS "offline_tools;h5py;treepm;snapshot;integrity;qualification")
+    # AREPO comparison identity translation (2026-10-26; authored, not run).
+    add_test(NAME python_compare_dmo_arepo_identity
+      COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/python/test_compare_dmo_arepo.py)
+    set_tests_properties(python_compare_dmo_arepo_identity PROPERTIES
+      SKIP_RETURN_CODE 77 LABELS "offline_tools;h5py;validation;identity")
   else()
     message(STATUS "Offline TreePM snapshot tests unavailable: Python >=3.8 interpreter required")
   endif()
@@ -1316,6 +1321,10 @@ if(COSMOSIM_ENABLE_TESTS)
   target_link_libraries(test_integration_hierarchical_timestep_regression PRIVATE cosmosim_core)
   add_test(NAME integration_hierarchical_timestep_regression COMMAND test_integration_hierarchical_timestep_regression)
   cosmosim_mark_runtime_truth_test(integration_hierarchical_timestep_regression scheduler)
+  add_executable(test_integration_hierarchical_multirate_convergence tests/integration/test_hierarchical_multirate_convergence.cpp)
+  target_link_libraries(test_integration_hierarchical_multirate_convergence PRIVATE cosmosim_core)
+  add_test(NAME integration_hierarchical_multirate_convergence COMMAND test_integration_hierarchical_multirate_convergence)
+  cosmosim_mark_runtime_truth_test(integration_hierarchical_multirate_convergence scheduler equivalence)
 
 
   add_executable(test_unit_analysis_diagnostics tests/unit/test_analysis_diagnostics.cpp)
