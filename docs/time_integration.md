@@ -674,26 +674,56 @@ The reference (non-multirate) path keeps its unchanged end-boundary clip.
 
 At a multi-block cycle opening, after the endpoint force is available and
 before rung assignment and the opening PM kick, the coordinator captures a
-governed snapshot (`time.multirate_cycle_rollback_snapshot`). It contains:
+governed **lane-level** snapshot (`time.multirate_cycle_rollback_snapshot`).
+Hierarchical KDK is homogeneous DMO with ownership frozen inside a cycle, so
+a block can mutate only a small set of lanes. The snapshot holds:
 
-* a full copy of `SimulationState`;
+* the six phase-space lanes and the SFC-key lane;
+* `StateMetadata` and the common drift epoch;
 * `IntegratorState`;
 * both schedulers' persistent states;
-* the complete synchronized force endpoint (total, Tree and PM components,
-  nearest-pair lane, PM field version);
-* pending output requests.
+* the synchronized force endpoint: total, Tree and PM components, the
+  nearest-pair lane and the PM field version. Particle IDs are stored only if
+  the cache row order differs from the state row order.
+* pending output requests;
+* a mark of the gravity diagnostics.
+
+It costs about `17·8 + 3·8` bytes per particle, which replaces the earlier full
+`SimulationState` copy.
+
+Everything outside the snapshot lanes is covered by an FNV-1a fingerprint
+taken at the opening:
+
+* identity, mass, species, flags and rank;
+* softening and its override mask;
+* particle index generation and metadata representation;
+* cell and gas container sizes.
+
+If the fingerprint differs at rollback, the rollback fails closed instead of
+restoring a partial state.
+
+**Memory-pressure fallback.** If the governor refuses the snapshot on any rank
+(the admission flag is reduced collectively), the cycle opens as a single
+block with limiter `rollback_memory`. A single-block cycle has no interior
+boundary and cannot be rejected. The fallback is recorded in counter
+`time.hierarchical_multirate_cycle_memory_limited` and report field
+`multirate_memory_limited_cycles`. Under memory pressure the schedule
+therefore depends on the available memory: segmentation invariance holds
+only for runs with the same memory admission outcomes.
 
 On rejection, every rank does the following. The decision comes from
 globally reduced criteria, and failures are coordinated through
 `FailureCoordinator`.
 
-1. Restore all of the snapshot.
+1. Verify the fingerprint, then restore the snapshot lanes and records.
 2. Advance the gravity source generation strictly beyond every generation the
    rejected attempt used, so no generation-keyed cache (tree reuse or refit,
    ghosts, LET geometry) can confuse retried positions with rejected ones.
 3. Re-import the endpoint stamped with that generation.
-4. Reinstall the domain geometry and reconcile memory.
-5. Reopen with `T ← min(T/2, Δt_PMdisp(now))`.
+4. Move the attempt's PM refresh and reuse counts and its cadence records out
+   of the trajectory diagnostics (`GravityRuntime::discardDiagnosticsSince`).
+5. Reinstall the domain geometry and reconcile memory.
+6. Reopen with `T ← min(T/2, Δt_PMdisp(now))`.
 
 Ownership is frozen inside a cycle: no rebalance or migration happens at
 interior boundaries. That is why decomposition state does not need to be
@@ -709,14 +739,30 @@ Diagnostics:
 * `time.hierarchical_multirate_cycle_limited_by.<limiter>`
 * `…_cycle_shortened_by_boundary`
 * `…_cycle_rejected_retried`
+* `…_cycle_memory_limited`
 * `…_cycles_completed`
 * `…_recovery_failures`
 * `…_soft_stop_extension_blocks`
 * `time.hierarchical_quantum_unrepresentable`
 
-Profiler counters and TreePM cadence records also include the rejected
-attempt's work, because they are diagnostics. `HierarchicalBlockRecord`s of
-rejected attempts are discarded.
+**Accounting of rejected attempts.** The trajectory diagnostics exclude
+rejected attempts:
+
+* `treepm_long_range_refresh_count` and `…_reuse_count`;
+* the TreePM cadence records;
+* `hierarchical_block_records`.
+
+They equal an uninterrupted run's. The rejected work is reported separately in
+`multirate_rejected_blocks`, `multirate_rejected_pm_refreshes` and
+`multirate_rejected_pm_reuses`. The last two are expected to stay zero,
+because interior blocks are short-range only.
+
+Profiler timings and stage counters still include the rejected work, because
+they measure cost. Cadence records evicted from the bounded recent window
+(256) during an attempt are not restored.
+
+Each `HierarchicalBlockRecord` carries `pm_displacement_limit_time_code`. For
+every accepted block, `T ≤ Δt_PMdisp` within `1e-12` relative.
 
 ### 6. Interior PM values, source prediction and authoritative epochs
 
@@ -750,8 +796,19 @@ rejected attempts are discarded.
   the same limitation. No reversibility or symplecticity claim is made under
   adaptive stepping.
 * Accuracy is expected to remain second order in the maximum step size for
-  smooth criteria. **This has not been measured.** The convergence tests in
-  `test_hierarchical_treepm_workflow` are the owner gates.
+  smooth criteria. **This has not been measured.** The owner gates are:
+  * `test_hierarchical_multirate_convergence` (CPU-only). It drives the
+    production block driver with analytic split forces and gates the observed
+    order in `[1.8, 2.2]` for:
+    * PM-only, which must also equal leapfrog at step `T`;
+    * tree-only, which must also equal the reference scheme;
+    * combined fast/slow oscillators with uniform and variable block
+      intervals, including the splitting error relative to the reference;
+    * adaptive and changing rungs;
+    * a circular two-body orbit under a smooth Tree/PM split. Linear and
+      angular momentum must also be conserved to roundoff.
+  * `test_hierarchical_treepm_workflow` (HDF5/FFTW, np 1/2/4). It gates
+    monotone convergence of the full TreePM workflow.
 * The known RESPA resonance limitation applies for large `T` relative to
   short-range dynamical times. The PM displacement criterion is the
   safeguard. It bounds displacement relative to `r_s`, not resonance.

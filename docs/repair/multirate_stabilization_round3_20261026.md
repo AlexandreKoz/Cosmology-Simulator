@@ -135,20 +135,42 @@ on phase space, with the same schedule and the same summed PM refreshes:
 | Uninitialized fields | All new records and cycle state have default member initializers. |
 | Remaining-step assumptions | Removed from cycle planning. The loop runs `while (step < final || cycle open) && t < t_end`. |
 
-## Not done / limitations
+## Follow-up: closing the round-3 limitations (source only, NOT compiled, NOT tested)
 
-* **No interior-cycle restart persistence.** The cycle-boundary-only policy was
-  chosen instead. A future hard stop (wall-clock or signal) inside the
-  hierarchical segment must defer to the cycle end in the same way.
-* **Rollback snapshot memory.** It holds a full in-memory state copy, governed
-  but roughly doubling particle memory during multi-block cycles.
-* **Tree reuse/refit.** With these enabled, a rollback or restart can change
-  the summation order. Agreement is then at roundoff level, and the tests use
-  1e-18 for it.
-* **No convergence order measured.** The tests gate monotone convergence and
-  print the observed splitting order. PM-only and tree-only isolated
-  convergence suites and an analytic two-body problem were **not written**.
-* **No fixture forces a genuine displacement rejection.** The forced test seam
-  exercises rollback completeness. Genuine rejection is exercised only if the
-  dynamics trigger it.
-* Gas/source multirate is still unsupported.
+| Earlier limitation | Resolution |
+| --- | --- |
+| Rollback snapshot is a full `SimulationState` copy | **Implemented.** The snapshot is now lane-level: phase space, SFC key, metadata, drift epoch, schedulers, integrator, pending output, and the force endpoint without duplicated IDs. A fingerprint covers all frozen state, and a mismatch fails the rollback closed. A governor refusal (collectively reduced) opens a single-block cycle instead of failing: `multirate_memory_limited_cycles`, counter `…_cycle_memory_limited`. |
+| Profiler and cadence records include rejected work | **Implemented** for trajectory diagnostics. A new `GravityRuntime::diagnosticsMark`/`discardDiagnosticsSince` moves the attempt's PM refresh/reuse counts and cadence records out of the trajectory totals. New report fields: `multirate_rejected_blocks`, `multirate_rejected_pm_refreshes`, `multirate_rejected_pm_reuses`. Profiler timings intentionally keep the cost. |
+| No genuine PM-displacement rejection test | **Written.** Section (6) of the workflow test starts from rest under `rms_split_scale`. The factor is calibrated so that the interior re-check must reject once and then accept the retry. It asserts the rejection and replay determinism, and that rejected work is excluded. Every block record now carries `pm_displacement_limit_time_code`, and all accepted blocks are checked against `T ≤ Δt_PMdisp`. |
+| No isolated PM-only / tree-only / analytic convergence | **Written.** `test_hierarchical_multirate_convergence` (CPU-only, `cosmosim_core`) drives the production block driver with analytic split forces. It covers PM-only, tree-only, combined, variable blocks, adaptive rungs and a split-force circular two-body orbit, with order gates `[1.8, 2.2]`. |
+| Segmentation test assumes resumed segments reuse the saved PM field | **Holds by construction.** Restart schema v24 persists the synchronized endpoint, and a resumed segment takes the endpoint-reuse branch exactly as the uninterrupted run does. Rejected-attempt refreshes are no longer counted, so the forced-rollback run now also asserts equal refresh totals. |
+| No restart from inside a cycle; future hard stops | **Not implemented, deliberately.** The code has no wall-clock, signal or stop-file mechanism. The only stop sources are the step budget (soft stop) and `t_end` (exact cycle clip), so no checkpoint can be written inside a cycle. Persisting an open cycle would also require persisting the rollback snapshot (a schema change carrying a second phase-space copy) for a state that cannot occur. If a hard-stop source is added later, it must defer to the cycle end like the step budget does. |
+| Gas/source terms in multirate mode | **Out of scope.** Hierarchical KDK as a whole (not only multirate) is homogeneous-DMO only, enforced at segment start. Coupling hydro/sources needs a new coupled-KDK model contract (new physics), which repair mode excludes. |
+
+### Public interface changes (migration notes)
+
+* **`include/cosmosim/workflows/gravity_runtime.hpp`.** Four new pure virtuals
+  on `GravityRuntime`:
+  * `diagnosticsMark`;
+  * `discardDiagnosticsSince`;
+  * `rejectedLongRangeRefreshCount`;
+  * `rejectedLongRangeReuseCount`.
+
+  The type `GravityRuntime::DiagnosticsMark` is also new. The only
+  implementation (`GravityRuntimeImpl`) is updated. An out-of-tree implementer
+  must add them; returning a zero mark and doing nothing is a valid
+  non-multirate implementation.
+* **`include/cosmosim/workflows/reference_workflow.hpp`.** Additive report
+  fields only: `multirate_rejected_*`, `multirate_memory_limited_cycles`, and
+  `HierarchicalBlockRecord::pm_displacement_limit_time_code`. They are not
+  persisted. There is no config, snapshot or restart schema change.
+
+### Remaining limitations
+
+* Nothing in this record has been compiled or run, and the order gates are
+  owner validation targets. In particular, the genuine-rejection calibration
+  assumes the first interior block starts after a full first block (`t1 > 0`),
+  with `T_open = 4·t1 > 1.5·t1`.
+* Under memory pressure the schedule depends on governor admission (see
+  `docs/time_integration.md` §5).
+* Tree reuse/refit runs agree only to roundoff after a rollback or restart.

@@ -12,9 +12,9 @@ required):
 
 Open:
 
-* Interior-cycle restart is unsupported (by design).
-* Convergence order is unmeasured.
-* No isolated PM-only/tree-only or analytic convergence suite.
+* Interior-cycle restart is unsupported (by design; no stop source can end inside a cycle).
+* Convergence order is unmeasured: driver-level analytic suites (PM-only, tree-only, combined, variable, adaptive, two-body) and a genuine-rejection workflow test are written, not run.
+* Gas/source multirate is out of scope (hierarchical KDK is DMO-only).
 
 See the [round-3 record](repair/multirate_stabilization_round3_20261026.md).
 
