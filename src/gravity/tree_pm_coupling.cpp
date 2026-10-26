@@ -3283,7 +3283,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
 
   std::uint64_t empty_source_rank_count = pos_x_comoving.empty() ? 1U : 0U;
   std::uint64_t empty_target_rank_count = active_count == 0U ? 1U : 0U;
-  if (m_grid.slabLayout().world_size > 1) {
+  const bool reduce_global_diagnostics =
+      m_grid.slabLayout().world_size > 1 && options.reduce_global_diagnostics;
+  if (reduce_global_diagnostics) {
     // Diagnostic-only counts: one fused collective instead of two.
     std::array<std::uint64_t, 2U> empty_rank_counts{empty_source_rank_count, empty_target_rank_count};
     m_mpi_context.allreduceSumUint64sInPlace(empty_rank_counts);
@@ -3355,6 +3357,7 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->pm_local_nz = static_cast<std::uint64_t>(m_shape.nz);
     diagnostics->empty_source_rank_count = empty_source_rank_count;
     diagnostics->empty_target_rank_count = empty_target_rank_count;
+    diagnostics->global_diagnostics_reduced = reduce_global_diagnostics ? 1U : 0U;
     diagnostics->zoom_high_res_allgather_bytes = zoom_high_res_allgather_bytes;
     diagnostics->zoom_high_res_allgather_limit_bytes = options.zoom_high_res_allgather_limit_bytes;
     diagnostics->residual_pruned_nodes = m_last_residual_stats.pruned_nodes;
@@ -3408,6 +3411,9 @@ void TreePmCoordinator::solveActiveSetWithPmCadence(
     diagnostics->graph_cache_superset_hit_count = m_last_residual_stats.graph_cache_superset_hit_count;
     diagnostics->topology_cache_rebuilds = m_last_residual_stats.topology_cache_rebuilds;
     diagnostics->topology_cache_reuses = m_last_residual_stats.topology_cache_reuses;
+    diagnostics->mass_uniformity_scans = m_last_residual_stats.mass_uniformity_scans;
+    diagnostics->mass_uniformity_reuses = m_last_residual_stats.mass_uniformity_reuses;
+    diagnostics->uniform_source_mass_lane_released = m_tree_ordered_source_mass_uniform ? 1U : 0U;
     diagnostics->let_candidate_peer_count = m_last_residual_stats.let_candidate_peer_count;
     diagnostics->let_exported_target_count = m_last_residual_stats.let_exported_target_count;
     diagnostics->let_imported_target_count = m_last_residual_stats.let_imported_target_count;
@@ -3730,10 +3736,29 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     // species-wide value is passed to the kernels as a scalar and multiplied
     // in the same per-pair expression, so results are bitwise unchanged.
     // Detection is an early-exit O(N) scan over the authoritative mass lane.
-    m_tree_ordered_source_mass_uniform = ordered_count != 0U && !mass_code.empty();
-    m_tree_ordered_source_uniform_mass_code = m_tree_ordered_source_mass_uniform ? mass_code[0] : 0.0;
-    for (std::size_t row = 1; row < mass_code.size() && m_tree_ordered_source_mass_uniform; ++row) {
-      m_tree_ordered_source_mass_uniform = mass_code[row] == m_tree_ordered_source_uniform_mass_code;
+    // With a nonzero options.source_mass_generation the caller certifies the
+    // mass lane is unchanged while the token, extent and address are, so the
+    // scan runs once per mass generation (e.g. once per migration in DMO)
+    // instead of once per fine-tick solve.
+    const bool mass_uniformity_certified = options.source_mass_generation != 0U &&
+        options.source_mass_generation == m_mass_uniformity_generation &&
+        mass_code.size() == m_mass_uniformity_extent && mass_code.data() == m_mass_uniformity_data;
+    if (mass_uniformity_certified) {
+      ++m_last_residual_stats.mass_uniformity_reuses;
+      m_tree_ordered_source_mass_uniform = m_mass_uniformity_result && ordered_count != 0U;
+      m_tree_ordered_source_uniform_mass_code = m_mass_uniformity_value;
+    } else {
+      ++m_last_residual_stats.mass_uniformity_scans;
+      m_tree_ordered_source_mass_uniform = ordered_count != 0U && !mass_code.empty();
+      m_tree_ordered_source_uniform_mass_code = m_tree_ordered_source_mass_uniform ? mass_code[0] : 0.0;
+      for (std::size_t row = 1; row < mass_code.size() && m_tree_ordered_source_mass_uniform; ++row) {
+        m_tree_ordered_source_mass_uniform = mass_code[row] == m_tree_ordered_source_uniform_mass_code;
+      }
+      m_mass_uniformity_generation = options.source_mass_generation;
+      m_mass_uniformity_extent = mass_code.size();
+      m_mass_uniformity_data = mass_code.data();
+      m_mass_uniformity_result = m_tree_ordered_source_mass_uniform;
+      m_mass_uniformity_value = m_tree_ordered_source_uniform_mass_code;
     }
     if (m_tree_ordered_source_mass_uniform) {
       m_tree_ordered_source_mass_code.clear();
@@ -4242,6 +4267,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   // any accumulation, when a group cannot use one shared interaction list;
   // the caller then evaluates those targets with the per-target walk.
   internal::TreePmGroupPairKernel group_kernel{};
+  // Same kernel for incoming remote targets, with coincident pairs counted
+  // (no self pair exists for a remote target in the local tree).
+  internal::TreePmGroupPairKernel remote_group_kernel{};
   internal::TreePmGroupWalkParameters group_parameters{};
   if (group_walk_active && !lookup_scaling_representable) {
     group_walk_active = false;
@@ -4264,6 +4292,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         .table_value = m_gaussian_table->knotValues(),
         .table_slope = m_gaussian_table->knotSlopes(),
         .gravitational_constant = options.tree_options.gravitational_constant_code};
+    remote_group_kernel = group_kernel;
+    remote_group_kernel.include_coincident = true;
     group_parameters = internal::TreePmGroupWalkParameters{
         .cutoff_radius2 = cutoff_radius2_comoving,
         .relative_tolerance_over_g = options.tree_options.relative_force_tolerance /
@@ -4287,7 +4317,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
   // Generic shared-list evaluation for `count` targets. sample(i) returns the
   // i-th target; emit(i, ax, ay, az, nearest_pair_r2) receives its residual.
   // Used by owned targets (visit order) and incoming remote LET targets.
-  const auto evaluate_target_group = [&](std::size_t count, const auto& sample, const auto& emit,
+  const auto evaluate_target_group = [&](std::size_t count, bool remote_targets, const auto& sample, const auto& emit,
                                          ResidualTraversalCounters& counters, BoundedTreeStack& stack,
                                          TreePmGroupWalkWorkerScratch& scratch, double& sum_sq) -> GroupEvaluation {
     const double uniform_epsilon = source_softening.uniform_epsilon_comoving;
@@ -4342,7 +4372,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           internal::treePmGroupNearestImage(px - group.center[0], lengths[0]),
           internal::treePmGroupNearestImage(py - group.center[1], lengths[1]),
           internal::treePmGroupNearestImage(pz - group.center[2], lengths[2])};
-      internal::accumulateTreePmGroupCulledLeaves(group_kernel, scratch, target_offset, px, py, pz,
+      internal::accumulateTreePmGroupCulledLeaves(remote_targets ? remote_group_kernel : group_kernel, scratch, target_offset, px, py, pz,
           ax, ay, az, pairs, nearest_pair_r2, cull_counts);
       counters.direct_pair_evaluations += pairs;
       const std::array<double, 3> position{px, py, pz};
@@ -4398,7 +4428,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
       accumulator.addShortRangeToActiveSlot(active_i, ax, ay, az);
       accumulator.noteNearestPairToActiveSlot(active_i, nearest_pair_r2);
     };
-    return evaluate_target_group(visit_end - visit_begin, sample, emit, counters, stack, scratch, sum_sq);
+    return evaluate_target_group(visit_end - visit_begin, /*remote_targets=*/false, sample, emit, counters, stack, scratch, sum_sq);
   };
 
   // Owned-target evaluation of visit positions [visit_begin, visit_end) of
@@ -4961,11 +4991,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
       response_seen_by_peer.emplace_back(
           std::pmr::polymorphic_allocator<std::uint8_t>(tree_resource));
-      if (peer != mpi_world_rank) {
-        requests_by_peer.back().reserve(reserved_batch_targets);
-      }
-      response_expected_by_peer.back().reserve(reserved_batch_targets);
-      response_seen_by_peer.back().reserve(reserved_batch_targets);
+      // Capacity is reserved per sparse-graph neighbour at the first batch
+      // (once; later batches are no larger), not for every rank up front.
     }
 
     // The domain hierarchy is a decomposition object, not a tree-build object.
@@ -5215,12 +5242,20 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         for (auto& peer_requests : requests_by_peer) {
           peer_requests.clear();
         }
+        // Per-request bookkeeping only for sparse-graph neighbours (2026-10-26):
+        // requests go to ownersWithinCutoff() peers, which are a subset of the
+        // symmetric graph, and responses arrive only from neighbours. Sizing
+        // every rank's masks was O(world_size x batch) per batch.
         for (int peer = 0; peer < mpi_world_size; ++peer) {
+          response_expected_by_peer[static_cast<std::size_t>(peer)].clear();
+          response_seen_by_peer[static_cast<std::size_t>(peer)].clear();
+        }
+        for (const int peer : sparse_peer_graph->outgoing_peers) {
           response_expected_by_peer[static_cast<std::size_t>(peer)].assign(batch_size, 0U);
           response_seen_by_peer[static_cast<std::size_t>(peer)].assign(batch_size, 0U);
-          if (peer != mpi_world_rank) {
-            requests_by_peer[static_cast<std::size_t>(peer)].reserve(batch_size);
-          }
+          requests_by_peer[static_cast<std::size_t>(peer)].reserve(reserved_batch_targets);
+          response_expected_by_peer[static_cast<std::size_t>(peer)].reserve(reserved_batch_targets);
+          response_seen_by_peer[static_cast<std::size_t>(peer)].reserve(reserved_batch_targets);
         }
 
         expected_response_count.assign(batch_size, 0U);
@@ -5253,6 +5288,9 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                   sparse_peer_graph->outgoing_peers.size() - target_peers.size());
         }
         for (const int peer : target_peers) {
+          if (response_expected_by_peer[static_cast<std::size_t>(peer)].size() != batch_size) {
+            throw std::logic_error("TreePM short-range target peer is outside the sparse peer graph");
+          }
           requests_by_peer[static_cast<std::size_t>(peer)].push_back(ShortRangeTargetRequestPacket{
               .wire_version = k_short_range_wire_version,
               .origin_rank = mpi_world_rank,
@@ -5783,7 +5821,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
                     response.nearest_pair_r2_comoving = nearest_pair_r2;
                   };
                   const GroupEvaluation evaluation = evaluate_target_group(
-                      group_end - group_begin, sample, emit, counters, stack,
+                      group_end - group_begin, /*remote_targets=*/true, sample, emit, counters, stack,
                       m_worker_group_scratch[worker_slot], incoming_sum_sq);
                   if (evaluation != GroupEvaluation::kEvaluated) {
                     const std::uint64_t group_targets = static_cast<std::uint64_t>(group_end - group_begin);
@@ -6048,7 +6086,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
               response.target_identity != static_cast<std::uint64_t>(batch_begin + response.request_id)) {
             throw std::runtime_error("TreePM short-range response protocol identity mismatch");
           }
-          if (response_expected_by_peer[static_cast<std::size_t>(peer)][response.request_id] == 0U) {
+          if (response.request_id >= response_expected_by_peer[static_cast<std::size_t>(peer)].size() ||
+              response_expected_by_peer[static_cast<std::size_t>(peer)][response.request_id] == 0U) {
             throw std::runtime_error("TreePM short-range response was not requested from its source peer");
           }
           if (response_seen_by_peer[static_cast<std::size_t>(peer)][response.request_id] != 0U) {
@@ -6075,10 +6114,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         }
       }
 
-      for (int peer = 0; peer < mpi_world_size; ++peer) {
-        if (peer == mpi_world_rank) {
-          continue;
-        }
+      for (const int peer : sparse_peer_graph->outgoing_peers) {
         for (std::size_t batch_slot = 0; batch_slot < batch_size; ++batch_slot) {
           if (response_expected_by_peer[static_cast<std::size_t>(peer)][batch_slot] !=
               response_seen_by_peer[static_cast<std::size_t>(peer)][batch_slot]) {

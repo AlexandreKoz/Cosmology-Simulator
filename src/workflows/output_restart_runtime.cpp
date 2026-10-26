@@ -1356,6 +1356,15 @@ void OutputRestartRuntime::execute(OutputRestartStageView& view) {
     return;
   }
   if (!context.boundary.output_safe || !context.boundary.restart_safe) {
+    if (context.boundary.multirate_pm_cycle_interior && !m_pending_output.time_event_due) {
+      // Synchronized boundary inside a multirate PM cycle: momenta carry an
+      // open outer PM half-kick. Step-cadence snapshots and checkpoints stay
+      // latched and are written at the cycle end (at most M - 1 blocks later).
+      // Code-time snapshot events are planned onto cycle ends and fall
+      // through to the fail-closed check below if that contract is violated.
+      m_profiler.counters().addCount("io.output.deferred_to_multirate_pm_cycle_end");
+      return;
+    }
     if (m_pending_output.time_event_due) {
       throw std::runtime_error(
           "required code-time output event reached a boundary that is not output/restart safe");

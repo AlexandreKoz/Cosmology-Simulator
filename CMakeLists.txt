@@ -1461,6 +1461,31 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_integration_pm_periodic_mode tests/integration/test_pm_periodic_mode.cpp)
   target_link_libraries(test_integration_pm_periodic_mode PRIVATE cosmosim_gravity)
   add_test(NAME integration_pm_periodic_mode COMMAND test_integration_pm_periodic_mode)
+  # Fine-tick cache / refit / uniform-mass regression (2026-10-26), single rank.
+  add_executable(test_integration_tree_pm_fine_tick_caches tests/integration/test_tree_pm_fine_tick_caches.cpp)
+  target_link_libraries(test_integration_tree_pm_fine_tick_caches PRIVATE cosmosim_gravity)
+  add_test(NAME integration_tree_pm_fine_tick_caches COMMAND test_integration_tree_pm_fine_tick_caches)
+  cosmosim_append_test_labels(integration_tree_pm_fine_tick_caches tree_pm)
+  # In-place r2c/c2r layout regression (2026-10-26): serial modes always,
+  # distributed comparisons in the MPI registrations below.
+  add_executable(test_integration_pm_in_place_fft_layout tests/integration/test_pm_in_place_fft_layout.cpp)
+  target_link_libraries(test_integration_pm_in_place_fft_layout PRIVATE cosmosim_gravity)
+  add_test(NAME integration_pm_in_place_fft_layout COMMAND test_integration_pm_in_place_fft_layout)
+  cosmosim_append_test_labels(integration_pm_in_place_fft_layout pm)
+  if(COSMOSIM_ENABLE_MPI)
+    add_test(
+      NAME integration_pm_in_place_fft_layout_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_in_place_fft_layout> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_pm_in_place_fft_layout_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_in_place_fft_layout> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_pm_in_place_fft_layout_mpi_two_rank mpi distributed pm)
+    cosmosim_append_test_labels(integration_pm_in_place_fft_layout_mpi_four_rank mpi distributed pm)
+    set_tests_properties(integration_pm_in_place_fft_layout_mpi_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(integration_pm_in_place_fft_layout_mpi_four_rank PROPERTIES PROCESSORS 4)
+  endif()
 
   add_executable(test_integration_pm_scale_factor_regression tests/integration/test_pm_scale_factor_regression.cpp)
   target_link_libraries(test_integration_pm_scale_factor_regression PRIVATE cosmosim_gravity)
@@ -1531,6 +1556,39 @@ if(COSMOSIM_ENABLE_TESTS)
     set_tests_properties(integration_pm_slab_halo_exchange_mpi_three_rank PROPERTIES PROCESSORS 3)
     set_tests_properties(integration_pm_slab_halo_exchange_mpi_four_rank PROPERTIES PROCESSORS 4)
     set_tests_properties(integration_pm_slab_halo_exchange_mpi_eight_rank PROPERTIES PROCESSORS 8)
+    # PM routing admission / workload-plan validity (2026-10-26). The test
+    # carries its own deadlock watchdog; the ctest TIMEOUT is a second bound.
+    add_executable(test_integration_pm_routing_admission_mpi
+      tests/integration/test_pm_routing_admission_mpi.cpp)
+    target_link_libraries(test_integration_pm_routing_admission_mpi PRIVATE cosmosim_gravity Threads::Threads)
+    add_test(
+      NAME integration_pm_routing_admission_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_routing_admission_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_pm_routing_admission_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_pm_routing_admission_mpi> ${MPIEXEC_POSTFLAGS})
+    # Remote (incoming LET) group walk versus per-target walk (2026-10-26).
+    add_executable(test_integration_tree_pm_remote_group_walk_mpi
+      tests/integration/test_tree_pm_remote_group_walk_mpi.cpp)
+    target_link_libraries(test_integration_tree_pm_remote_group_walk_mpi PRIVATE cosmosim_gravity)
+    add_test(
+      NAME integration_tree_pm_remote_group_walk_mpi_two_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pm_remote_group_walk_mpi> ${MPIEXEC_POSTFLAGS})
+    add_test(
+      NAME integration_tree_pm_remote_group_walk_mpi_four_rank
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:test_integration_tree_pm_remote_group_walk_mpi> ${MPIEXEC_POSTFLAGS})
+    cosmosim_append_test_labels(integration_tree_pm_remote_group_walk_mpi_two_rank mpi distributed tree_pm)
+    cosmosim_append_test_labels(integration_tree_pm_remote_group_walk_mpi_four_rank mpi distributed tree_pm)
+    set_tests_properties(integration_tree_pm_remote_group_walk_mpi_two_rank PROPERTIES PROCESSORS 2)
+    set_tests_properties(integration_tree_pm_remote_group_walk_mpi_four_rank PROPERTIES PROCESSORS 4)
+    cosmosim_append_test_labels(integration_pm_routing_admission_mpi_two_rank mpi distributed pm collective_safety)
+    cosmosim_append_test_labels(integration_pm_routing_admission_mpi_four_rank mpi distributed pm collective_safety)
+    set_tests_properties(integration_pm_routing_admission_mpi_two_rank PROPERTIES PROCESSORS 2 TIMEOUT 600)
+    set_tests_properties(integration_pm_routing_admission_mpi_four_rank PROPERTIES PROCESSORS 4 TIMEOUT 600)
     add_executable(test_integration_distributed_sfc_rebalance_mpi
       tests/integration/test_distributed_sfc_rebalance_mpi.cpp)
     target_link_libraries(test_integration_distributed_sfc_rebalance_mpi PRIVATE cosmosim_parallel)
@@ -2324,6 +2382,19 @@ if(COSMOSIM_ENABLE_TESTS)
   set_tests_properties(
     validation_periodic_ewald_reference
     PROPERTIES LABELS "validation;gravity;periodic;reference")
+
+  # Gravity invariant suite (2026-10-26): self-force, momentum conservation,
+  # axis-permutation isotropy, PM-resolution convergence vs Ewald, FD/spectral
+  # gradient distinctness. Provisional thresholds; NOT RUN by the author.
+  add_executable(
+    test_validation_gravity_invariant_suite
+    tests/validation/test_gravity_invariant_suite.cpp
+    tests/support/periodic_ewald_reference.cpp)
+  target_include_directories(test_validation_gravity_invariant_suite PRIVATE tests/support)
+  target_link_libraries(test_validation_gravity_invariant_suite PRIVATE cosmosim_gravity)
+  add_test(NAME validation_gravity_invariant_suite COMMAND test_validation_gravity_invariant_suite)
+  set_tests_properties(validation_gravity_invariant_suite
+    PROPERTIES LABELS "validation;gravity;treepm;periodic;invariants;provisional")
 
   add_executable(
     test_validation_tree_pm_ewald_accuracy

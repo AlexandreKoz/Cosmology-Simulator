@@ -933,7 +933,11 @@ RungZeroTimeState initializeRungZeroTimeState(
     integrator_state.time_bins.max_bin =
         time_state.m_particle_scheduler.maxBin();
     integrator_state.pm_refresh_enabled = true;
-    integrator_state.pm_sync_state.reset(static_cast<std::uint64_t>(
+    // Multirate outer-PM cycles refresh at every cycle-closing opportunity:
+    // the cycle length lives in the hierarchical driver, not in the sync state.
+    integrator_state.pm_sync_state.reset(
+        config.numerics.treepm_pm_reuse_policy == core::TreePmPmReusePolicy::kMultirateOuterKick ? 1U :
+        static_cast<std::uint64_t>(
         std::max(config.numerics.treepm_update_cadence_steps, 1)));
     state.updateAllParticleDriftEpoch(integrator_state.current_time_code,
         integrator_state.current_scale_factor);
@@ -1448,7 +1452,26 @@ void TimeCoordinator::runHierarchicalSegment(
   }
   const std::uint64_t run_start_step = integrator.step_index;
   const std::uint64_t final_step = integrator.step_index + requested_steps;
+  // Multirate outer PM cycle state (TreePmPmReusePolicy::kMultirateOuterKick;
+  // core::HierarchicalPmCyclePlan). A cycle opens at a restart-safe boundary
+  // and output/checkpoints are held to cycle ends, so every run segment —
+  // fresh or resumed — starts with a new cycle and no cycle state persists.
+  // The cycle length is truncated to the remaining step budget so a segment
+  // never ends with an open outer PM half-kick.
+  const bool multirate_pm =
+      config.numerics.treepm_pm_reuse_policy == core::TreePmPmReusePolicy::kMultirateOuterKick;
+  const std::uint64_t multirate_blocks_per_cycle = multirate_pm
+      ? static_cast<std::uint64_t>(std::max(config.numerics.treepm_update_cadence_steps, 1)) : 1U;
+  std::uint64_t pm_cycle_blocks = 1U;
+  std::uint64_t pm_cycle_block_index = 0U;
+  double pm_cycle_coarse_dt = 0.0;
+  double pm_cycle_plan_end_time = 0.0;
+  core::HierarchicalPmCyclePlan pm_cycle_plan{};
+  if (multirate_pm && !integrator.last_completed_restart_safe && integrator.step_index > 0U) {
+    throw std::logic_error("multirate PM cycle must open at a restart-safe synchronization boundary");
+  }
   while (integrator.step_index < final_step && integrator.current_time_code < config.numerics.t_code_end) {
+    const bool pm_cycle_interior_start = multirate_pm && pm_cycle_block_index != 0U;
     const auto console_begin = RuntimeConsoleReporter::Clock::now();
     const double block_a_begin = integrator.current_scale_factor;
     std::exception_ptr preparation_failure;
@@ -1475,7 +1498,12 @@ void TimeCoordinator::runHierarchicalSegment(
     bool endpoint_reusable_local = false;
     preparation_failure = {};
     try {
-      endpoint_reusable_local = m_gravity.hierarchicalEndpointForceReusable(state, integrator);
+      // Inside a multirate PM cycle the next block needs only the Tree
+      // component at the current positions; the PM field stays the one built
+      // at the cycle opening (its kick was already applied).
+      endpoint_reusable_local = pm_cycle_interior_start
+          ? m_gravity.hierarchicalShortRangeEndpointReusable(state)
+          : m_gravity.hierarchicalEndpointForceReusable(state, integrator);
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical endpoint reuse check");
     const bool reuse_endpoint = mpi.allreduceMinDouble(endpoint_reusable_local ? 1.0 : 0.0) > 0.5;
@@ -1483,8 +1511,36 @@ void TimeCoordinator::runHierarchicalSegment(
       profiler.counters().addCount("time.hierarchical_endpoint_force_reuse");
       // The reused PM component was built at these source positions (the
       // reuse check proves it); restate that for a resumed run, whose
-      // integrator does not persist this derived generation.
-      integrator.pm_source_generation = state.gravitySourceGeneration();
+      // integrator does not persist this derived generation. Inside a
+      // multirate cycle the PM field belongs to the cycle opening instead.
+      if (!pm_cycle_interior_start) integrator.pm_source_generation = state.gravitySourceGeneration();
+    } else if (pm_cycle_interior_start) {
+      // Multirate cycle interior (e.g. after a migration): a synchronized
+      // Tree-only force at the current positions. No PM refresh, no PM kick.
+      profiler.counters().addCount("time.hierarchical_multirate_tree_bootstrap");
+      core::StepContext sync{.state = state, .integrator_state = integrator,
+          .active_set = {.particle_indices = all_rows, .cell_indices = {}},
+          .active_gravity_particles = {}, .has_active_gravity_particles = false,
+          .workspace = &workspace, .cosmology_background = background,
+          .mode_policy = &mode_policy, .profiler_session = &profiler,
+          .timeline_step = {.time_begin_code = integrator.current_time_code,
+              .time_end_code = integrator.current_time_code,
+              .scale_factor_begin = integrator.current_scale_factor,
+              .scale_factor_end = integrator.current_scale_factor},
+          .boundary = {.kind = core::StepBoundaryKind::kGlobalSynchronizationPoint,
+              .restart_safe = false, .output_safe = false, .pm_refresh_allowed = false,
+              .local_substep = false, .multirate_pm_cycle_interior = true},
+          .pm_refresh_directive = {.force_refresh_surface = true, .cadence_opportunity_allowed = false,
+              .sync_event_requested = false, .force_evaluation_scale_factor = integrator.current_scale_factor,
+              .reason = core::PmRefreshDirective::Reason::kScheduledForceRefreshStage},
+          .stage = core::IntegrationStage::kForceRefresh};
+      sync.hierarchical_kdk = {.enabled = true, .include_long_range_force = false,
+          .force_only_synchronization = true, .coarse_source_generation = state.gravitySourceGeneration(),
+          .evaluation_tick = particles.currentTick()};
+      dispatchStage(sync, false);
+      if (sync.pm_refresh_directive.has_sync_event || !sync.pm_refresh_directive.solver_executed) {
+        throw std::logic_error("multirate cycle-interior bootstrap must be a Tree-only synchronized solve");
+      }
     } else {
       profiler.counters().addCount("time.hierarchical_endpoint_force_bootstrap");
       core::StepContext sync{.state = state, .integrator_state = integrator,
@@ -1657,7 +1713,14 @@ void TimeCoordinator::runHierarchicalSegment(
         coarse_limiter = name;
       }
     };
-    limit_coarse(displacement_dt, "pm_displacement");
+    // Multirate outer PM: the PM displacement bound and output/end boundaries
+    // constrain the whole cycle of planned_cycle_blocks blocks; the per-block
+    // particle and expansion criteria still bound each block.
+    const std::uint64_t planned_cycle_blocks = pm_cycle_interior_start
+        ? pm_cycle_blocks
+        : std::max<std::uint64_t>(1U, std::min(multirate_blocks_per_cycle, final_step - integrator.step_index));
+    const double cycle_blocks_real = static_cast<double>(planned_cycle_blocks);
+    limit_coarse(displacement_dt / cycle_blocks_real, "pm_displacement");
     const double expansion_dt = background != nullptr
         ? core::computeCosmologyExpansionTimeStep(*background, integrator.current_scale_factor,
               config.numerics.cosmology_max_delta_ln_a, config.numerics.cosmology_max_hubble_time_fraction,
@@ -1669,7 +1732,50 @@ void TimeCoordinator::runHierarchicalSegment(
     if (pending.snapshot_interval_time_code > 0.0 && pending.next_snapshot_time_code > integrator.current_time_code) {
       boundary_time = std::min(boundary_time, pending.next_snapshot_time_code);
     }
-    limit_coarse(boundary_time - integrator.current_time_code, "output_or_end_boundary");
+    limit_coarse((boundary_time - integrator.current_time_code) / cycle_blocks_real, "output_or_end_boundary");
+    if (pm_cycle_interior_start) {
+      // Frozen cycle interval: RESPA needs the outer PM interval fixed when
+      // the opening half-kick is applied. The last block lands exactly on the
+      // planned cycle end (absorbs accumulated roundoff of the block sums).
+      if (particle_coarse_dt < pm_cycle_coarse_dt * (1.0 - 1.0e-12)) {
+        // Some particle asks for a quantum below the frozen one: it is clamped
+        // to the finest rung for this block. Counted, not hidden.
+        profiler.counters().addCount("time.hierarchical_multirate_quantum_clamped_blocks");
+      }
+      coarse_dt = pm_cycle_block_index + 1U == pm_cycle_blocks
+          ? pm_cycle_plan_end_time - integrator.current_time_code : pm_cycle_coarse_dt;
+      coarse_limiter = "multirate_frozen_cycle_interval";
+      if (!(coarse_dt > 0.0) || integrator.current_time_code + coarse_dt > boundary_time *
+              (1.0 + 8.0 * std::numeric_limits<double>::epsilon()) + 8.0 * std::numeric_limits<double>::epsilon()) {
+        throw std::logic_error("multirate PM cycle interval crosses an output/end boundary planned at cycle start");
+      }
+    } else if (multirate_pm) {
+      pm_cycle_blocks = planned_cycle_blocks;
+      pm_cycle_coarse_dt = coarse_dt;
+      const bool boundary_clipped =
+          (boundary_time - integrator.current_time_code) / cycle_blocks_real <= coarse_dt;
+      pm_cycle_plan_end_time = boundary_clipped
+          ? boundary_time : integrator.current_time_code + cycle_blocks_real * coarse_dt;
+      const double half_cycle_time_code = 0.5 * (pm_cycle_plan_end_time - integrator.current_time_code);
+      pm_cycle_plan = {};
+      pm_cycle_plan.enabled = true;
+      if (background != nullptr) {
+        const double a0 = integrator.current_scale_factor;
+        pm_cycle_plan.cycle_mid_scale_factor = core::advanceScaleFactorByCosmicTime(
+            *background, a0, half_cycle_time_code * integrator.time_si_per_code);
+        pm_cycle_plan.opening_pm_kick_factor_code = core::computeComovingDriftFactor(
+            *background, a0, pm_cycle_plan.cycle_mid_scale_factor, 64U) / (integrator.time_si_per_code * a0);
+      } else {
+        pm_cycle_plan.opening_pm_kick_factor_code = half_cycle_time_code;
+        pm_cycle_plan.closing_half_interval_time_code = half_cycle_time_code;
+      }
+      if (planned_cycle_blocks == 1U) coarse_dt = pm_cycle_plan_end_time - integrator.current_time_code;
+      profiler.counters().addCount("time.hierarchical_multirate_pm_cycles");
+    }
+    if (multirate_pm) {
+      pm_cycle_plan.opens_cycle = pm_cycle_block_index == 0U;
+      pm_cycle_plan.closes_cycle = pm_cycle_block_index + 1U == pm_cycle_blocks;
+    }
     const double quantum = coarse_dt / static_cast<double>(periods);
     if (!std::isfinite(quantum) || quantum <= 0.0 || integrator.current_time_code + quantum <= integrator.current_time_code) {
       throw std::runtime_error("hierarchical quantum is not finite positive representable");
@@ -1707,7 +1813,10 @@ void TimeCoordinator::runHierarchicalSegment(
                      core::HierarchicalCoarseDisplacementCriterion::kRmsSplitScale
                  ? "rms_split_scale" : "max_speed_mesh"},
             {"rank_local_bin_occupancy", formatBinOccupancy(particles, all_rows)},
-            {"pm_policy", "coarse_endpoint_half_kicks"}, {"rung_assignment", "fixed_within_block"}}});
+            {"pm_policy", multirate_pm ? "multirate_outer_kick" : "coarse_endpoint_half_kicks"},
+            {"pm_cycle_blocks", std::to_string(multirate_pm ? pm_cycle_blocks : 1U)},
+            {"pm_cycle_block_index", std::to_string(pm_cycle_block_index)},
+            {"rung_assignment", "fixed_within_block"}}});
     } catch (...) { preparation_failure = std::current_exception(); }
     FailureCoordinator(m_services).rethrowCollectiveFailure(preparation_failure, "hierarchical output and event preparation");
     core::MemoryReservation timeline_reservation;
@@ -1782,7 +1891,11 @@ void TimeCoordinator::runHierarchicalSegment(
         }, background, workspace, &mode_policy, &profiler,
         [&](std::exception_ptr failure, std::string_view phase) {
           FailureCoordinator(m_services).rethrowCollectiveFailure(failure, phase);
-        });
+        }, pm_cycle_plan);
+    if (multirate_pm) {
+      // Advance (or close) the outer PM cycle after the block completed.
+      pm_cycle_block_index = pm_cycle_plan.closes_cycle ? 0U : pm_cycle_block_index + 1U;
+    }
     if (timeline_reservation.valid()) timeline_reservation.release();
     preparation_failure = {};
     try { reconcile_runtime(); } catch (...) { preparation_failure = std::current_exception(); }

@@ -1668,6 +1668,31 @@ void testTreePmProductionTuningRoundTrip() {
       requireNumericsRejected(stale.normalized_text, "treepm_update_cadence_steps", value, "treepm_pm_reuse_policy");
     requireNumericsRejected(baseline.normalized_text, "treepm_pm_reuse_policy", "sometimes");
   }
+  // Multirate outer PM level (2026-10-26): hierarchical KDK only, cadence =
+  // coarse blocks per PM cycle in [2,64]; distinct from the stale window.
+  {
+    auto multirate_text = withNumericsValue(baseline.normalized_text, "treepm_pm_reuse_policy", "multirate_outer_kick");
+    multirate_text = withNumericsValue(multirate_text, "treepm_update_cadence_steps", "4");
+    // Global KDK (baseline hierarchical_max_rung = 0) is rejected.
+    bool global_rejected = false;
+    try {
+      (void)loadFrozenConfigFromString(multirate_text, "pm_multirate_global");
+    } catch (const cosmosim::core::ConfigError&) {
+      global_rejected = true;
+    }
+    CHUI_REQUIRE(global_rejected);
+    multirate_text = withNumericsValue(multirate_text, "hierarchical_max_rung", "2");
+    const auto multirate = loadFrozenConfigFromString(multirate_text, "pm_multirate");
+    CHUI_REQUIRE(multirate.config.numerics.treepm_pm_reuse_policy ==
+        cosmosim::core::TreePmPmReusePolicy::kMultirateOuterKick);
+    CHUI_REQUIRE(multirate.normalized_text.find("treepm_pm_reuse_policy = multirate_outer_kick") != std::string::npos);
+    CHUI_REQUIRE(loadFrozenConfigFromString(multirate.normalized_text, "pm_multirate_replay").normalized_text ==
+        multirate.normalized_text);
+    for (const auto value : {"1", "65"})
+      requireNumericsRejected(multirate.normalized_text, "treepm_update_cadence_steps", value, "treepm_pm_reuse_policy");
+    // The stale window stays global-KDK only.
+    requireNumericsRejected(multirate.normalized_text, "treepm_pm_reuse_policy", "stale_within_cadence");
+  }
   // Gravity timestep accuracy coefficient: historical 0.2 default, typed
   // finite (0, 1] range, normalized round trip.
   CHUI_REQUIRE(baseline.config.numerics.gravity_timestep_eta == 0.2);

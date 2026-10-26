@@ -113,6 +113,12 @@ class GravityRuntime : public GravityAccelerationProvider,
   // with these forces instead of re-evaluating at the same positions.
   [[nodiscard]] virtual bool hierarchicalEndpointForceReusable(
       const core::SimulationState& state, const core::IntegratorState& integrator) const = 0;
+  // Multirate outer-PM cycle interior (TreePmPmReusePolicy::kMultirateOuterKick):
+  // true when the Tree component (and total-force history) of every row is
+  // current at the present source positions. The PM component is not
+  // required: its field belongs to the open cycle's opening endpoint.
+  [[nodiscard]] virtual bool hierarchicalShortRangeEndpointReusable(
+      const core::SimulationState& state) const = 0;
   // Per-row squared nearest direct-pair separation from the latest Tree
   // solve (+infinity: none inside r_cut). Empty outside hierarchical KDK.
   [[nodiscard]] virtual std::span<const double> hierarchicalNearestPairR2() const noexcept = 0;

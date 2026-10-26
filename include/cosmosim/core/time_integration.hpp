@@ -117,6 +117,35 @@ struct StepBoundaryState {
   bool output_safe = true;
   bool pm_refresh_allowed = true;
   bool local_substep = false;
+  // Synchronized coarse-block boundary strictly inside a multirate PM cycle
+  // (TreePmPmReusePolicy::kMultirateOuterKick). Positions and rungs are
+  // synchronized but momenta carry an open outer PM half-kick, so the
+  // boundary is neither output- nor restart-safe; pending snapshot and
+  // checkpoint requests are held until the cycle closes (never dropped).
+  bool multirate_pm_cycle_interior = false;
+};
+
+// Outer PM level of the multirate hierarchical TreePM integrator (2026-10-26).
+// A PM cycle is M consecutive coarse blocks of equal duration Δc. With
+//   H = H_kin + H_tree,short + H_PM,long
+// the cycle update is the r-RESPA composition
+//   K_PM(t0 → t0+MΔc/2) ∘ B_1 ∘ … ∘ B_M ∘ K_PM(t0+MΔc/2 → t0+MΔc)
+// where each B_j is the existing tree-only power-of-two block (fine-rung
+// tree kicks around all-source drifts) and K_PM(·) is a long-range kick
+// with the field evaluated at the cycle endpoint positions. Cosmological
+// kicks use the same convention as the block driver: Δu = A ∫dt/a / a_now.
+// Disabled plans (enabled = false) reproduce the reference scheme: PM half
+// kicks at both endpoints of every coarse block.
+struct HierarchicalPmCyclePlan {
+  bool enabled = false;
+  bool opens_cycle = true;
+  bool closes_cycle = true;
+  // Opening kick factor ∫_{t0}^{t0+MΔc/2} dt/a / a(t0); used when opens_cycle.
+  double opening_pm_kick_factor_code = 0.0;
+  // Closing kick lower limit a(t0+MΔc/2) (cosmological runs).
+  double cycle_mid_scale_factor = 0.0;
+  // Closing kick factor for non-cosmological runs (MΔc/2 in code time).
+  double closing_half_interval_time_code = 0.0;
 };
 
 // Deterministic restart-boundary verdict. The diagnostic string is part of the
@@ -443,7 +472,8 @@ class StepOrchestrator {
       const LambdaCdmBackground* cosmology_background,
       TransientStepWorkspace& workspace, const ModePolicy* mode_policy,
       ProfilerSession* profiler_session = nullptr,
-      const std::function<void(std::exception_ptr, std::string_view)>& preparation_failure_sync = {}) const;
+      const std::function<void(std::exception_ptr, std::string_view)>& preparation_failure_sync = {},
+      const HierarchicalPmCyclePlan& pm_cycle = {}) const;
 
   void registerCallback(IntegrationCallback& callback);
   [[nodiscard]] std::size_t callbackCount() const noexcept;

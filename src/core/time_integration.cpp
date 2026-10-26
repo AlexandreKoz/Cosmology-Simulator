@@ -1324,7 +1324,8 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
     const StageDispatchFunction& dispatcher, const LambdaCdmBackground* background,
     TransientStepWorkspace& workspace, const ModePolicy* mode_policy,
     ProfilerSession* profiler,
-    const std::function<void(std::exception_ptr, std::string_view)>& preparation_failure_sync) const {
+    const std::function<void(std::exception_ptr, std::string_view)>& preparation_failure_sync,
+    const HierarchicalPmCyclePlan& pm_cycle) const {
   // Core owns the operator; the workflow supplies its existing collective
   // failure authority. No rank may enter the next solver collective after a
   // peer failed local scheduler/timeline preparation.
@@ -1397,6 +1398,33 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
             (integrator.time_si_per_code * a_now)
         : 0.5 * static_cast<double>(end - begin) * integrator.dt_time_code;
   };
+  // PM surfaces of this block. Reference (plan disabled): both coarse
+  // endpoints. Multirate: the opening surface only when the block opens a PM
+  // cycle, the closing surface (refresh + kick) only when it closes one.
+  const bool pm_opens = !pm_cycle.enabled || pm_cycle.opens_cycle;
+  const bool pm_closes = !pm_cycle.enabled || pm_cycle.closes_cycle;
+  if (pm_cycle.enabled) {
+    prepare("hierarchical multirate PM cycle plan validation", [&] {
+      if (pm_cycle.opens_cycle && !(std::isfinite(pm_cycle.opening_pm_kick_factor_code) &&
+                                    pm_cycle.opening_pm_kick_factor_code > 0.0)) {
+        throw std::logic_error("multirate PM cycle opening kick factor must be finite positive");
+      }
+      if (pm_cycle.closes_cycle &&
+          (background != nullptr
+               ? !(std::isfinite(pm_cycle.cycle_mid_scale_factor) && pm_cycle.cycle_mid_scale_factor > 0.0)
+               : !(std::isfinite(pm_cycle.closing_half_interval_time_code) &&
+                   pm_cycle.closing_half_interval_time_code > 0.0))) {
+        throw std::logic_error("multirate PM cycle closing kick parameters must be finite positive");
+      }
+    });
+  }
+  const auto closing_pm_kick = [&](double a_end) {
+    if (!pm_cycle.enabled) return kick_integral(periods, 2U * periods, a_end);
+    return background != nullptr
+        ? computeComovingDriftFactor(*background, pm_cycle.cycle_mid_scale_factor, a_end, 64U) /
+            (integrator.time_si_per_code * a_end)
+        : pm_cycle.closing_half_interval_time_code;
+  };
   try {
     for (std::uint64_t offset = 0U; offset < periods; ++offset) {
       StepContext context{.state = state, .integrator_state = integrator};
@@ -1456,7 +1484,10 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
           if (offset % period == 0U) context.hierarchical_kdk.tree_kick_factor_code[bin] =
               kick_integral(2U * offset, 2U * offset + period, a_begin);
         }
-        if (offset == 0U) context.hierarchical_kdk.pm_kick_factor_code = kick_integral(0U, periods, a_begin);
+        if (offset == 0U && pm_opens) {
+          context.hierarchical_kdk.pm_kick_factor_code = pm_cycle.enabled
+              ? pm_cycle.opening_pm_kick_factor_code : kick_integral(0U, periods, a_begin);
+        }
         context.stage = IntegrationStage::kGravityKickPre;
       });
       dispatcher(context, false);
@@ -1483,26 +1514,27 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
         context.has_active_gravity_particles = false;
         context.hierarchical_kdk.evaluation_tick = particles.currentTick();
         context.hierarchical_kdk.synchronization_end = offset + 1U == periods;
-        context.hierarchical_kdk.include_long_range_force = offset + 1U == periods;
+        const bool closing_pm_surface = offset + 1U == periods && pm_closes;
+        context.hierarchical_kdk.include_long_range_force = closing_pm_surface;
         context.hierarchical_kdk.tree_kick_factor_code.fill(0.0);
         for (std::uint8_t bin = 0U; bin <= particles.maxBin(); ++bin) {
           const auto period = particles.binPeriodTicks(bin);
           if ((offset + 1U) % period == 0U) context.hierarchical_kdk.tree_kick_factor_code[bin] =
               kick_integral(2U * (offset + 1U) - period, 2U * (offset + 1U), context.timeline_step.scale_factor_end);
         }
-        context.hierarchical_kdk.pm_kick_factor_code = offset + 1U == periods
-            ? kick_integral(periods, 2U * periods, context.timeline_step.scale_factor_end) : 0.0;
-        context.boundary.pm_refresh_allowed = offset + 1U == periods;
+        context.hierarchical_kdk.pm_kick_factor_code = closing_pm_surface
+            ? closing_pm_kick(context.timeline_step.scale_factor_end) : 0.0;
+        context.boundary.pm_refresh_allowed = closing_pm_surface;
         context.pm_refresh_directive = {.force_refresh_surface = true,
-            .cadence_opportunity_allowed = offset + 1U == periods,
-            .sync_event_requested = offset + 1U == periods,
+            .cadence_opportunity_allowed = closing_pm_surface,
+            .sync_event_requested = closing_pm_surface,
             .force_evaluation_scale_factor = context.timeline_step.scale_factor_end,
             .reason = PmRefreshDirective::Reason::kScheduledForceRefreshStage};
         context.stage = IntegrationStage::kForceRefresh;
       });
       dispatcher(context, false);
       prepare("hierarchical PM endpoint commit", [&] {
-        if (context.hierarchical_kdk.synchronization_end && integrator.pm_refresh_enabled &&
+        if (context.hierarchical_kdk.synchronization_end && pm_closes && integrator.pm_refresh_enabled &&
             !context.pm_refresh_directive.has_sync_event) {
           throw std::logic_error("coarse PM endpoint omitted synchronized refresh event");
         }
@@ -1537,10 +1569,14 @@ void StepOrchestrator::executeHierarchicalBlockWithDispatcher(
           timeline.commitStep(integrator, coarse);
           integrator.current_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
           integrator.last_completed_boundary_kind = StepBoundaryKind::kGlobalSynchronizationPoint;
-          integrator.last_completed_restart_safe = true;
+          // A multirate block that does not close its PM cycle leaves momenta
+          // with an open outer PM half-kick: synchronized but not restart/output safe.
+          integrator.last_completed_restart_safe = pm_closes;
           state.metadata.step_index = integrator.step_index;
           state.metadata.scale_factor = integrator.current_scale_factor;
-          context.boundary = {.kind = StepBoundaryKind::kGlobalSynchronizationPoint};
+          context.boundary = {.kind = StepBoundaryKind::kGlobalSynchronizationPoint,
+              .restart_safe = pm_closes, .output_safe = pm_closes,
+              .multirate_pm_cycle_interior = !pm_closes};
         }
       });
       dispatcher(context, false);

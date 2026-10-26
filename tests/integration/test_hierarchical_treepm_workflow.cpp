@@ -294,6 +294,51 @@ void run(int rank,int ranks,std::uint64_t token) {
     if (record.short_range_only) require(!record.refreshed_long_range_field);
   }
   require(saw_fine && saw_pm_endpoint);
+  // Multirate outer PM level (2026-10-26, NOT RUN): treepm_pm_reuse_policy =
+  // multirate_outer_kick with two coarse blocks per PM cycle. Provisional,
+  // unqualified gates: the integrator must stay synchronized, converge toward
+  // the fine global reference with refinement, refresh PM fewer times than
+  // the exact hierarchical scheme, and resume bit-identically from a
+  // checkpoint written at a cycle end.
+  {
+    auto multirate_text=hierarchical_config.normalized_text;
+    for (const auto& [from,to] : {std::pair<std::string,std::string>{"treepm_pm_reuse_policy = exact","treepm_pm_reuse_policy = multirate_outer_kick"},
+                                   std::pair<std::string,std::string>{"treepm_update_cadence_steps = 1","treepm_update_cadence_steps = 2"}}) {
+      const auto position=multirate_text.find(from);
+      require(position!=std::string::npos);
+      multirate_text.replace(position,from.size(),to);
+    }
+    const auto multirate_config=core::loadFrozenConfigFromString(multirate_text,"multirate_hierarchical");
+    workflows::ReferenceWorkflowRunner multirate(multirate_config);
+    auto multirate_coarse=execute(multirate,"multirate_coarse",1e-5);   // 4 blocks = 2 PM cycles
+    auto multirate_refined=execute(multirate,"multirate_refined",5e-6); // 8 blocks = 4 PM cycles
+    for (const auto* checkpoint:{&multirate_coarse.second,&multirate_refined.second}) {
+      require(std::abs(checkpoint->integrator_state.current_time_code-4e-5)<1e-14);
+      assertSynchronized(*checkpoint,2U);
+    }
+    const double multirate_coarse_error=mpi.allreduceSumDouble(phaseError(multirate_coarse.second.state,reference.second.state));
+    const double multirate_refined_error=mpi.allreduceSumDouble(phaseError(multirate_refined.second.state,reference.second.state));
+    require(multirate_refined_error<=multirate_coarse_error+1e-18);
+    require(std::sqrt(multirate_refined_error/64.0)<1e-3);
+    std::uint64_t multirate_refreshes=0U, exact_refreshes=0U;
+    for (const auto& record:multirate_refined.first.treepm_cadence_records) multirate_refreshes+=record.refreshed_long_range_field?1U:0U;
+    auto exact_same_dt=execute(hierarchical,"multirate_exact_comparison",5e-6);
+    for (const auto& record:exact_same_dt.first.treepm_cadence_records) exact_refreshes+=record.refreshed_long_range_field?1U:0U;
+    require(multirate_refreshes<exact_refreshes);
+    // Checkpoint at a cycle end (2 blocks), then resume: identical to the
+    // uninterrupted run because cycles always open at restart-safe boundaries.
+    auto multirate_first=execute(multirate,"multirate_first",1e-5,nullptr,2U);
+    assertSynchronized(multirate_first.second,2U);
+    auto multirate_resumed=execute(multirate,"multirate_resumed",1e-5,&multirate_first.second);
+    require(mpi.allreduceSumDouble(phaseError(multirate_resumed.second.state,multirate_coarse.second.state))<1e-22);
+    // A one-block budget truncates the cycle to one block: still synchronized.
+    auto multirate_single=execute(multirate,"multirate_single_block",1e-5,nullptr,1U);
+    assertSynchronized(multirate_single.second,2U);
+    if (rank==0) std::cout<<"hierarchical_multirate_outer_kick ranks="<<ranks
+        <<" coarse_phase_l2="<<std::sqrt(multirate_coarse_error/64.0)
+        <<" refined_phase_l2="<<std::sqrt(multirate_refined_error/64.0)
+        <<" pm_refreshes="<<multirate_refreshes<<" exact_pm_refreshes="<<exact_refreshes<<'\n';
+  }
   double local_mass=0.0;
   for (const double mass:coarse.second.state.particles.mass_code) local_mass+=mass;
   require(mpi.allreduceSumDouble(local_mass)==64e9);

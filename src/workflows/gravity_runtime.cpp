@@ -57,32 +57,73 @@ namespace {
 
 constexpr std::array<core::IntegrationStage, 1> k_hydro_stage = {core::IntegrationStage::kHydroUpdate};
 
-// Rank-agreement checks gathered into one collective. Each equality entry v
-// occupies lanes v and ~v of a single MPI_MIN allreduce, so min(v) and
-// max(v) = ~min(~v) arrive together; min-only entries return the global
-// minimum. Every rank must append the same entries in the same order: callers
-// only append conditionally on values a previous batch already verified.
+// Rank-agreement checks gathered into one collective (2026-10-25; hardened
+// 2026-10-26). Each equality entry v occupies lanes v and ~v of a single
+// MPI_MIN allreduce; ~ is an order-reversing bijection on uint64, so
+// min(~v) = ~max(v) and min(v) == max(v) iff every rank holds v.
+// Min-only entries return the global minimum.
+//
+// The lane layout has a fixed capacity, so the MPI element count never
+// depends on how many entries a rank appended. Structural lanes make a
+// mismatched entry count / order (name fingerprint), a capacity overflow and
+// rank-local failures captured by recordLocalFailure() visible on every rank:
+// verify() then throws identically everywhere (the failing rank rethrows its
+// own exception) instead of deadlocking or reducing misaligned lanes.
 class RankConsensusBatch {
  public:
-  void requireEqual(std::string_view name, std::uint64_t value) {
-    m_entries.push_back({name, value, true});
-  }
+  static constexpr std::size_t k_capacity = 32U;
+
+  void requireEqual(std::string_view name, std::uint64_t value) { append(name, value, true); }
   // Returns an index into the verified results for a global-minimum entry.
   std::size_t globalMinimum(std::string_view name, std::uint64_t value) {
-    m_entries.push_back({name, value, false});
-    return m_entries.size() - 1U;
+    append(name, value, false);
+    return m_count - 1U;
   }
+  // Captures a rank-local failure raised while the batched facts were being
+  // assembled; reported collectively by verify().
+  void recordLocalFailure(std::exception_ptr failure) noexcept {
+    if (!m_local_failure) m_local_failure = std::move(failure);
+  }
+
   void verify(const parallel::MpiContext& mpi_context, std::uint64_t world_size) {
-    const std::size_t n = m_entries.size();
-    m_lanes.assign(2U * n, 0U);
-    for (std::size_t i = 0; i < n; ++i) {
-      m_lanes[i] = m_entries[i].value;
-      m_lanes[n + i] = ~m_entries[i].value;
+    constexpr std::size_t c = k_capacity;
+    const std::size_t used = std::min(m_count, c);
+    // [values | complements | count, ~count | fingerprint, ~fingerprint |
+    //  ~overflow | ~failure | failing rank (UINT64_MAX when none)]
+    std::array<std::uint64_t, 2U * c + 7U> lanes{};
+    for (std::size_t i = 0; i < c; ++i) {
+      const std::uint64_t value = i < used ? m_entries[i].value : 0U;
+      lanes[i] = value;
+      lanes[c + i] = ~value;
     }
-    mpi_context.allreduceMinUint64sInPlace(m_lanes);
-    for (std::size_t i = 0; i < n; ++i) {
-      const std::uint64_t global_min = m_lanes[i];
-      const std::uint64_t global_max = ~m_lanes[n + i];
+    const std::uint64_t rank = static_cast<std::uint64_t>(std::max(mpi_context.worldRank(), 0));
+    lanes[2U * c + 0U] = m_count;
+    lanes[2U * c + 1U] = ~static_cast<std::uint64_t>(m_count);
+    lanes[2U * c + 2U] = m_fingerprint;
+    lanes[2U * c + 3U] = ~m_fingerprint;
+    lanes[2U * c + 4U] = ~static_cast<std::uint64_t>(m_count > c ? 1U : 0U);
+    lanes[2U * c + 5U] = ~static_cast<std::uint64_t>(m_local_failure ? 1U : 0U);
+    lanes[2U * c + 6U] = m_local_failure ? rank : std::numeric_limits<std::uint64_t>::max();
+    mpi_context.allreduceMinUint64sInPlace(lanes);
+    if (~lanes[2U * c + 5U] != 0U) {
+      if (m_local_failure) std::rethrow_exception(m_local_failure);
+      throw std::runtime_error(
+          "TreePM rank-consensus batch: a peer rank failed while assembling consensus facts "
+          "(first failing rank=" + std::to_string(lanes[2U * c + 6U]) +
+          ", world_size=" + std::to_string(world_size) + ")");
+    }
+    if (lanes[2U * c + 0U] != ~lanes[2U * c + 1U] || lanes[2U * c + 2U] != ~lanes[2U * c + 3U]) {
+      throw std::logic_error(
+          "TreePM rank-consensus batch structure differs across ranks (entry count or order); local entries=" +
+          std::to_string(m_count));
+    }
+    if (~lanes[2U * c + 4U] != 0U) {
+      throw std::logic_error(
+          "TreePM rank-consensus batch exceeds its fixed capacity of " + std::to_string(c) + " entries");
+    }
+    for (std::size_t i = 0; i < used; ++i) {
+      const std::uint64_t global_min = lanes[i];
+      const std::uint64_t global_max = ~lanes[c + i];
       if (m_entries[i].equality && global_min != global_max) {
         throw std::runtime_error(
             "TreePM cadence rank-consensus failure for " + std::string(m_entries[i].name) +
@@ -91,20 +132,18 @@ class RankConsensusBatch {
             ", global_max=" + std::to_string(global_max) +
             ", world_size=" + std::to_string(world_size));
       }
+      m_minimum[i] = global_min;
+      m_maximum[i] = global_max;
     }
     m_verified = true;
   }
   [[nodiscard]] std::uint64_t minimum(std::size_t index) const {
-    if (!m_verified || index >= m_entries.size()) {
-      throw std::logic_error("rank consensus result requested before verification");
-    }
-    return m_lanes[index];
+    requireVerified(index);
+    return m_minimum[index];
   }
   [[nodiscard]] std::uint64_t maximum(std::size_t index) const {
-    if (!m_verified || index >= m_entries.size()) {
-      throw std::logic_error("rank consensus result requested before verification");
-    }
-    return ~m_lanes[m_entries.size() + index];
+    requireVerified(index);
+    return m_maximum[index];
   }
 
  private:
@@ -113,8 +152,27 @@ class RankConsensusBatch {
     std::uint64_t value = 0U;
     bool equality = true;
   };
-  std::vector<Entry> m_entries;
-  std::vector<std::uint64_t> m_lanes;
+  void append(std::string_view name, std::uint64_t value, bool equality) noexcept {
+    // FNV-1a over (name, kind) in append order: detects reordered or
+    // differently named entry sequences across ranks.
+    for (const char ch : name) {
+      m_fingerprint = (m_fingerprint ^ static_cast<unsigned char>(ch)) * 1099511628211ULL;
+    }
+    m_fingerprint = (m_fingerprint ^ (equality ? 0x45U : 0x4DU)) * 1099511628211ULL;
+    if (m_count < k_capacity) m_entries[m_count] = Entry{name, value, equality};
+    ++m_count;  // overflow is reported collectively by verify()
+  }
+  void requireVerified(std::size_t index) const {
+    if (!m_verified || index >= std::min(m_count, k_capacity)) {
+      throw std::logic_error("rank consensus result requested before verification");
+    }
+  }
+  std::array<Entry, k_capacity> m_entries{};
+  std::array<std::uint64_t, k_capacity> m_minimum{};
+  std::array<std::uint64_t, k_capacity> m_maximum{};
+  std::size_t m_count = 0U;
+  std::uint64_t m_fingerprint = 14695981039346656037ULL;
+  std::exception_ptr m_local_failure;
   bool m_verified = false;
 };
 
@@ -932,12 +990,19 @@ class GravityRuntimeImpl final : public GravityRuntime {
   // the current source positions, with the PM component from one committed
   // field. Only an all-active synchronization endpoint establishes this.
   [[nodiscard]] bool hierarchicalEndpointCompleteAt(const core::SimulationState& state) const noexcept {
+    const std::uint64_t generation = state.gravitySourceGeneration();
+    return m_hierarchical_pm_source_generation == generation && m_hierarchical_pm_field_version != 0U &&
+        hierarchicalTreeEndpointCompleteAt(state);
+  }
+
+  // Tree component and total history of every row at the current positions;
+  // the PM lanes must exist (cycle-opening field) but need not be current.
+  [[nodiscard]] bool hierarchicalTreeEndpointCompleteAt(const core::SimulationState& state) const noexcept {
     const std::size_t n = state.particles.size();
     const std::uint64_t generation = state.gravitySourceGeneration();
     if (!m_force_cache_valid || state.cells.size() != 0U ||
         m_force_cache_particle_index_generation != state.particleIndexGeneration() ||
-        m_force_cache_source_generation != generation ||
-        m_hierarchical_pm_source_generation != generation || m_hierarchical_pm_field_version == 0U ||
+        m_force_cache_source_generation != generation || m_hierarchical_pm_field_version == 0U ||
         m_hierarchical_force_generation.size() != n || m_particle_force_cache_valid.size() != n ||
         m_particle_accel_x.size() != n || m_particle_accel_y.size() != n || m_particle_accel_z.size() != n ||
         m_hierarchical_tree_x.size() != n || m_hierarchical_tree_y.size() != n ||
@@ -959,6 +1024,11 @@ class GravityRuntimeImpl final : public GravityRuntime {
     return integrator.pm_long_range_field_valid &&
         m_hierarchical_pm_field_version == integrator.pm_sync_state.fieldVersion() &&
         hierarchicalEndpointCompleteAt(state);
+  }
+
+  [[nodiscard]] bool hierarchicalShortRangeEndpointReusable(
+      const core::SimulationState& state) const override {
+    return hierarchicalTreeEndpointCompleteAt(state);
   }
 
   [[nodiscard]] std::span<const double> hierarchicalNearestPairR2() const noexcept override {
@@ -1975,74 +2045,81 @@ class GravityRuntimeImpl final : public GravityRuntime {
         .field_built_scale_factor = context.integrator_state.pm_sync_state.lastRefreshScaleFactor(),
     };
 
-    if (context.pm_refresh_directive.has_sync_event) {
-      if (!context.pm_refresh_directive.cadence_opportunity_allowed) {
-        throw std::runtime_error(
-            "TreePM received a PM sync event outside an integrator-authorized refresh opportunity");
-      }
-      const core::PmSyncEvent sync_event{
-          .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
-          .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
-          .field_version = context.pm_refresh_directive.field_version,
-          .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
-          .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
-          .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
-      };
-      pm_decision_consensus.requireEqual(
-          "pm_sync_stage", static_cast<std::uint64_t>(context.pm_refresh_directive.sync_stage));
-      pm_decision_consensus.requireEqual(
-          "pm_refresh_reason", static_cast<std::uint64_t>(context.pm_refresh_directive.reason));
-      pm_decision_consensus.requireEqual("gravity_kick_opportunity", sync_event.gravity_kick_opportunity);
-      // Refresh vote equality across ranks replaces the former sum vote: the
-      // decision is either unanimous refresh or unanimous reuse.
-      pm_decision_consensus.requireEqual(
-          "pm_refresh_vote", sync_event.refresh_long_range_field ? 1ULL : 0ULL);
+    double force_evaluation_scale_factor = 0.0;
+    try {
+      if (context.pm_refresh_directive.has_sync_event) {
+        if (!context.pm_refresh_directive.cadence_opportunity_allowed) {
+          throw std::runtime_error(
+              "TreePM received a PM sync event outside an integrator-authorized refresh opportunity");
+        }
+        const core::PmSyncEvent sync_event{
+            .gravity_kick_opportunity = context.pm_refresh_directive.gravity_kick_opportunity,
+            .refresh_long_range_field = context.pm_refresh_directive.refresh_long_range_field,
+            .field_version = context.pm_refresh_directive.field_version,
+            .last_refresh_opportunity = context.pm_refresh_directive.last_refresh_opportunity,
+            .field_built_step_index = context.pm_refresh_directive.field_built_step_index,
+            .field_built_scale_factor = context.pm_refresh_directive.field_built_scale_factor,
+        };
+        pm_decision_consensus.requireEqual(
+            "pm_sync_stage", static_cast<std::uint64_t>(context.pm_refresh_directive.sync_stage));
+        pm_decision_consensus.requireEqual(
+            "pm_refresh_reason", static_cast<std::uint64_t>(context.pm_refresh_directive.reason));
+        pm_decision_consensus.requireEqual("gravity_kick_opportunity", sync_event.gravity_kick_opportunity);
+        // Refresh vote equality across ranks replaces the former sum vote: the
+        // decision is either unanimous refresh or unanimous reuse.
+        pm_decision_consensus.requireEqual(
+            "pm_refresh_vote", sync_event.refresh_long_range_field ? 1ULL : 0ULL);
 
-      decision.gravity_kick_opportunity = sync_event.gravity_kick_opportunity;
-      decision.refresh_long_range_field = sync_event.refresh_long_range_field;
-      decision.field_version = sync_event.field_version;
-      decision.last_refresh_opportunity = sync_event.last_refresh_opportunity;
-      decision.field_built_step_index = sync_event.field_built_step_index;
-      decision.field_built_scale_factor = sync_event.field_built_scale_factor;
-    } else {
-      if (!context.integrator_state.pm_long_range_field_valid || decision.field_version == 0U) {
-        throw std::runtime_error(
-            "TreePM local force refresh attempted before a valid long-range PM field existed");
+        decision.gravity_kick_opportunity = sync_event.gravity_kick_opportunity;
+        decision.refresh_long_range_field = sync_event.refresh_long_range_field;
+        decision.field_version = sync_event.field_version;
+        decision.last_refresh_opportunity = sync_event.last_refresh_opportunity;
+        decision.field_built_step_index = sync_event.field_built_step_index;
+        decision.field_built_scale_factor = sync_event.field_built_scale_factor;
+      } else {
+        if (!context.integrator_state.pm_long_range_field_valid || decision.field_version == 0U) {
+          throw std::runtime_error(
+              "TreePM local force refresh attempted before a valid long-range PM field existed");
+        }
+        if (context.pm_refresh_directive.cadence_opportunity_allowed) {
+          throw std::runtime_error(
+              "TreePM cadence opportunity was declared without an accompanying integrator-owned PM sync event");
+        }
       }
-      if (context.pm_refresh_directive.cadence_opportunity_allowed) {
-        throw std::runtime_error(
-            "TreePM cadence opportunity was declared without an accompanying integrator-owned PM sync event");
-      }
-    }
 
-    pm_decision_consensus.requireEqual("long_range_field_version", decision.field_version);
-    pm_decision_consensus.requireEqual(
-        "last_long_range_refresh_opportunity", decision.last_refresh_opportunity);
-    pm_decision_consensus.requireEqual(
-        "long_range_field_built_step_index", decision.field_built_step_index);
-    pm_decision_consensus.requireEqual(
-        "long_range_field_built_scale_factor_bits",
-        std::bit_cast<std::uint64_t>(decision.field_built_scale_factor));
-    double force_evaluation_scale_factor = hierarchical
-        ? context.pm_refresh_directive.force_evaluation_scale_factor : decision.field_built_scale_factor;
-    if (decision.refresh_long_range_field) {
-      force_evaluation_scale_factor =
-          context.pm_refresh_directive.force_evaluation_scale_factor;
+      pm_decision_consensus.requireEqual("long_range_field_version", decision.field_version);
+      pm_decision_consensus.requireEqual(
+          "last_long_range_refresh_opportunity", decision.last_refresh_opportunity);
+      pm_decision_consensus.requireEqual(
+          "long_range_field_built_step_index", decision.field_built_step_index);
+      pm_decision_consensus.requireEqual(
+          "long_range_field_built_scale_factor_bits",
+          std::bit_cast<std::uint64_t>(decision.field_built_scale_factor));
+      force_evaluation_scale_factor = hierarchical
+          ? context.pm_refresh_directive.force_evaluation_scale_factor : decision.field_built_scale_factor;
+      if (decision.refresh_long_range_field) {
+        force_evaluation_scale_factor =
+            context.pm_refresh_directive.force_evaluation_scale_factor;
+        if (!std::isfinite(force_evaluation_scale_factor) ||
+            force_evaluation_scale_factor <= 0.0 ||
+            force_evaluation_scale_factor != decision.field_built_scale_factor) {
+          throw std::runtime_error(
+              "TreePM refresh force-evaluation scale factor disagrees with integrator field-build metadata");
+        }
+      }
       if (!std::isfinite(force_evaluation_scale_factor) ||
-          force_evaluation_scale_factor <= 0.0 ||
-          force_evaluation_scale_factor != decision.field_built_scale_factor) {
+          force_evaluation_scale_factor <= 0.0) {
         throw std::runtime_error(
-            "TreePM refresh force-evaluation scale factor disagrees with integrator field-build metadata");
+            "TreePM force evaluation requires a finite positive scale factor");
       }
+      pm_decision_consensus.requireEqual(
+          "force_evaluation_scale_factor_bits",
+          std::bit_cast<std::uint64_t>(force_evaluation_scale_factor));
+    } catch (...) {
+      // Rank-local failure: reported on every rank by verify() below, so no
+      // rank throws while its peers wait in the consensus collective.
+      pm_decision_consensus.recordLocalFailure(std::current_exception());
     }
-    if (!std::isfinite(force_evaluation_scale_factor) ||
-        force_evaluation_scale_factor <= 0.0) {
-      throw std::runtime_error(
-          "TreePM force evaluation requires a finite positive scale factor");
-    }
-    pm_decision_consensus.requireEqual(
-        "force_evaluation_scale_factor_bits",
-        std::bit_cast<std::uint64_t>(force_evaluation_scale_factor));
     // One collective for every PM decision lane (formerly up to eighteen
     // min/max allreduces plus a refresh-vote sum per force solve).
     pm_decision_consensus.verify(mpi_context, world_size);
@@ -2068,11 +2145,22 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_tree_pm_options.source_layout_generation = m_source_representation ==
             gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
         ? context.state.particleIndexGeneration() : 0U;
+    // Homogeneous DMO has no mass-changing source physics: row masses change
+    // only by reorder/migration, which advance the dense particle index
+    // generation. Offset by one so generation 0 still certifies. Materialized
+    // generic sources (gas, star formation, feedback) stay uncertified (0).
+    m_tree_pm_options.source_mass_generation = m_source_representation ==
+            gravity::GravitySourceRepresentation::kBorrowedHomogeneousDmo
+        ? context.state.particleIndexGeneration() + 1U : 0U;
     // Geometry freshness metadata was published by the pre-solve refit; keep
     // the stamp aligned with the authoritative source generation this solve.
     publishAuthoritativeTopDomainLeavesSpan();
     m_tree_pm_options.pm_field_version = gravity::PmFieldVersion{decision.field_version};
     m_tree_pm_options.short_range_only = hierarchical && !capture_pm;
+    // Fine-tick solves skip telemetry-only collectives; coarse PM endpoints and
+    // global KDK keep them (option must be rank-uniform: it derives from the
+    // collectively agreed hierarchical directive).
+    m_tree_pm_options.reduce_global_diagnostics = !hierarchical || capture_pm;
     m_tree_pm_options.force_epoch = gravity::ForceEvaluationEpoch{
         .sequence = hierarchical ? context.state.gravitySourceGeneration() : decision.gravity_kick_opportunity,
         .scale_factor = force_evaluation_scale_factor,
@@ -2349,11 +2437,14 @@ class GravityRuntimeImpl final : public GravityRuntime {
                       {"ghost_refresh_committed_slots", std::to_string(gravity_ghost_refresh.committed_slots)},
                       {"predicted_inactive_source_particles", std::to_string(m_source_predicted_inactive_count)},
                       {"predicted_inactive_source_count", std::to_string(m_source_predicted_inactive_count)},
+                      {"source_prediction_drift_integrals", std::to_string(m_source_prediction_drift_integrals)},
                       {"predicted_inactive_sources_required",
                           context.pm_refresh_directive.requires_predicted_inactive_sources ? "true" : "false"},
                       {"pm_refresh_reason", std::string(pmRefreshReasonName(context.pm_refresh_directive.reason))},
                       {"pm_refresh_force_eval_scale_factor", formatRuntimeDouble(context.pm_refresh_directive.force_evaluation_scale_factor)},
-                      {"pm_reuse_policy", m_tree_pm_options.allow_stale_long_range_field ? "stale_within_cadence" : "exact"},
+                      {"pm_reuse_policy", m_config.numerics.treepm_pm_reuse_policy == core::TreePmPmReusePolicy::kMultirateOuterKick
+                           ? "multirate_outer_kick"
+                           : (m_tree_pm_options.allow_stale_long_range_field ? "stale_within_cadence" : "exact")},
                       {"pm_field_age_steps", std::to_string(
                           context.integrator_state.step_index >= decision.field_built_step_index
                               ? context.integrator_state.step_index - decision.field_built_step_index : 0U)},
@@ -2406,6 +2497,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
               {"incoming_group_walk_culled_leaves", std::to_string(m_last_tree_pm_diagnostics.incoming_traversal.group_walk_culled_leaves)},
               {"topology_cache_reuses", std::to_string(m_last_tree_pm_diagnostics.topology_cache_reuses)},
               {"topology_cache_rebuilds", std::to_string(m_last_tree_pm_diagnostics.topology_cache_rebuilds)},
+              {"mass_uniformity_scans", std::to_string(m_last_tree_pm_diagnostics.mass_uniformity_scans)},
+              {"mass_uniformity_reuses", std::to_string(m_last_tree_pm_diagnostics.mass_uniformity_reuses)},
+              {"uniform_source_mass_lane_released", std::to_string(m_last_tree_pm_diagnostics.uniform_source_mass_lane_released)},
               {"skipped_geometry_evaluations", std::to_string(m_last_tree_pm_diagnostics.local_traversal.skipped_geometry_evaluations)},
               {"residual_block_size", std::to_string(m_tree_pm_options.residual_block_size)},
               {"tree_max_leaf_size", std::to_string(m_tree_pm_options.tree_options.max_leaf_size)},
@@ -3574,6 +3668,40 @@ class GravityRuntimeImpl final : public GravityRuntime {
       return source_index;
     };
 
+    // Exact memoization of the cosmological drift integral (2026-10-26). The
+    // factor depends only on (source scale, evaluation scale); inactive
+    // sources share a handful of last-drift epochs (block time bins, common
+    // DMO epoch), so the 64-point quadrature runs once per distinct epoch
+    // instead of once per source. Identical inputs reproduce bitwise
+    // identical factors, so predicted coordinates are unchanged.
+    struct DriftFactorMemoEntry {
+      std::uint64_t source_scale_bits = 0U;
+      std::uint64_t evaluation_scale_bits = 0U;
+      double factor = 0.0;
+    };
+    std::array<DriftFactorMemoEntry, 16U> drift_factor_memo{};
+    std::size_t drift_factor_memo_size = 0U;
+    std::size_t drift_factor_memo_next = 0U;
+    m_source_prediction_drift_integrals = 0U;
+    const auto memoized_drift_factor = [&](double source_scale, double evaluation_scale) {
+      const auto source_bits = std::bit_cast<std::uint64_t>(source_scale);
+      const auto evaluation_bits = std::bit_cast<std::uint64_t>(evaluation_scale);
+      for (std::size_t i = 0; i < drift_factor_memo_size; ++i) {
+        const DriftFactorMemoEntry& entry = drift_factor_memo[i];
+        if (entry.source_scale_bits == source_bits && entry.evaluation_scale_bits == evaluation_bits) {
+          return entry.factor;
+        }
+      }
+      const double factor = core::computeComovingDriftFactor(
+          *context.cosmology_background, source_scale, evaluation_scale, 64) /
+          context.timeline_step.time_si_per_code;
+      drift_factor_memo[drift_factor_memo_next] = DriftFactorMemoEntry{source_bits, evaluation_bits, factor};
+      drift_factor_memo_next = (drift_factor_memo_next + 1U) % drift_factor_memo.size();
+      drift_factor_memo_size = std::min(drift_factor_memo_size + 1U, drift_factor_memo.size());
+      ++m_source_prediction_drift_integrals;
+      return factor;
+    };
+
     // Collisionless and compact-object particle state remains particle-owned.
     // Gas-tagged generic particles are compatibility/lineage mirrors only and
     // must not duplicate the authoritative gas-cell mass in the gravity source
@@ -3609,14 +3737,20 @@ class GravityRuntimeImpl final : public GravityRuntime {
                   << " evaluation_scale=" << evaluation_scale;
           throw std::runtime_error(message.str());
         }
+        // Prediction contract: the velocity lane holds the global-KDK
+        // canonical momentum p (drift factor ∫dt/a²). Hierarchical KDK stores
+        // u = p/a at the common position epoch and drifts every source
+        // canonically each fine tick, so a hierarchical source can never
+        // require a non-zero predicted drift here; fail closed if it would.
+        if (context.hierarchical_kdk.enabled &&
+            (source_scale != evaluation_scale || source_time != evaluation_time)) {
+          throw std::logic_error(
+              "hierarchical KDK sources must be canonically drifted to the force epoch; "
+              "the global-KDK momentum predictor does not apply to u = p/a lanes");
+        }
         double inactive_drift_factor = evaluation_time - source_time;
         if (context.cosmology_background != nullptr) {
-          inactive_drift_factor = core::computeComovingDriftFactor(
-              *context.cosmology_background,
-              source_scale,
-              evaluation_scale,
-              64) /
-              context.timeline_step.time_si_per_code;
+          inactive_drift_factor = memoized_drift_factor(source_scale, evaluation_scale);
         }
         if (!std::isfinite(inactive_drift_factor) ||
             inactive_drift_factor < -1.0e-14) {
@@ -3835,6 +3969,9 @@ class GravityRuntimeImpl final : public GravityRuntime {
   bool m_has_process_memory_estimate = false;
   parallel::GhostCacheLifecycle m_ghost_cache_lifecycle{};
   std::uint64_t m_source_predicted_inactive_count = 0;
+  // Distinct cosmological drift integrals evaluated by the last prediction
+  // (memoized per (source epoch, evaluation epoch); telemetry only).
+  std::uint64_t m_source_prediction_drift_integrals = 0;
   std::vector<ReferenceWorkflowReport::TreePmCadenceRecord> m_cadence_records;
 };
 

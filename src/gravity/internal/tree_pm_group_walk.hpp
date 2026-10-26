@@ -172,6 +172,11 @@ struct TreePmGroupPairKernel {
   const double* table_value = nullptr;
   const double* table_slope = nullptr;
   double gravitational_constant = 0.0;
+  // Remote (incoming LET) targets have no self pair in the local tree, so an
+  // exactly coincident source is a distinct particle: it is counted and sets
+  // nearest_pair_r2 = 0 exactly as the per-target remote walk does. Owned
+  // targets keep r2 == 0 excluded (indistinguishable from the self pair).
+  bool include_coincident = false;
 };
 
 // Accumulates the softened-minus-Gaussian residual of tree-order sources
@@ -181,7 +186,9 @@ struct TreePmGroupPairKernel {
 // Self and coincident pairs contribute exactly zero. nearest_pair_r2 is
 // min-combined with the squared separation of every evaluated pair; the
 // group path cannot tell an exactly coincident distinct source from the
-// target itself, so r2 == 0 is excluded there (the per-target walk keeps it).
+// target itself, so r2 == 0 is excluded for owned targets (the per-target
+// walk keeps it); include_coincident restores it for remote targets. The
+// force of a coincident pair is exactly zero either way (no 0 * inf).
 template <bool UniformMass>
 inline void accumulateTreePmGroupPairsImpl(
     const TreePmGroupPairKernel& k, double px, double py, double pz,
@@ -202,7 +209,7 @@ inline void accumulateTreePmGroupPairsImpl(
     dy = dy > hy ? dy - ly : (dy < -hy ? dy + ly : dy);
     dz = dz > hz ? dz - lz : (dz < -hz ? dz + lz : dz);
     const double r2 = dx * dx + dy * dy + dz * dz;
-    const bool inside = r2 > 0.0 && r2 <= k.cutoff_radius2;
+    const bool inside = (r2 > 0.0 || k.include_coincident) && r2 <= k.cutoff_radius2;
     const double t = std::min(r2 * k.inverse_2a_squared, k.table_t_limit);
     const double cell = t * k.table_inverse_step;
     const auto i = static_cast<std::size_t>(cell);
@@ -215,7 +222,8 @@ inline void accumulateTreePmGroupPairsImpl(
     const double d = r2 + k.epsilon2;
     const double softened = 1.0 / (d * std::sqrt(d));
     const double source_mass = UniformMass ? k.uniform_mass : k.mass[j];
-    const double factor = inside ? (softened - coefficient_long) * k.gravitational_constant * source_mass : 0.0;
+    const double factor =
+        inside && r2 > 0.0 ? (softened - coefficient_long) * k.gravitational_constant * source_mass : 0.0;
     sx += factor * dx;
     sy += factor * dy;
     sz += factor * dz;
