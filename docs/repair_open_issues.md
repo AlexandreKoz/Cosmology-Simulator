@@ -1,5 +1,27 @@
 # Repair open issues
 
+20261026 AREPO-grade campaign (source only; NOT compiled, NOT tested; owner
+validation required). Repairs:
+
+* Rank-divergent PM routing admission and stale routing plans.
+* Consensus-batch lane-count and failure divergence.
+* Remote group-walk coincident-pair accounting.
+* O(world_size) LET bookkeeping.
+* The per-tick telemetry collective.
+* The FD halo allocation outside the governor.
+
+New features:
+
+* Multirate outer PM level (`multirate_outer_kick`).
+* Exact drift-factor memo.
+* Certified uniform-mass reuse.
+
+New tests: routing admission (MPI), in-place FFT layout, remote group walk
+(MPI), fine-tick caches, gravity invariants, multirate workflow gates. New
+tool: `tools/compare_dmo_arepo.py`. See the
+[campaign record](repair/arepo_grade_campaign_20261026.md).
+
+
 20261025 TreePM optimization campaign (source only; NOT compiled, NOT
 tested, owner validation required): opt-in finite-difference PM gradient,
 lazy `potential_k`, governed communication-arena growth, group-walk leaf
