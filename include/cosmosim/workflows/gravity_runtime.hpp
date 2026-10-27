@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <vector>
 
 #include "cosmosim/core/profiling.hpp"
 #include "cosmosim/core/simulation_mode.hpp"
@@ -27,6 +29,48 @@ void initializeGravityState(
 [[nodiscard]] std::string describeGravitySofteningPolicy(
     const core::SimulationConfig& config,
     const core::SimulationState& state);
+
+// Row-aligned synchronized hierarchical force endpoint captured at a
+// multirate PM cycle opening (transactional rollback only; never persisted).
+// Rows follow SimulationState row order at capture. Unlike the ordinary
+// restart force cache (io::GravityForceCachePersistentState, remapped by
+// stable particle ID because a restart may reorder particles), this endpoint
+// is restored by row with no ID lookup and no allocation; its validity is
+// tied to the frozen layout of the cycle: the particle count, the
+// SimulationState particle-index generation (advanced by every reorder,
+// resize, compaction or migration) and the caller's identity/layout
+// certificate (fingerprint of the ID lane and every frozen lane) must all
+// match at restore, otherwise the restore is refused before any write.
+struct TransactionalForceEndpoint {
+  std::vector<double> total_x_comoving;
+  std::vector<double> total_y_comoving;
+  std::vector<double> total_z_comoving;
+  std::vector<double> tree_x_comoving;
+  std::vector<double> tree_y_comoving;
+  std::vector<double> tree_z_comoving;
+  std::vector<double> pm_x_comoving;
+  std::vector<double> pm_y_comoving;
+  std::vector<double> pm_z_comoving;
+  std::vector<double> nearest_pair_r2_comoving;
+  std::uint64_t particle_count = 0U;
+  std::uint64_t particle_index_generation = 0U;
+  std::uint64_t layout_certificate = 0U;
+  std::uint64_t pm_field_version = 0U;
+  bool valid = false;
+
+  static constexpr std::size_t k_lane_count = 10U;
+  // Bytes of lane capacity currently retained (what a governor reservation
+  // for this object must cover).
+  [[nodiscard]] std::uint64_t retainedCapacityBytes() const noexcept;
+  // Smallest retained capacity over all lanes (capture of N rows allocates
+  // nothing when this is >= N).
+  [[nodiscard]] std::size_t minimumLaneCapacity() const noexcept;
+  // Reserves every lane to `rows` (call only after the governor admitted the
+  // bytes; strong guarantee per lane: a failure leaves earlier lanes reserved).
+  void reserveRows(std::size_t rows);
+  // Frees all lane capacity and invalidates the endpoint.
+  void release() noexcept;
+};
 
 // Narrow read surface consumed by hydro/source orchestration. Dense-row
 // acceleration mirrors are invalidated by particle migration through
@@ -93,14 +137,31 @@ class GravityRuntime : public GravityAccelerationProvider,
   //   (execution-cost) totals, drops every source-history-dependent derived
   //   gravity state (tree build/refit candidates and topology maps, particle
   //   ghost layer, borrowed-source certificates, per-row force validity) and
-  //   re-imports the cycle-opening endpoint force for the restored state.
+  //   restores the cycle-opening endpoint force ROW-ALIGNED (no ID remap,
+  //   no allocation; see TransactionalForceEndpoint) for the restored state.
+  //   All restore preconditions are validated before the first write; on
+  //   refusal nothing in the runtime changes and the transaction stays open
+  //   (the caller's collective failure handling ends the run on every rank).
   //   Content-keyed caches with provable validity are retained (see
   //   TreePmCoordinator::invalidateSourceHistoryForRollback).
+  // * captureTransactionalForceEndpoint: row-aligned copy of the complete
+  //   synchronized endpoint at the current positions into caller-owned
+  //   (governed, capacity-reused) storage; refuses an incomplete endpoint.
   virtual void beginCycleTransaction() = 0;
   virtual void commitCycleTransaction() noexcept = 0;
+  virtual void captureTransactionalForceEndpoint(
+      const core::SimulationState& state, std::uint64_t layout_certificate,
+      TransactionalForceEndpoint& endpoint) const = 0;
+  // Read-only check of every rollbackCycleTransaction restore precondition;
+  // lets the caller refuse a rollback before mutating any authoritative state.
+  virtual void validateTransactionalForceEndpoint(
+      const TransactionalForceEndpoint& opening_endpoint,
+      const core::SimulationState& restored_state,
+      std::uint64_t layout_certificate) const = 0;
   virtual void rollbackCycleTransaction(
-      const io::GravityForceCachePersistentState& opening_endpoint,
-      const core::SimulationState& restored_state) = 0;
+      const TransactionalForceEndpoint& opening_endpoint,
+      const core::SimulationState& restored_state,
+      std::uint64_t layout_certificate) = 0;
   [[nodiscard]] virtual bool cycleTransactionOpen() const noexcept = 0;
   // Execution-cost totals of rejected attempts (not part of the trajectory).
   [[nodiscard]] virtual std::uint64_t rejectedLongRangeRefreshCount() const noexcept = 0;

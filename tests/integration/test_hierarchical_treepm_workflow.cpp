@@ -490,6 +490,17 @@ void run(int rank,int ranks,std::uint64_t token) {
       require(forced.first.treepm_long_range_refresh_count==full4.last.first.treepm_long_range_refresh_count);
       same_schedule(forced.first.hierarchical_block_records,full4.records);
       same_endpoint(forced.second,full4.last.second,1e-22);
+      // Memory accounting: first allocation reused across cycles and the
+      // rejected cycle, covered by the governed reservation, released at the
+      // segment end. Scheduler caches: built once, reused across the rollback.
+      require(forced.first.multirate_rollback_snapshot_allocations==1U);
+      require(forced.first.multirate_rollback_snapshot_peak_bytes>0U);
+      require(forced.first.multirate_rollback_snapshot_peak_capacity_bytes>0U &&
+              forced.first.multirate_rollback_snapshot_peak_capacity_bytes<=
+              forced.first.multirate_rollback_snapshot_peak_bytes);
+      require(forced.first.multirate_rollback_snapshot_retained_bytes==0U);
+      require(forced.first.hierarchical_identity_row_rebuilds==1U);
+      require(forced.first.hierarchical_mass_max_scans==1U);
       // Generation-keyed tree reuse/refit may sum in a different order after
       // a rollback: roundoff-level agreement, identical schedule.
       auto optimized_plain=execute(multirate4_optimized,"multirate4_optimized_plain",5e-6);
@@ -623,6 +634,8 @@ void run(int rank,int ranks,std::uint64_t token) {
         const auto cycles=fallback.first.multirate_pm_cycles_completed;
         require(pm_refreshes>=cycles && pm_refreshes<=cycles+1U);
         require(fallback.first.multirate_rollback_snapshot_retained_bytes==0U);
+        require(fallback.first.multirate_rollback_snapshot_peak_capacity_bytes<=
+                fallback.first.multirate_rollback_snapshot_peak_bytes);
         require(fallback.second.integrator_state.current_time_code==4e-5);
         assertSynchronized(fallback.second,2U);
         return fallback;
@@ -633,6 +646,8 @@ void run(int rank,int ranks,std::uint64_t token) {
         require(block.opens_pm_cycle && block.closes_pm_cycle);
       }
       require(all_refused.first.multirate_rollback_snapshot_peak_bytes==0U);
+      require(all_refused.first.multirate_rollback_snapshot_allocations==0U);
+      require(all_refused.first.multirate_rollback_snapshot_peak_capacity_bytes==0U);
       // Refusal on rank 0 only, on several ranks, and an allocation failure
       // on the last rank: identical fallback everywhere.
       auto rank0_refused=refusal_case("multirate4_refused_rank0",{0},false,1000000U);
@@ -643,11 +658,23 @@ void run(int rank,int ranks,std::uint64_t token) {
       auto allocation_failed=refusal_case("multirate4_allocation_failure",{ranks-1},true,1000000U);
       same_schedule(allocation_failed.first.hierarchical_block_records,all_refused.first.hierarchical_block_records);
       same_endpoint(allocation_failed.second,all_refused.second,1e-22);
+      // The injected allocation failure happens after the governor granted
+      // the reservation: on the failing rank it must be released (nothing
+      // allocated or retained) and the refusal must reach every rank. Ranks
+      // that admitted locally keep one governed, accounted allocation for the
+      // next opening (no churn); it is released at the segment end.
+      if (rank==ranks-1) {
+        require(allocation_failed.first.multirate_rollback_snapshot_allocations==0U);
+        require(allocation_failed.first.multirate_rollback_snapshot_peak_capacity_bytes==0U);
+      } else {
+        require(allocation_failed.first.multirate_rollback_snapshot_allocations<=1U);
+      }
       // Only the first admission refused: that cycle falls back, later cycles
       // are multi-block again; the fallback is visible in the block records.
       auto first_refused=refusal_case("multirate4_refused_first",{0},false,1U);
       require(first_refused.first.hierarchical_block_records.front().pm_cycle_length_limiter=="rollback_memory");
       require(first_refused.first.multirate_memory_limited_cycles==1U);
+      require(first_refused.first.multirate_rollback_snapshot_allocations==1U);
       // Reproducibility mode: the same refusal fails collectively instead.
       {
         auto strict_text=multirate_config_with(4,hierarchical_config.normalized_text,"multirate_m4_strict_source").normalized_text;
@@ -701,17 +728,32 @@ void run(int rank,int ranks,std::uint64_t token) {
       require(repeated.first.treepm_long_range_refresh_count==full4.last.first.treepm_long_range_refresh_count);
       require(repeated.first.multirate_rollback_snapshot_peak_bytes>0U);
       require(repeated.first.multirate_rollback_snapshot_retained_bytes==0U);
-      // A rank-local failure inside the rollback (last rank) must fail every
-      // rank through the collective failure protocol, never deadlock.
+      // One governed allocation reused by every cycle and every retry; the
+      // retained capacity never exceeds the governed reservation.
+      require(repeated.first.multirate_rollback_snapshot_allocations==1U);
+      require(repeated.first.multirate_rollback_snapshot_peak_capacity_bytes<=
+              repeated.first.multirate_rollback_snapshot_peak_bytes);
+      // Rollback does not change row layout or masses: caches survive it.
+      require(repeated.first.hierarchical_identity_row_rebuilds==1U);
+      require(repeated.first.hierarchical_mass_max_scans==1U);
+      // A row-identity refusal on one rank (last rank: its captured endpoint
+      // certificate is corrupted, so the production row-aligned validation
+      // refuses) must fail every rank in the read-only validation phase,
+      // before any rank restores anything, and never deadlock.
       {
         bool failed=false;
+        bool expected_phase=false;
         try {
           (void)execute(multirate4,"multirate4_rollback_failure",5e-6,nullptr,0U,1U,
               [&](workflows::ReferenceWorkflowOptions& options) { options.multirate_test_rollback_failure_rank=ranks-1; });
-        } catch (const std::exception&) {
+        } catch (const std::exception& error) {
           failed=true;
+          const std::string message=error.what();
+          expected_phase=rank==ranks-1 ? message.find("certificate")!=std::string::npos
+                                       : message.find("rollback validation")!=std::string::npos;
         }
         require(mpi.allreduceSumUint64(failed?1U:0U)==static_cast<std::uint64_t>(ranks));
+        require(mpi.allreduceSumUint64(expected_phase?1U:0U)==static_cast<std::uint64_t>(ranks));
       }
     }
 
@@ -761,6 +803,49 @@ void run(int rank,int ranks,std::uint64_t token) {
       }
       require(skewed_run.second.integrator_state.current_time_code==4e-5);
       require(mpi.allreduceSumDouble(phaseError(skewed_run.second.state,full4.last.second.state))<1e-18);
+      // Scheduler-preparation caches are rank-local: one identity-row build
+      // and one mass scan per rank (empty rank included), rollbacks keep them.
+      require(skewed_run.first.hierarchical_identity_row_rebuilds==1U);
+      require(skewed_run.first.hierarchical_mass_max_scans==1U);
+    }
+
+    // (11) Scheduler-preparation caches (identity row list, local maximum
+    // mass). Unchanged rows/masses: one build, then hits on every block.
+    // Cached and uncached (test seam) runs are bitwise identical, for the
+    // homogeneous-mass fixture and for a mixed-mass population.
+    {
+      const auto& plain=full4.last.first;
+      require(plain.hierarchical_identity_row_rebuilds==1U);
+      require(plain.hierarchical_identity_row_rebuilds+plain.hierarchical_identity_row_reuses==plain.completed_steps);
+      require(plain.hierarchical_mass_max_scans==1U);
+      require(plain.hierarchical_mass_max_scans+plain.hierarchical_mass_max_reuses==plain.completed_steps);
+      const auto disable_caches=[](workflows::ReferenceWorkflowOptions& options) {
+        options.hierarchical_test_disable_preparation_caches=true;
+      };
+      auto uncached=execute(multirate4,"multirate4_uncached_preparation",5e-6,nullptr,0U,0U,disable_caches);
+      require(uncached.first.hierarchical_identity_row_reuses==0U && uncached.first.hierarchical_mass_max_reuses==0U);
+      require(uncached.first.hierarchical_identity_row_rebuilds==uncached.first.completed_steps);
+      same_schedule(uncached.first.hierarchical_block_records,full4.records);
+      same_endpoint(uncached.second,full4.last.second,1e-22);
+      require(uncached.first.final_state_digest==plain.final_state_digest);
+      // Mixed masses (the encounter criterion uses the global maximum).
+      auto mixed=initial;
+      for (std::size_t row=0;row<mixed.particles.size();++row) {
+        mixed.particles.mass_code[row]*=1.0+static_cast<double>(mixed.particle_sidecar.particle_id[row]%3U);
+      }
+      const auto from_mixed=[&](bool caches_disabled) {
+        return [&mixed,caches_disabled](workflows::ReferenceWorkflowOptions& options) {
+          options.initial_state_override=&mixed;
+          options.hierarchical_test_disable_preparation_caches=caches_disabled;
+        };
+      };
+      auto mixed_cached=execute(multirate4,"multirate4_mixed_mass_cached",5e-6,nullptr,0U,0U,from_mixed(false));
+      auto mixed_uncached=execute(multirate4,"multirate4_mixed_mass_uncached",5e-6,nullptr,0U,0U,from_mixed(true));
+      check_blocks(mixed_cached.first);
+      require(mixed_cached.first.hierarchical_mass_max_scans==1U);
+      same_schedule(mixed_cached.first.hierarchical_block_records,mixed_uncached.first.hierarchical_block_records);
+      same_endpoint(mixed_cached.second,mixed_uncached.second,1e-22);
+      require(mixed_cached.first.final_state_digest==mixed_uncached.first.final_state_digest);
     }
     if (rank==0) {
       std::cout<<"hierarchical_multirate_outer_kick ranks="<<ranks

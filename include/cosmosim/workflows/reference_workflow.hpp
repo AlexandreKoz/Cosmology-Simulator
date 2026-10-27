@@ -75,9 +75,16 @@ struct ReferenceWorkflowOptions {
   std::uint64_t multirate_test_snapshot_refusals = 0;
   std::vector<int> multirate_test_snapshot_refusal_ranks;
   bool multirate_test_snapshot_allocation_failure = false;
-  // Throws inside the transactional rollback on this world rank (-1: never);
-  // every rank must then fail collectively (no rank left inside a collective).
+  // Corrupts the captured force endpoint's row-identity certificate on this
+  // world rank (-1: never), so the production row-aligned restore validation
+  // refuses the rollback there only;
+  // every rank must then fail collectively, with no state restored on any
+  // rank and no rank left inside a collective.
   int multirate_test_rollback_failure_rank = -1;
+  // Test-only: rebuild the hierarchical identity row list and rescan the
+  // local maximum mass every block (the uncached reference for the
+  // scheduler-preparation caches; results must be bitwise identical).
+  bool hierarchical_test_disable_preparation_caches = false;
 
   // Test/embedding composition seam. Built-in production descriptors are
   // registered first; callers may add independent descriptors before the
@@ -200,6 +207,21 @@ struct ReferenceWorkflowReport {
   // and the reservation still held when the segment returned (always 0).
   std::uint64_t multirate_rollback_snapshot_peak_bytes = 0U;
   std::uint64_t multirate_rollback_snapshot_retained_bytes = 0U;
+  // Highest capacity actually retained by the rollback store (must never
+  // exceed multirate_rollback_snapshot_peak_bytes) and the number of fresh
+  // (re)allocations of the store (1 for a run whose extents never grow and
+  // whose admissions are never refused: capacity is reused across cycles
+  // and retries).
+  std::uint64_t multirate_rollback_snapshot_peak_capacity_bytes = 0U;
+  std::uint64_t multirate_rollback_snapshot_allocations = 0U;
+  // Hierarchical scheduler-preparation caches (segment-local; additive,
+  // not persisted): identity row list rebuilds/reuses and local maximum
+  // mass scans/reuses. One rebuild and one scan per segment when the
+  // particle rows and masses never change.
+  std::uint64_t hierarchical_identity_row_rebuilds = 0U;
+  std::uint64_t hierarchical_identity_row_reuses = 0U;
+  std::uint64_t hierarchical_mass_max_scans = 0U;
+  std::uint64_t hierarchical_mass_max_reuses = 0U;
   // Multi-block cycles opened as a single block because the rollback
   // snapshot was refused by the memory governor on some rank.
   std::uint64_t multirate_memory_limited_cycles = 0U;

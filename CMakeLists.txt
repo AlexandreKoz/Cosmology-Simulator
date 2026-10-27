@@ -622,6 +622,7 @@ add_library(cosmosim_workflows STATIC
   src/workflows/internal/metal_diffusion_topology.cpp
   src/workflows/internal/gas_cell_ownership.cpp
   src/workflows/internal/migration_wire.cpp
+  src/workflows/internal/gravity_force_endpoint.cpp
   src/workflows/migration_balance_runtime.cpp
   src/workflows/output_restart_runtime.cpp
   src/workflows/particle_ghost_runtime.cpp
@@ -995,6 +996,17 @@ if(COSMOSIM_ENABLE_TESTS)
   add_executable(test_unit_retained_capacity_transaction tests/unit/test_retained_capacity_transaction.cpp)
   target_link_libraries(test_unit_retained_capacity_transaction PRIVATE cosmosim_core)
   add_test(NAME unit_retained_capacity_transaction COMMAND test_unit_retained_capacity_transaction)
+
+  add_executable(test_unit_gravity_force_endpoint tests/unit/test_gravity_force_endpoint.cpp)
+  target_include_directories(test_unit_gravity_force_endpoint PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(test_unit_gravity_force_endpoint PRIVATE cosmosim_all)
+  add_test(NAME unit_gravity_force_endpoint COMMAND test_unit_gravity_force_endpoint)
+  cosmosim_mark_runtime_truth_test(unit_gravity_force_endpoint restart equivalence)
+
+  add_executable(test_unit_particle_mass_generation tests/unit/test_particle_mass_generation.cpp)
+  target_link_libraries(test_unit_particle_mass_generation PRIVATE cosmosim_core)
+  add_test(NAME unit_particle_mass_generation COMMAND test_unit_particle_mass_generation)
+  cosmosim_mark_runtime_truth_test(unit_particle_mass_generation scheduler)
 
   add_executable(test_unit_scratch_memory_governor tests/unit/test_scratch_memory_governor.cpp)
   target_link_libraries(test_unit_scratch_memory_governor PRIVATE cosmosim_core)
