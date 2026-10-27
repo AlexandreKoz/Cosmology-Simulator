@@ -49,6 +49,7 @@ void TracerModel::inject(cosmosim::core::SimulationState& state, const TracerInj
 
   if (m_config.track_mass) {
     state.particles.mass_code[request.tracer_particle_index] = request.injected_mass_code;
+    state.notifyParticleMassMutation();
   }
 
   std::ostringstream sidecar_text;

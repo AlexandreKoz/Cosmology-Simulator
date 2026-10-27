@@ -1045,6 +1045,15 @@ class SimulationState {
   // across ranks without changing the communicator-global gravity source epoch.
   void bumpParticleIndexGeneration() noexcept;
   void bumpCellIndexGeneration() noexcept;
+  // Rank-local particle mass epoch for mass-derived caches (e.g. the
+  // hierarchical encounter criterion's local maximum mass). Advanced by every
+  // dense-row change (bumpParticleIndexGeneration: reorder, resize,
+  // compaction, migration, population replacement) and by every in-place
+  // particle mass write, which must call notifyParticleMassMutation(). Never
+  // key a mass cache on particleIndexGeneration() alone: masses can change in
+  // place (star formation, black holes, tracers, gas-parent aggregation).
+  [[nodiscard]] std::uint64_t particleMassGeneration() const noexcept;
+  void notifyParticleMassMutation() noexcept;
 
  private:
   [[nodiscard]] bool validateOwnershipInvariantsImpl(
@@ -1063,6 +1072,7 @@ class SimulationState {
   void bumpParticleIdentityGeneration() noexcept;
 
   std::uint64_t m_particle_index_generation = 0;
+  std::uint64_t m_particle_mass_generation = 1;
   std::uint64_t m_particle_identity_generation = 1;
   std::uint64_t m_cell_index_generation = 0;
   std::uint64_t m_gravity_source_generation = 1;

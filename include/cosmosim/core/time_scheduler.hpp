@@ -292,6 +292,9 @@ class HierarchicalTimeBinScheduler {
   [[nodiscard]] std::uint64_t ownedCapacityHighWaterBytes() const noexcept;
 
   [[nodiscard]] TimeBinPersistentState exportPersistentState() const;
+  // Same content as exportPersistentState, written into caller-owned storage
+  // whose lane capacity is reused (no allocation when capacity suffices).
+  void exportPersistentStateInto(TimeBinPersistentState& persistent_state) const;
   void importPersistentState(const TimeBinPersistentState& persistent_state);
 
  private:

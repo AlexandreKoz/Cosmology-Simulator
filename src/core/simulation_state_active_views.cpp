@@ -329,6 +329,7 @@ void scatterGravityParticleKernelView(const GravityParticleKernelView& view, Sim
     state.particles.velocity_y_peculiar[destination] = view.velocity_y_peculiar[i];
     state.particles.velocity_z_peculiar[destination] = view.velocity_z_peculiar[i];
     state.particles.mass_code[destination] = view.mass_code[i];
+    state.notifyParticleMassMutation();
   }
 }
 

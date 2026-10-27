@@ -78,6 +78,7 @@ core::SimulationState makeUniformDarkMatterState(
     state.particles.velocity_y_peculiar[i] = 0.0;
     state.particles.velocity_z_peculiar[i] = 0.0;
     state.particles.mass_code[i] = mass_code;
+    state.notifyParticleMassMutation();
     state.particles.time_bin[i] = 0;
   }
 

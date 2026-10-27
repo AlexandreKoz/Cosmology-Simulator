@@ -180,6 +180,7 @@ namespace {
       state.particles.position_y_comoving[local_index] = result.received_ghosts.position_y_comoving[result_row];
       state.particles.position_z_comoving[local_index] = result.received_ghosts.position_z_comoving[result_row];
       state.particles.mass_code[local_index] = result.received_ghosts.mass_code[result_row];
+      state.notifyParticleMassMutation();
       state.particles.velocity_x_peculiar[local_index] = result.received_ghosts.velocity_x_code[result_row];
       state.particles.velocity_y_peculiar[local_index] = result.received_ghosts.velocity_y_code[result_row];
       state.particles.velocity_z_peculiar[local_index] = result.received_ghosts.velocity_z_code[result_row];

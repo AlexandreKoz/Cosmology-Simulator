@@ -231,6 +231,7 @@ void synchronizeParentParticleCompatibilityMirrors(
     }
     if (aggregate.mass_code > 0.0) {
       state.particles.mass_code[parent_row] = aggregate.mass_code;
+      state.notifyParticleMassMutation();
       state.particles.velocity_x_peculiar[parent_row] =
           aggregate.momentum_x_code / aggregate.mass_code;
       state.particles.velocity_y_peculiar[parent_row] =

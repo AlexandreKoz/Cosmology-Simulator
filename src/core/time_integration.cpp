@@ -2240,8 +2240,13 @@ void HierarchicalTimeBinScheduler::refreshOwnedCapacityHighWater() {
 }
 
 TimeBinPersistentState HierarchicalTimeBinScheduler::exportPersistentState() const {
-  validateInternalState("HierarchicalTimeBinScheduler::exportPersistentState");
   TimeBinPersistentState persistent_state;
+  exportPersistentStateInto(persistent_state);
+  return persistent_state;
+}
+
+void HierarchicalTimeBinScheduler::exportPersistentStateInto(TimeBinPersistentState& persistent_state) const {
+  validateInternalState("HierarchicalTimeBinScheduler::exportPersistentState");
   persistent_state.current_tick = m_current_tick;
   persistent_state.max_bin = m_max_bin;
   if (m_representation == SchedulerRepresentation::kUniformRungZero) {
@@ -2250,12 +2255,11 @@ TimeBinPersistentState HierarchicalTimeBinScheduler::exportPersistentState() con
     persistent_state.active_flag.assign(m_element_count, m_substep_open ? 1U : 0U);
     persistent_state.pending_bin_index.assign(m_element_count, m_uniform_pending_bin_index);
   } else {
-    persistent_state.bin_index = m_hot.bin_index;
-    persistent_state.next_activation_tick = m_hot.next_activation_tick;
-    persistent_state.active_flag = m_hot.active_flag;
-    persistent_state.pending_bin_index = m_hot.pending_bin_index;
+    persistent_state.bin_index.assign(m_hot.bin_index.begin(), m_hot.bin_index.end());
+    persistent_state.next_activation_tick.assign(m_hot.next_activation_tick.begin(), m_hot.next_activation_tick.end());
+    persistent_state.active_flag.assign(m_hot.active_flag.begin(), m_hot.active_flag.end());
+    persistent_state.pending_bin_index.assign(m_hot.pending_bin_index.begin(), m_hot.pending_bin_index.end());
   }
-  return persistent_state;
 }
 
 void HierarchicalTimeBinScheduler::importPersistentState(const TimeBinPersistentState& persistent_state) {
