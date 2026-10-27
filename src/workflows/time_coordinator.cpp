@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -47,6 +48,14 @@
 
 namespace cosmosim::workflows {
 namespace {
+
+// Rollback-store accounting constants belong at namespace scope: C++20 local
+// classes cannot declare static data members.
+constexpr std::uint64_t k_multirate_scheduler_row_bytes =
+    sizeof(std::uint8_t) + sizeof(std::uint64_t) + sizeof(std::uint8_t) + sizeof(std::uint8_t);
+constexpr std::uint64_t k_multirate_rollback_vector_count =
+    7U + TransactionalForceEndpoint::k_lane_count + 8U;
+constexpr std::uint64_t k_multirate_rollback_allocation_overhead_bytes = 64U;
 
 constexpr RuntimeEpochField k_particle_stage_epochs =
     RuntimeEpochField::kParticleIndex |
@@ -1504,11 +1513,7 @@ void TimeCoordinator::runHierarchicalSegment(
     //                     + scheduler bin/next/active/pending (1+8+1+1 B)
     //   per SFC-key row:  8 B; per gas-cell scheduler row: 11 B (0 for DMO)
     //   fixed: StateMetadata string capacities + a conservative allocator
-    //          overhead of k_allocation_overhead_bytes per vector.
-    static constexpr std::uint64_t k_scheduler_row_bytes =
-        sizeof(std::uint8_t) + sizeof(std::uint64_t) + sizeof(std::uint8_t) + sizeof(std::uint8_t);
-    static constexpr std::uint64_t k_vector_count = 7U + TransactionalForceEndpoint::k_lane_count + 8U;
-    static constexpr std::uint64_t k_allocation_overhead_bytes = 64U;
+    //          overhead of k_multirate_rollback_allocation_overhead_bytes per vector.
     std::vector<double> position_x_comoving;
     std::vector<double> position_y_comoving;
     std::vector<double> position_z_comoving;
@@ -1549,7 +1554,7 @@ void TimeCoordinator::runHierarchicalSegment(
     }
     // Bytes actually retained by every owned buffer (+ overhead allowance).
     [[nodiscard]] std::uint64_t retainedCapacityBytes() const noexcept {
-      std::uint64_t bytes = k_vector_count * k_allocation_overhead_bytes + metadataBytes(metadata);
+      std::uint64_t bytes = k_multirate_rollback_vector_count * k_multirate_rollback_allocation_overhead_bytes + metadataBytes(metadata);
       for (const auto* lane : {&position_x_comoving, &position_y_comoving, &position_z_comoving,
                                &velocity_x_peculiar, &velocity_y_peculiar, &velocity_z_peculiar}) {
         bytes += static_cast<std::uint64_t>(lane->capacity()) * sizeof(double);
@@ -1563,17 +1568,17 @@ void TimeCoordinator::runHierarchicalSegment(
     [[nodiscard]] static std::uint64_t requiredBytes(
         std::size_t rows, std::size_t sfc_rows, std::size_t cell_rows, const core::StateMetadata& next_metadata) {
       const std::uint64_t per_row = 6U * sizeof(double) +
-          TransactionalForceEndpoint::k_lane_count * sizeof(double) + k_scheduler_row_bytes;
+          TransactionalForceEndpoint::k_lane_count * sizeof(double) + k_multirate_scheduler_row_bytes;
       std::uint64_t bytes = core::checkedSizeMultiply(
           static_cast<std::uint64_t>(rows), per_row, "multirate rollback snapshot particle bytes");
       bytes = core::checkedMemoryBytesAdd(bytes, core::checkedSizeMultiply(
           static_cast<std::uint64_t>(sfc_rows), sizeof(std::uint64_t), "multirate rollback snapshot SFC bytes"),
           "multirate rollback snapshot bytes");
       bytes = core::checkedMemoryBytesAdd(bytes, core::checkedSizeMultiply(
-          static_cast<std::uint64_t>(cell_rows), k_scheduler_row_bytes, "multirate rollback snapshot cell bytes"),
+          static_cast<std::uint64_t>(cell_rows), k_multirate_scheduler_row_bytes, "multirate rollback snapshot cell bytes"),
           "multirate rollback snapshot bytes");
       return core::checkedMemoryBytesAdd(bytes,
-          k_vector_count * k_allocation_overhead_bytes + metadataBytes(next_metadata),
+          k_multirate_rollback_vector_count * k_multirate_rollback_allocation_overhead_bytes + metadataBytes(next_metadata),
           "multirate rollback snapshot bytes");
     }
     // True when a capture of these extents allocates nothing.
@@ -1860,6 +1865,21 @@ void TimeCoordinator::runHierarchicalSegment(
     // run on EVERY rank before any rank has restored anything.
     std::exception_ptr validation_failure;
     std::uint64_t layout_certificate = 0U;
+    // Prepare all potentially allocating scheduler reconstruction BEFORE any
+    // authoritative lane is restored. The prepared objects are installed by
+    // noexcept swap only after EVERY MPI rank has validated and prepared.
+    std::optional<core::HierarchicalTimeBinScheduler> prepared_particles;
+    std::optional<core::HierarchicalTimeBinScheduler> prepared_cells;
+    core::StateMetadata prepared_metadata;
+    // Preflight the transient reconstruction rather than allocating a second
+    // O(N) scheduler without MemoryGovernor admission. Each generic imported
+    // row needs at most 25 B of represented lanes; 48 B/row plus bin/list
+    // overhead is deliberately conservative for allocator capacity rounding.
+    // This is temporary admission for the rollback preparation, distinct from
+    // the retained cycle-opening snapshot reservation.
+    core::MemoryReservation prepared_scheduler_reservation;
+    static_assert(std::is_nothrow_swappable_v<core::HierarchicalTimeBinScheduler>);
+    static_assert(std::is_nothrow_swappable_v<core::StateMetadata>);
     try {
       if (options.multirate_test_rollback_failure_rank == m_services.mpi_context.worldRank()) {
         // Test seam: break the row-identity proof on this rank only, so the
@@ -1878,11 +1898,66 @@ void TimeCoordinator::runHierarchicalSegment(
             "multirate PM cycle rollback: state outside the rollback lanes changed inside the cycle");
       }
       m_gravity.validateTransactionalForceEndpoint(store.force_endpoint, state, layout_certificate);
+      if (!std::isfinite(store.drift_time_code) || !std::isfinite(store.drift_scale_factor) ||
+          store.drift_scale_factor <= 0.0) {
+        throw std::logic_error("multirate PM cycle rollback: invalid saved drift epoch");
+      }
+      if (state.particles.time_bin.size() != state.particles.size()) {
+        throw std::logic_error("multirate PM cycle rollback: time-bin mirror not materialized");
+      }
+      if (m_services.memory_governor != nullptr) {
+        const auto rows = core::checkedSizeAdd(store.particle_scheduler.bin_index.size(),
+            store.cell_scheduler.bin_index.size(), "multirate rollback scheduler prep rows");
+        const auto bin_count = core::checkedSizeAdd(
+            static_cast<std::size_t>(store.particle_scheduler.max_bin) + 1U,
+            static_cast<std::size_t>(store.cell_scheduler.max_bin) + 1U,
+            "multirate rollback scheduler prep bins");
+        const auto bytes = core::checkedSizeAdd(
+            core::checkedSizeMultiply(rows, 48U, "multirate rollback scheduler prep rows"),
+            core::checkedSizeAdd(
+                core::checkedSizeMultiply(bin_count, 256U, "multirate rollback scheduler prep bins"),
+                4096U, "multirate rollback scheduler prep overhead"),
+            "multirate rollback scheduler prep reservation");
+        prepared_scheduler_reservation = m_services.memory_governor->reserve(
+            core::MemoryClass::kPhaseResident, static_cast<std::uint64_t>(bytes),
+            "time.multirate_rollback_scheduler_preparation");
+        prepared_scheduler_reservation.commit();
+      }
+      // This import reconstructs per-bin vectors and may allocate or throw.
+      // It must not run after positions/velocities have been restored.
+      prepared_particles.emplace(store.particle_scheduler.max_bin);
+      prepared_particles->importPersistentState(store.particle_scheduler);
+      prepared_cells.emplace(store.cell_scheduler.max_bin);
+      prepared_cells->importPersistentState(store.cell_scheduler);
+      prepared_metadata = store.metadata;
+      // Catch unexpectedly large retained capacities before the first
+      // authoritative restore. An undersized model is a fail-closed error.
+      if (prepared_scheduler_reservation.valid()) {
+        const auto actual = core::checkedSizeAdd(
+            static_cast<std::size_t>(prepared_particles->ownedCapacityBytes()),
+            static_cast<std::size_t>(prepared_cells->ownedCapacityBytes()),
+            "multirate rollback actual prepared scheduler bytes");
+        const auto estimated = core::checkedSizeAdd(
+            core::checkedSizeMultiply(
+                core::checkedSizeAdd(store.particle_scheduler.bin_index.size(),
+                    store.cell_scheduler.bin_index.size(), "rollback prepared count"),
+                48U, "rollback prepared row bytes"),
+            core::checkedSizeAdd(
+                core::checkedSizeMultiply(
+                    static_cast<std::size_t>(store.particle_scheduler.max_bin) +
+                        static_cast<std::size_t>(store.cell_scheduler.max_bin) + 2U,
+                    256U, "rollback prepared bin bytes"),
+                4096U, "rollback prepared overhead"),
+            "rollback prepared admitted bytes");
+        if (actual > estimated) {
+          throw std::logic_error("multirate PM cycle rollback: prepared schedulers exceed governed admission");
+        }
+      }
     } catch (...) { validation_failure = std::current_exception(); }
-    FailureCoordinator(m_services).rethrowCollectiveFailure(validation_failure, "multirate PM cycle rollback validation");
-    // Phase 2 (every rank validated): restore. The lane copies cannot fail;
-    // the remaining calls re-check their own preconditions and any failure
-    // is again collective.
+    FailureCoordinator(m_services).rethrowCollectiveFailure(validation_failure, "multirate PM cycle rollback validation/preparation");
+    // Phase 2 (all ranks prepared): install the preconstructed schedulers
+    // without allocation. A refusal during scheduler import therefore cannot
+    // leave particle lanes restored with partially rebuilt time-bin state.
     std::exception_ptr failure;
     try {
       const std::uint64_t generation_reached = state.gravitySourceGeneration();
@@ -1894,11 +1969,12 @@ void TimeCoordinator::runHierarchicalSegment(
       restore(store.velocity_y_peculiar, state.particles.velocity_y_peculiar);
       restore(store.velocity_z_peculiar, state.particles.velocity_z_peculiar);
       restore(store.sfc_key, state.particle_sidecar.sfc_key);
-      state.metadata = store.metadata;
+      using std::swap;
+      swap(state.metadata, prepared_metadata);
       state.updateAllParticleDriftEpoch(store.drift_time_code, store.drift_scale_factor);
       integrator = store.integrator;
-      particles.importPersistentState(store.particle_scheduler);
-      cells.importPersistentState(store.cell_scheduler);
+      swap(particles, *prepared_particles);
+      swap(cells, *prepared_cells);
       pending = store.pending;
       while (state.gravitySourceGeneration() <= generation_reached) state.bumpGravitySourceGeneration();
       m_gravity.rollbackCycleTransaction(store.force_endpoint, state, layout_certificate);

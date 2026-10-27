@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <span>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "cosmosim/core/time_integration.hpp"
@@ -1620,6 +1622,40 @@ void testKdkFailureMarksBookkeepingRestartUnsafe() {
   assert(integrator_state.current_time_code == 0.0);
 }
 
+// Rollback scheduler reconstruction is performed off to the side before
+// mutating authoritative state. A corrupt persisted lane must throw without
+// changing the live scheduler; a good prepared scheduler is swapped in with
+// a non-throwing operation (matching TimeCoordinator's rollback sequence).
+void testPreparedRollbackSchedulerImport() {
+  using cosmosim::core::HierarchicalTimeBinScheduler;
+  HierarchicalTimeBinScheduler live(2);
+  live.reset(12U, 2U, 0U);
+  const auto opening = live.exportPersistentState();
+  const auto live_tick = live.currentTick();
+  const auto live_bin = live.binIndex(0U);
+  auto corrupt = opening;
+  corrupt.bin_index[0] = 3U;  // exceeds max_bin
+  HierarchicalTimeBinScheduler rejected(2);
+  assert(throwsWithContext([&]() { rejected.importPersistentState(corrupt); }, "exceeds max_bin"));
+  assert(live.currentTick() == live_tick);
+  assert(live.binIndex(0U) == live_bin);
+
+  HierarchicalTimeBinScheduler prepared(2);
+  prepared.importPersistentState(opening);
+  // Change live state only after constructing the full prepared replacement.
+  live.reset(12U, 0U, 0U);
+  assert(live.binIndex(0U) == 0U);
+  static_assert(std::is_nothrow_swappable_v<HierarchicalTimeBinScheduler>);
+  using std::swap;
+  swap(live, prepared);
+  assert(live.currentTick() == opening.current_tick);
+  assert(live.elementCount() == opening.bin_index.size());
+  for (std::uint32_t row = 0U; row < 12U; ++row) {
+    assert(live.binIndex(row) == opening.bin_index[row]);
+    assert(live.nextActivationTick(row) == opening.next_activation_tick[row]);
+  }
+}
+
 void testSchedulerTickOverflowFailsBeforeTransitionCommit() {
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(0);
   cosmosim::core::TimeBinPersistentState persistent;
@@ -1642,6 +1678,7 @@ int main() {
   testKickDriftKickOrdering();
   testKdkFailureMarksBookkeepingRestartUnsafe();
   testSchedulerTickOverflowFailsBeforeTransitionCommit();
+  testPreparedRollbackSchedulerImport();
   testPmRefreshDirectiveCapturesReasonAndForceEvalTime();
   testLocalForceRefreshDoesNotIssuePmSyncEvent();
   testStageBoundDispatch();

@@ -50,6 +50,30 @@ void testInterpolationAndIntervalAdditivity() {
   assert(zero.returned_metals_code == 0.0);
 }
 
+// An owning stellar budget commit mutates particle mass via a narrow view;
+// the SimulationState generation must advance even without any row reorder.
+void testStellarCommitInvalidatesMassCache() {
+  cosmosim::core::SimulationState state;
+  state.resizeParticles(1U);
+  state.star_particles.resize(1U);
+  state.star_particles.particle_index[0] = 0U;
+  state.particles.mass_code[0] = 5.0;
+  cosmosim::physics::StellarEvolutionBookkeeper bookkeeper(
+      cosmosim::physics::StellarEvolutionConfig{},
+      cosmosim::physics::StellarEvolutionTable::makeBuiltinReference());
+  cosmosim::physics::StellarEvolutionStepReport report;
+  cosmosim::physics::StellarEvolutionStarBudget budget;
+  budget.star_index = 0U;
+  budget.particle_index = 0U;
+  budget.mass_old_code = 5.0;
+  budget.mass_new_code = 4.0;
+  report.budgets.push_back(budget);
+  const auto generation_before = state.particleMassGeneration();
+  bookkeeper.commitBudgets(state, report);
+  assert(state.particles.mass_code[0] == 4.0);
+  assert(state.particleMassGeneration() > generation_before);
+}
+
 void testChannelConservation() {
   const auto table = cosmosim::physics::StellarEvolutionTable::loadFromTextFile(tablePath());
   const auto interval = table.integrateInterval(0.0, 1.4e10, 1.0, 0.03);
@@ -71,5 +95,6 @@ int main() {
   testExactNodeAndMetallicityDependence();
   testInterpolationAndIntervalAdditivity();
   testChannelConservation();
+  testStellarCommitInvalidatesMassCache();
   return 0;
 }

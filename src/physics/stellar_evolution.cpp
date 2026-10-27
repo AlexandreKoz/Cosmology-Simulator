@@ -823,6 +823,9 @@ void StellarEvolutionBookkeeper::commitBudgets(
     core::SimulationState& state,
     const StellarEvolutionStepReport& report) const {
   commitBudgetsFromView(makeRuntimeView(state, {}), report);
+  // View-only kernels cannot mutate SimulationState's generation; the state-
+  // owning commit publishes this mutation before any subsequent mass cache use.
+  if (!report.budgets.empty()) state.notifyParticleMassMutation();
   state.sidecars.upsert(buildMetadataSidecar(report));
 }
 

@@ -76,8 +76,10 @@ void testConservativeHostMassScaling() {
 
   state.cells.mass_code[0] = 10.0;
   const std::array<std::uint32_t, 1> active_cells{0};
+  const auto mass_generation_before_update = state.particleMassGeneration();
   const auto counters = model.updateMassFromHostCells(state, active_cells);
   assert(counters.updated_tracers == 1);
+  assert(state.particleMassGeneration() > mass_generation_before_update);
   assert(std::abs(state.particles.mass_code[1] - 2.5) < 1.0e-12);
   assert(std::abs(state.tracers.cumulative_exchanged_mass_code[0] - 1.5) < 1.0e-12);
 }

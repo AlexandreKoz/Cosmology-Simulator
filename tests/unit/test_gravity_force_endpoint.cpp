@@ -67,8 +67,12 @@ struct Lanes {
   }
   void fill(double value) { for (auto& values : lane) std::fill(values.begin(), values.end(), value); }
   bool operator==(const Lanes& other) const {
-    for (std::size_t l = 0; l < k_lanes; ++l) {
-      for (std::size_t row = 0; row < k_rows; ++row) {
+    if (lane.size() != other.lane.size()) return false;
+    for (std::size_t l = 0; l < lane.size(); ++l) {
+      // Some negative-path fixtures deliberately truncate one lane; compare
+      // extents before element access to avoid undefined behavior in the test.
+      if (lane[l].size() != other.lane[l].size()) return false;
+      for (std::size_t row = 0; row < lane[l].size(); ++row) {
         // Bitwise comparison (also distinguishes signed zero / NaN payloads).
         if (std::memcmp(&lane[l][row], &other.lane[l][row], sizeof(double)) != 0) return false;
       }

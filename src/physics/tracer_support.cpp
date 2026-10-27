@@ -139,6 +139,9 @@ TracerUpdateCounters TracerModel::updateMassFromHostCells(
       .particle_mass_code = state.particles.mass_code,
   };
   TracerUpdateCounters counters = updateMassFromHostCellsView(view);
+  // A view-based update does not own SimulationState. Invalidate mass-derived
+  // caches once at the state-owning boundary, not once per tracer row.
+  if (counters.updated_tracers > 0U) state.notifyParticleMassMutation();
 
   std::ostringstream sidecar_text;
   sidecar_text << "updated_tracers=" << counters.updated_tracers << '\n';

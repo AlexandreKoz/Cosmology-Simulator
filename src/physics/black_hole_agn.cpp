@@ -312,6 +312,9 @@ BlackHoleAgnStepReport BlackHoleAgnModel::apply(
   };
   const BlackHoleAgnCounters accretion_counters =
       applyAccretionFromView(accretion_view, dt_code, scale_factor, density_is_comoving);
+  // Accretion mutates particle_mass_code through a non-owning view. The
+  // SimulationState boundary owns publication of the mass-cache generation.
+  if (accretion_counters.active_bh > 0U) state.notifyParticleMassMutation();
   report.counters.scanned_bh += accretion_counters.scanned_bh;
   report.counters.active_bh += accretion_counters.active_bh;
   report.counters.integrated_accreted_mass_code += accretion_counters.integrated_accreted_mass_code;

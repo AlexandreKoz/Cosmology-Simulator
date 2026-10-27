@@ -88,9 +88,12 @@ void testApplyMassGrowthFeedbackAndMetadata() {
   assert(state.particles.velocity_x_peculiar.back() == 1.5);
 
   const double total_mass_before_growth = state.cells.mass_code[0] + state.particles.mass_code.back();
+  const auto mass_generation_before_growth = state.particleMassGeneration();
   const double energy_before = state.gas_cells.internal_energy_code[0];
   const auto growth_report = model.apply(state, std::array<cosmosim::physics::BlackHoleSeedCandidate, 0>{}, 2.0, 1);
   assert(growth_report.counters.active_bh == 1);
+  // View-driven BH accretion must invalidate SimulationState mass caches.
+  assert(state.particleMassGeneration() > mass_generation_before_growth);
   assert(state.black_holes.cumulative_accreted_mass_code[0] > 0.0);
   assert(std::abs((state.cells.mass_code[0] + state.particles.mass_code.back()) -
                   total_mass_before_growth) < 1.0e-10);
