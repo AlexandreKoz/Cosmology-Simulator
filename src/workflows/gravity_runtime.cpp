@@ -39,6 +39,7 @@
 #include "workflows/internal/runtime_stage_resource_access.hpp"
 #include "workflows/internal/particle_ghost_runtime.hpp"
 #include "workflows/internal/gas_cell_ownership.hpp"
+#include "workflows/internal/gravity_force_endpoint.hpp"
 
 #if COSMOSIM_ENABLE_HDF5
 #include <hdf5.h>
@@ -656,12 +657,17 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_cycle_transaction_open = false;
   }
   void rollbackCycleTransaction(
-      const io::GravityForceCachePersistentState& opening_endpoint,
-      const core::SimulationState& restored_state) override {
+      const TransactionalForceEndpoint& opening_endpoint,
+      const core::SimulationState& restored_state,
+      std::uint64_t layout_certificate) override {
     if (!m_cycle_transaction_open) {
       throw std::logic_error("multirate PM cycle rollback without an open transaction");
     }
-    // Diagnostics: the attempt's trajectory counts move to execution cost.
+    // 1. Forces first: the row-aligned restore validates every precondition
+    //    before its first write, so a refusal leaves the runtime (journal
+    //    included) exactly as it was; the caller fails collectively.
+    restoreTransactionalForceEndpoint(opening_endpoint, restored_state, layout_certificate);
+    // 2. Diagnostics: the attempt's trajectory counts move to execution cost.
     m_long_range_refresh_count -= m_pending_long_range_refreshes;
     m_long_range_reuse_count -= m_pending_long_range_reuses;
     m_rejected_long_range_refresh_count += m_pending_long_range_refreshes;
@@ -673,8 +679,8 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_pending_long_range_reuses = 0U;
     m_pending_cadence_records_dropped = 0U;
     m_cycle_transaction_open = false;
-    // Derived state. Tree build/refit candidates and topology maps depend on
-    // the positions the rejected attempt visited: force a full build.
+    // 3. Derived state. Tree build/refit candidates and topology maps depend
+    //    on the positions the rejected attempt visited: force a full build.
     m_tree_pm_coordinator.invalidateSourceHistoryForRollback();
     // Particle ghost layer: next solve refreshes it from restored positions.
     m_ghost_cache_lifecycle.valid = false;
@@ -687,12 +693,6 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_borrowed_gravity_source_generation = 0U;
     m_borrowed_eligibility_certificate_valid = false;
     m_source_predicted_inactive_count = 0U;
-    // Force cache, per-row validity, Tree/PM endpoint split and nearest-pair
-    // lane: re-imported for the restored rows at the restored generation.
-    importRestartForceCache(opening_endpoint, restored_state);
-    if (!m_force_cache_valid || m_hierarchical_force_generation.size() != restored_state.particles.size()) {
-      throw std::logic_error("multirate PM cycle rollback could not re-establish the opening endpoint force");
-    }
   }
   [[nodiscard]] bool cycleTransactionOpen() const noexcept override { return m_cycle_transaction_open; }
   [[nodiscard]] std::uint64_t rejectedCadenceRecordCount() const noexcept override {
@@ -1127,6 +1127,10 @@ class GravityRuntimeImpl final : public GravityRuntime {
     return m_hierarchical_nearest_r2;
   }
 
+  // Ordinary restart import: the checkpoint may come from a different row
+  // order, so particle rows are matched by stable ID
+  // (internal::remapForceEndpointById). Transactional rollback inside a
+  // frozen-layout PM cycle uses restoreTransactionalForceEndpoint instead.
   void importRestartForceCache(
       const io::GravityForceCachePersistentState& cache,
       const core::SimulationState& state) {
@@ -1146,77 +1150,54 @@ class GravityRuntimeImpl final : public GravityRuntime {
       m_force_cache_source_generation = 0U;
       return;
     }
-    const auto requireTriplet = [](const std::vector<double>& x,
-                                   const std::vector<double>& y,
-                                   const std::vector<double>& z,
-                                   std::size_t expected,
-                                   std::string_view label) {
-      if (x.size() != expected || y.size() != expected || z.size() != expected) {
-        throw std::runtime_error(
-            "restart gravity force cache " + std::string(label) +
-            " extent does not match authoritative SimulationState");
-      }
-      for (const double value : x) {
-        if (!std::isfinite(value)) {
-          throw std::runtime_error("restart gravity force cache contains non-finite values");
-        }
-      }
-      for (const double value : y) {
-        if (!std::isfinite(value)) {
-          throw std::runtime_error("restart gravity force cache contains non-finite values");
-        }
-      }
-      for (const double value : z) {
-        if (!std::isfinite(value)) {
-          throw std::runtime_error("restart gravity force cache contains non-finite values");
-        }
-      }
-    };
-    const auto buildIndexById = [](std::span<const std::uint64_t> ids,
-                                   std::size_t expected,
-                                   std::string_view label) {
-      if (ids.size() != expected) {
-        throw std::runtime_error("restart gravity force cache " + std::string(label) +
-                                 " identity extent does not match acceleration lanes");
-      }
-      std::unordered_map<std::uint64_t, std::size_t> index_by_id;
-      index_by_id.reserve(ids.size());
-      for (std::size_t index = 0; index < ids.size(); ++index) {
-        if (ids[index] == 0U || !index_by_id.emplace(ids[index], index).second) {
-          throw std::runtime_error("restart gravity force cache " + std::string(label) +
-                                   " identity lane contains a zero or duplicate stable ID");
-        }
-      }
-      return index_by_id;
-    };
-    requireTriplet(
-        cache.particle_accel_x_comoving, cache.particle_accel_y_comoving,
-        cache.particle_accel_z_comoving, state.particles.size(), "particle");
-    requireTriplet(
-        cache.cell_accel_x_comoving, cache.cell_accel_y_comoving,
-        cache.cell_accel_z_comoving, state.cells.size(), "gas-cell");
-    const auto particle_index_by_id = buildIndexById(
-        cache.particle_id, state.particles.size(), "particle");
-    const auto gas_index_by_id = buildIndexById(
-        cache.gas_cell_id, state.cells.size(), "gas-cell");
-
-    m_particle_accel_x.resize(state.particles.size());
-    m_particle_accel_y.resize(state.particles.size());
-    m_particle_accel_z.resize(state.particles.size());
-    for (std::size_t row = 0; row < state.particles.size(); ++row) {
-      const auto it = particle_index_by_id.find(state.particle_sidecar.particle_id[row]);
-      if (it == particle_index_by_id.end()) {
-        throw std::runtime_error("restart gravity force cache is missing a persistent particle ID");
-      }
-      const std::size_t cached_row = it->second;
-      m_particle_accel_x[row] = cache.particle_accel_x_comoving[cached_row];
-      m_particle_accel_y[row] = cache.particle_accel_y_comoving[cached_row];
-      m_particle_accel_z[row] = cache.particle_accel_z_comoving[cached_row];
+    const std::size_t n = state.particles.size();
+    const std::size_t cell_count = state.cells.size();
+    if (cache.cell_accel_x_comoving.size() != cell_count || cache.cell_accel_y_comoving.size() != cell_count ||
+        cache.cell_accel_z_comoving.size() != cell_count) {
+      throw std::runtime_error(
+          "restart gravity force cache gas-cell extent does not match authoritative SimulationState");
     }
-    m_cell_accel_x.resize(state.cells.size());
-    m_cell_accel_y.resize(state.cells.size());
-    m_cell_accel_z.resize(state.cells.size());
-    for (std::size_t row = 0; row < state.cells.size(); ++row) {
+    for (const auto* lane : {&cache.cell_accel_x_comoving, &cache.cell_accel_y_comoving, &cache.cell_accel_z_comoving}) {
+      for (const double value : *lane) {
+        if (!std::isfinite(value)) {
+          throw std::runtime_error("restart gravity force cache contains non-finite values");
+        }
+      }
+    }
+    if (cache.gas_cell_id.size() != cell_count) {
+      throw std::runtime_error(
+          "restart gravity force cache gas-cell identity extent does not match acceleration lanes");
+    }
+    std::unordered_map<std::uint64_t, std::size_t> gas_index_by_id;
+    gas_index_by_id.reserve(cell_count);
+    for (std::size_t index = 0; index < cell_count; ++index) {
+      if (cache.gas_cell_id[index] == 0U || !gas_index_by_id.emplace(cache.gas_cell_id[index], index).second) {
+        throw std::runtime_error(
+            "restart gravity force cache gas-cell identity lane contains a zero or duplicate stable ID");
+      }
+    }
+    // v24 hierarchical endpoint. Absent (pre-v24 or not at a synchronized
+    // hierarchical endpoint) leaves the split lanes unmaterialized, so the
+    // hierarchical segment performs its synchronized bootstrap evaluation.
+    const bool endpoint = cache.hierarchical_endpoint_valid;
+    m_particle_accel_x.resize(n);
+    m_particle_accel_y.resize(n);
+    m_particle_accel_z.resize(n);
+    if (endpoint) {
+      for (auto* lane : {&m_hierarchical_tree_x, &m_hierarchical_tree_y, &m_hierarchical_tree_z,
+                         &m_hierarchical_pm_x, &m_hierarchical_pm_y, &m_hierarchical_pm_z,
+                         &m_hierarchical_nearest_r2}) {
+        lane->resize(n);
+      }
+    }
+    internal::remapForceEndpointById(cache, state.particle_sidecar.particle_id,
+        endpoint ? forceEndpointLanes() : internal::ForceEndpointLanes{
+            .total_x = m_particle_accel_x, .total_y = m_particle_accel_y, .total_z = m_particle_accel_z},
+        endpoint);
+    m_cell_accel_x.resize(cell_count);
+    m_cell_accel_y.resize(cell_count);
+    m_cell_accel_z.resize(cell_count);
+    for (std::size_t row = 0; row < cell_count; ++row) {
       const auto it = gas_index_by_id.find(state.gas_cells.gas_cell_id[row]);
       if (it == gas_index_by_id.end()) {
         throw std::runtime_error("restart gravity force cache is missing a persistent gas-cell ID");
@@ -1231,51 +1212,98 @@ class GravityRuntimeImpl final : public GravityRuntime {
     m_force_cache_cell_index_generation = state.cellIndexGeneration();
     m_force_cache_gas_identity_generation = state.gasCellIdentityGeneration();
     m_force_cache_source_generation = state.gravitySourceGeneration();
-    m_particle_force_cache_valid.assign(state.particles.size(), 1U);
-    m_cell_force_cache_valid.assign(state.cells.size(), 1U);
-
-    // v24 hierarchical endpoint. Absent (pre-v24 or not at a synchronized
-    // hierarchical endpoint) leaves the split lanes unmaterialized, so the
-    // hierarchical segment performs its synchronized bootstrap evaluation.
+    m_particle_force_cache_valid.assign(n, 1U);
+    m_cell_force_cache_valid.assign(cell_count, 1U);
     m_hierarchical_force_generation.clear();
-    m_hierarchical_nearest_r2.clear();
     m_hierarchical_pm_source_generation = 0U;
     m_hierarchical_pm_field_version = 0U;
-    if (!cache.hierarchical_endpoint_valid) {
+    if (!endpoint) {
+      m_hierarchical_nearest_r2.clear();
       return;
-    }
-    const std::size_t n = state.particles.size();
-    const std::array<const std::vector<double>*, 7> endpoint_lanes{
-        &cache.hierarchical_tree_accel_x_comoving, &cache.hierarchical_tree_accel_y_comoving,
-        &cache.hierarchical_tree_accel_z_comoving, &cache.hierarchical_pm_accel_x_comoving,
-        &cache.hierarchical_pm_accel_y_comoving, &cache.hierarchical_pm_accel_z_comoving,
-        &cache.hierarchical_nearest_pair_r2_comoving};
-    for (const auto* lane : endpoint_lanes) {
-      if (lane->size() != n) {
-        throw std::runtime_error(
-            "restart hierarchical endpoint extent does not match authoritative SimulationState");
-      }
-    }
-    m_hierarchical_tree_x.resize(n);
-    m_hierarchical_tree_y.resize(n);
-    m_hierarchical_tree_z.resize(n);
-    m_hierarchical_pm_x.resize(n);
-    m_hierarchical_pm_y.resize(n);
-    m_hierarchical_pm_z.resize(n);
-    m_hierarchical_nearest_r2.resize(n);
-    for (std::size_t row = 0; row < n; ++row) {
-      const std::size_t cached_row = particle_index_by_id.at(state.particle_sidecar.particle_id[row]);
-      m_hierarchical_tree_x[row] = cache.hierarchical_tree_accel_x_comoving[cached_row];
-      m_hierarchical_tree_y[row] = cache.hierarchical_tree_accel_y_comoving[cached_row];
-      m_hierarchical_tree_z[row] = cache.hierarchical_tree_accel_z_comoving[cached_row];
-      m_hierarchical_pm_x[row] = cache.hierarchical_pm_accel_x_comoving[cached_row];
-      m_hierarchical_pm_y[row] = cache.hierarchical_pm_accel_y_comoving[cached_row];
-      m_hierarchical_pm_z[row] = cache.hierarchical_pm_accel_z_comoving[cached_row];
-      m_hierarchical_nearest_r2[row] = cache.hierarchical_nearest_pair_r2_comoving[cached_row];
     }
     m_hierarchical_force_generation.assign(n, state.gravitySourceGeneration());
     m_hierarchical_pm_source_generation = state.gravitySourceGeneration();
     m_hierarchical_pm_field_version = cache.hierarchical_pm_field_version;
+  }
+
+  // Runtime-owned dense endpoint lanes (current extents).
+  [[nodiscard]] internal::ForceEndpointLanes forceEndpointLanes() noexcept {
+    return internal::ForceEndpointLanes{
+        .total_x = m_particle_accel_x, .total_y = m_particle_accel_y, .total_z = m_particle_accel_z,
+        .tree_x = m_hierarchical_tree_x, .tree_y = m_hierarchical_tree_y, .tree_z = m_hierarchical_tree_z,
+        .pm_x = m_hierarchical_pm_x, .pm_y = m_hierarchical_pm_y, .pm_z = m_hierarchical_pm_z,
+        .nearest_pair_r2 = m_hierarchical_nearest_r2};
+  }
+
+  void captureTransactionalForceEndpoint(
+      const core::SimulationState& state, std::uint64_t layout_certificate,
+      TransactionalForceEndpoint& endpoint) const override {
+    if (!hierarchicalEndpointCompleteAt(state)) {
+      endpoint.valid = false;
+      throw std::logic_error("multirate PM cycle opening lacks a complete synchronized force endpoint");
+    }
+    internal::captureForceEndpointRowAligned(
+        internal::ConstForceEndpointLanes{
+            .total_x = m_particle_accel_x, .total_y = m_particle_accel_y, .total_z = m_particle_accel_z,
+            .tree_x = m_hierarchical_tree_x, .tree_y = m_hierarchical_tree_y, .tree_z = m_hierarchical_tree_z,
+            .pm_x = m_hierarchical_pm_x, .pm_y = m_hierarchical_pm_y, .pm_z = m_hierarchical_pm_z,
+            .nearest_pair_r2 = m_hierarchical_nearest_r2},
+        internal::RowAlignedEndpointStamp{
+            .particle_count = static_cast<std::uint64_t>(state.particles.size()),
+            .particle_index_generation = state.particleIndexGeneration(),
+            .layout_certificate = layout_certificate},
+        m_hierarchical_pm_field_version, endpoint);
+  }
+
+  // Transactional rollback restore (frozen layout): row-aligned copy of the
+  // cycle-opening endpoint, then the force-history metadata re-stamped at
+  // the restored (advanced) source generation. Every precondition, including
+  // the extents of the per-row metadata lanes, is checked before the first
+  // write, so a refusal changes nothing. No ID map, no allocation.
+  void validateTransactionalForceEndpoint(
+      const TransactionalForceEndpoint& endpoint, const core::SimulationState& state,
+      std::uint64_t layout_certificate) const override {
+    const std::size_t n = state.particles.size();
+    if (state.cells.size() != 0U || !m_cell_accel_x.empty() || !m_cell_force_cache_valid.empty()) {
+      throw std::logic_error("transactional force endpoint restore refused: gas cells present (hierarchical KDK is DMO-only)");
+    }
+    if (m_particle_force_cache_valid.size() != n || m_hierarchical_force_generation.size() != n) {
+      throw std::logic_error("transactional force endpoint restore refused: per-row force metadata does not cover every particle row");
+    }
+    internal::validateRowAlignedForceEndpoint(
+        endpoint,
+        internal::RowAlignedEndpointStamp{
+            .particle_count = static_cast<std::uint64_t>(n),
+            .particle_index_generation = state.particleIndexGeneration(),
+            .layout_certificate = layout_certificate},
+        internal::ConstForceEndpointLanes{
+            .total_x = m_particle_accel_x, .total_y = m_particle_accel_y, .total_z = m_particle_accel_z,
+            .tree_x = m_hierarchical_tree_x, .tree_y = m_hierarchical_tree_y, .tree_z = m_hierarchical_tree_z,
+            .pm_x = m_hierarchical_pm_x, .pm_y = m_hierarchical_pm_y, .pm_z = m_hierarchical_pm_z,
+            .nearest_pair_r2 = m_hierarchical_nearest_r2});
+  }
+
+  void restoreTransactionalForceEndpoint(
+      const TransactionalForceEndpoint& endpoint, const core::SimulationState& state,
+      std::uint64_t layout_certificate) {
+    validateTransactionalForceEndpoint(endpoint, state, layout_certificate);
+    internal::restoreForceEndpointRowAligned(
+        endpoint,
+        internal::RowAlignedEndpointStamp{
+            .particle_count = static_cast<std::uint64_t>(state.particles.size()),
+            .particle_index_generation = state.particleIndexGeneration(),
+            .layout_certificate = layout_certificate},
+        forceEndpointLanes());
+    const std::uint64_t generation = state.gravitySourceGeneration();
+    std::fill(m_particle_force_cache_valid.begin(), m_particle_force_cache_valid.end(), std::uint8_t{1U});
+    std::fill(m_hierarchical_force_generation.begin(), m_hierarchical_force_generation.end(), generation);
+    m_force_cache_valid = true;
+    m_force_cache_particle_index_generation = state.particleIndexGeneration();
+    m_force_cache_cell_index_generation = state.cellIndexGeneration();
+    m_force_cache_gas_identity_generation = state.gasCellIdentityGeneration();
+    m_force_cache_source_generation = generation;
+    m_hierarchical_pm_source_generation = generation;
+    m_hierarchical_pm_field_version = endpoint.pm_field_version;
   }
 
   [[nodiscard]] static PmSyncSurface toPmSyncSurface(core::IntegrationStage stage) {

@@ -368,6 +368,23 @@ than assuming write-time row order. A missing, duplicate, zero, or non-covering 
 identity lane is rejected. This is required because dense row is transient storage position,
 not physical identity.
 
+**Ordinary import versus transactional restore (2026-10-27).** These are two
+deliberately separate paths:
+
+* **Restart import.** It keeps the stable-ID remap described above
+  (`internal::remapForceEndpointById`, shared with the unit test that
+  compares both paths). Its behavior and messages are unchanged, and it
+  validates fully before writing particle rows.
+* **Multirate PM-cycle rollback.** It never goes through the restart
+  importer. Inside a cycle the particle layout is frozen, so the cycle-opening
+  endpoint is restored row by row from a `TransactionalForceEndpoint`, with no
+  ID lane, no hash map and no allocation. The restore is accepted only when
+  the particle count, the particle-index generation and the identity/layout
+  certificate all match, on every rank (collective validation before any
+  write).
+
+Neither path is persisted, so there is no schema change.
+
 The HDF5 workflow-equivalence test covers a checkpoint boundary at which gas-cell rows are
 intentionally reordered before resume. It proves the exercised local workflow path, not
 multi-rank migration/repartition restart. Validation posture remains: CI guards;

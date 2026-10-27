@@ -634,6 +634,7 @@ void appendParticleRecord(
   state.particles.velocity_y_peculiar[particle_index] = record.vy;
   state.particles.velocity_z_peculiar[particle_index] = record.vz;
   state.particles.mass_code[particle_index] = record.mass;
+  state.notifyParticleMassMutation();
   state.particles.time_bin[particle_index] = 0U;
   state.particle_sidecar.particle_id[particle_index] = record.id;
   state.particle_sidecar.species_tag[particle_index] = record.species;

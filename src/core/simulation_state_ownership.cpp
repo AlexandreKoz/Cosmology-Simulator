@@ -293,6 +293,14 @@ std::uint64_t SimulationState::particleIndexGeneration() const noexcept {
   return m_particle_index_generation;
 }
 
+std::uint64_t SimulationState::particleMassGeneration() const noexcept {
+  return m_particle_mass_generation;
+}
+
+void SimulationState::notifyParticleMassMutation() noexcept {
+  ++m_particle_mass_generation;
+}
+
 std::uint64_t SimulationState::cellIndexGeneration() const noexcept {
   return m_cell_index_generation;
 }
@@ -308,6 +316,7 @@ void SimulationState::bumpGravitySourceGeneration() noexcept {
 }
 
 void SimulationState::bumpParticleIndexGeneration() noexcept {
+  ++m_particle_mass_generation;  // any dense-row change may move masses between rows
   ++m_particle_index_generation;
 }
 

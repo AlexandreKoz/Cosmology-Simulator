@@ -1126,6 +1126,7 @@ StarFormationStepReport StarFormationModel::applyFromInputs(
       state.particles.velocity_y_peculiar[particle_index] = plan.parent_velocity_y_peculiar;
       state.particles.velocity_z_peculiar[particle_index] = plan.parent_velocity_z_peculiar;
       state.particles.mass_code[particle_index] = per_particle_mass;
+      state.notifyParticleMassMutation();
       state.particles.time_bin[particle_index] = 0U;
       state.particle_sidecar.particle_id[particle_index] = new_particle_ids[append_offset];
       state.particle_sidecar.sfc_key[particle_index] = new_particle_ids[append_offset];

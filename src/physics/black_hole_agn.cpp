@@ -380,6 +380,7 @@ BlackHoleAgnStepReport BlackHoleAgnModel::apply(
     state.particles.velocity_y_peculiar[particle_index] = state.gas_cells.velocity_y_peculiar[cell_index];
     state.particles.velocity_z_peculiar[particle_index] = state.gas_cells.velocity_z_peculiar[cell_index];
     state.particles.mass_code[particle_index] = m_config.seed_mass_code;
+    state.notifyParticleMassMutation();
     state.particle_sidecar.particle_id[particle_index] = seeded_ids[seed_index];
     state.particle_sidecar.sfc_key[particle_index] = seeded_ids[seed_index];
     state.particle_sidecar.species_tag[particle_index] =

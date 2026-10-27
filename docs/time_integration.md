@@ -649,6 +649,38 @@ incremented.
 
 The reference (non-multirate) path keeps its unchanged end-boundary clip.
 
+**Scheduler-preparation caches (2026-10-27; all hierarchical segments,
+reference and multirate).** Two values are cached. They hold only derived
+data, a hit costs O(1) key comparisons, and the results are bitwise identical
+to the uncached path. The test seam
+`ReferenceWorkflowOptions::hierarchical_test_disable_preparation_caches`
+provides the uncached reference.
+
+* **Identity row list `0..N-1`.** This is the all-active index lane, held in
+  the segment workspace's scratch arena.
+  * Key: the row count, `particleIndexGeneration()`, and the scratch span
+    (pointer and extent).
+  * Invalidated by reorder, resize, compaction, migration commit, population
+    replacement, or any foreign re-preparation of the scratch.
+  * Not invalidated by drifts, kicks or rollbacks, because they do not change
+    row identity.
+  * On a miss the arena is reset before rebuilding. This also fixes a
+    defect: every block used to allocate a new `4N`-byte list in a
+    never-reset arena.
+* **Local maximum particle mass** (encounter criterion).
+  * Key: the row count, `SimulationState::particleMassGeneration()`, and the
+    mass-lane address.
+  * `particleMassGeneration()` advances with every dense-row change and with
+    every in-place mass write. Writers must call
+    `notifyParticleMassMutation()`; the star formation, black hole, tracer,
+    gas-parent, ghost, view-scatter, IC-stream and Python-binding writers do.
+  * The global maximum is still reduced every block, so the collective count
+    is unchanged.
+
+Counters (accepted and rejected blocks alike, i.e. execution cost):
+`hierarchical_identity_row_{rebuilds,reuses}` and
+`hierarchical_mass_max_{scans,reuses}`.
+
 ### 4. Timestep invariants (enforced)
 
 1. **Particle criteria are never violated.** Every block's quantum is
@@ -704,24 +736,60 @@ collectively on every rank:
   No rank is left inside a collective.
 
 **Rollback point.** The rollback point is a segment-lifetime governed store
-(`time.multirate_cycle_rollback_snapshot`, about 160 B/particle). Its lane
-capacity and its reservation are reused by successive cycles and retries. The
-reservation grows only when `N` grows, and the old grant is released first.
-Everything is released at segment end, and also on failure through an RAII
-guard. A locally refused rank releases its storage immediately. The store
-holds:
+(`time.multirate_cycle_rollback_snapshot`). Its memory model (2026-10-27) is
+derived from the buffers' element types:
 
-* the six phase-space lanes and the SFC-key lane;
-* `StateMetadata` and the common drift epoch;
-* `IntegratorState`;
-* both schedulers' persistent states;
-* the pending output boundary;
-* the synchronized force endpoint: total, Tree and PM components, the
-  nearest-pair lane and the PM field version. IDs are stored only if the
-  cache order differs from the state order.
+| Buffer | Element | Rows | Bytes/row |
+| --- | --- | --- | --- |
+| positions x/y/z, velocities x/y/z | `double` | particles | 48 |
+| SFC key | `uint64` | particles (when materialized) | 8 |
+| force endpoint: total, Tree and PM x/y/z, nearest pair r² | `double` | particles | 80 |
+| particle scheduler: bin, next activation, active, pending | `u8`, `u64`, `u8`, `u8` | particles | 11 |
+| cell scheduler (same lanes) | — | gas cells (0 for DMO) | 11 |
+
+That is **147 B per particle** (139 B without a materialized SFC key), plus a
+fixed part: the `StateMetadata` string capacities and a conservative
+allocator allowance of 64 B for each of the 25 owned vectors.
+`IntegratorState`, the drift epoch and the pending output are fixed-size
+members of the store.
+
+Allocation, admission and release:
+
+* **Steady state.** When the retained capacities cover the current extents
+  and a reservation exists, a capture allocates nothing. It writes into the
+  existing capacity, and the schedulers export into it through
+  `exportPersistentStateInto`.
+* **Growth** (the first capture, or larger extents):
+  1. Release the old storage and its reservation first, so old and new
+     allocations never overlap.
+  2. Reserve the exact fresh-storage bytes.
+  3. Only then allocate (`reserve` per lane).
+  4. If the allocator retains more than requested, grow the reservation; the
+     new grant is held before the old one is dropped (transient over-count,
+     never under-count).
+* **Refusal.** A governor refusal or `std::bad_alloc` on a rank releases that
+  rank's storage. The collective vote then picks the same branch on every
+  rank. A rank that admitted while a peer refused keeps its governed
+  allocation for the next opening.
+* **Release.** Everything is released at segment end, and also on failure
+  through an RAII guard.
+* **Reported.**
+  * `multirate_rollback_snapshot_peak_bytes`: the reservation peak.
+  * `…_peak_capacity_bytes`: the retained-capacity peak. It is always ≤ the
+    reservation peak.
+  * `…_allocations`: the number of fresh allocations, which is 1 when
+    capacity is reused across cycles and retries.
+  * `…_retained_bytes`: 0 after the segment.
+* **Limit of the model.** It accounts for buffer capacity, not process RSS.
+  Allocator headers beyond the 64 B allowance and heap fragmentation are not
+  bounded exactly.
+
+The force endpoint is a row-aligned `TransactionalForceEndpoint`. It holds no
+ID lane: rows follow the state row order at capture.
 
 Everything else a cycle must not change is covered by an FNV-1a fingerprint
-(word-wise) taken at the opening:
+(word-wise) taken at the opening, which also serves as the endpoint's
+row-identity certificate:
 
 * identity, mass, species, flags and rank;
 * softening and its mask;
@@ -730,24 +798,37 @@ Everything else a cycle must not change is covered by an FNV-1a fingerprint
 
 If the fingerprint differs at rollback, the rollback fails closed.
 
-**Rollback sequence.** On every rank:
+**Rollback sequence.** It runs in two collective phases, so nothing is
+restored on any rank unless every rank can restore.
 
-1. Verify the fingerprint, then restore the authoritative lanes and records.
-2. Advance the gravity source generation strictly beyond every generation the
-   attempt used.
-3. Call `GravityRuntime::rollbackCycleTransaction`. It:
-   * moves the journal (PM refresh/reuse counts, cadence records) to the
-     rejected-attempt totals;
-   * forces a full tree build on the next solve
-     (`TreePmCoordinator::invalidateSourceHistoryForRollback`: built tree,
-     identical-source reuse and refit candidates, topology-keyed order and
-     leaf maps);
-   * invalidates the particle ghost layer and the borrowed-source
-     certificates;
-   * re-imports the opening endpoint (force cache, per-row validity,
-     Tree/PM split, nearest pair) stamped with the new generation.
-4. Set `integrator.pm_source_generation`, resynchronize the time-bin mirrors,
-   reinstall the domain geometry and reconcile memory.
+1. **Validation (read-only).** Each rank:
+   * recomputes the fingerprint and checks the extents;
+   * calls `GravityRuntime::validateTransactionalForceEndpoint`. This checks
+     the particle count, the particle-index generation, the certificate, every
+     endpoint and runtime lane extent and the per-row metadata extents, with
+     no per-row scan.
+
+   The verdict is agreed collectively; a refusal on any rank fails every rank
+   with nothing restored.
+2. **Restore.**
+   1. Copy the authoritative lanes back. The extents are equal, so this
+      allocates nothing.
+   2. Advance the gravity source generation strictly beyond every generation
+      the attempt used.
+   3. Call `GravityRuntime::rollbackCycleTransaction`. It:
+      * restores the endpoint **row-aligned**: no ID hash map, no allocation,
+        all preconditions checked before the first write. The ordinary
+        restart importer still remaps by stable ID, because a checkpoint may
+        come from a different row order, and both use
+        `internal::remapForceEndpointById` / `restoreForceEndpointRowAligned`;
+      * re-stamps the force cache and per-row hierarchical force generations
+        at the new source generation;
+      * moves the journal to the rejected-attempt totals;
+      * forces a full tree build on the next solve;
+      * invalidates the particle ghost layer and the borrowed-source
+        certificates.
+   4. Set `integrator.pm_source_generation`, resynchronize the time-bin
+      mirrors, reinstall the domain geometry and reconcile memory.
 
 **Retained derived caches, and why they stay valid.**
 

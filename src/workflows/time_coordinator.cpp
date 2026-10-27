@@ -21,6 +21,7 @@
 
 #include "cosmosim/amr/amr_hydro_orchestrator.hpp"
 #include "cosmosim/core/constants.hpp"
+#include "cosmosim/core/checked_arithmetic.hpp"
 #include "cosmosim/core/memory_governor.hpp"
 #include "cosmosim/core/retained_capacity_transaction.hpp"
 #include "cosmosim/core/profiling.hpp"
@@ -1496,6 +1497,18 @@ void TimeCoordinator::runHierarchicalSegment(
   // its governed reservation is grown (never re-reserved per cycle) so
   // successive cycles reuse one allocation; both are released at segment end.
   struct MultirateRollbackStore {
+    // Memory model (docs/time_integration.md §5): every buffer below is owned
+    // here and covered by `reservation`, sized from the actual retained
+    // capacities (not a fixed per-particle constant).
+    //   per particle row: 6 phase lanes (8 B) + 10 endpoint lanes (8 B)
+    //                     + scheduler bin/next/active/pending (1+8+1+1 B)
+    //   per SFC-key row:  8 B; per gas-cell scheduler row: 11 B (0 for DMO)
+    //   fixed: StateMetadata string capacities + a conservative allocator
+    //          overhead of k_allocation_overhead_bytes per vector.
+    static constexpr std::uint64_t k_scheduler_row_bytes =
+        sizeof(std::uint8_t) + sizeof(std::uint64_t) + sizeof(std::uint8_t) + sizeof(std::uint8_t);
+    static constexpr std::uint64_t k_vector_count = 7U + TransactionalForceEndpoint::k_lane_count + 8U;
+    static constexpr std::uint64_t k_allocation_overhead_bytes = 64U;
     std::vector<double> position_x_comoving;
     std::vector<double> position_y_comoving;
     std::vector<double> position_z_comoving;
@@ -1510,14 +1523,87 @@ void TimeCoordinator::runHierarchicalSegment(
     core::IntegratorState integrator{};
     core::TimeBinPersistentState particle_scheduler{};
     core::TimeBinPersistentState cell_scheduler{};
-    // Endpoint force; particle_id is left empty when the cache rows follow
-    // the state row order (refilled from the frozen identity lane).
-    io::GravityForceCachePersistentState force_cache{};
+    // Row-aligned cycle-opening force endpoint (restored without ID remap).
+    TransactionalForceEndpoint force_endpoint{};
     internal::PendingOutputBoundary pending{};
     bool armed = false;  // holds the rollback point of the open cycle
     core::MemoryReservation reservation;
     std::uint64_t reserved_bytes = 0U;
     std::uint64_t peak_reserved_bytes = 0U;
+    std::uint64_t peak_retained_capacity_bytes = 0U;
+    std::uint64_t growths = 0U;
+
+    [[nodiscard]] static std::uint64_t schedulerCapacityBytes(const core::TimeBinPersistentState& scheduler) noexcept {
+      return static_cast<std::uint64_t>(scheduler.bin_index.capacity()) +
+          static_cast<std::uint64_t>(scheduler.next_activation_tick.capacity()) * sizeof(std::uint64_t) +
+          static_cast<std::uint64_t>(scheduler.active_flag.capacity()) +
+          static_cast<std::uint64_t>(scheduler.pending_bin_index.capacity());
+    }
+    [[nodiscard]] static std::uint64_t metadataBytes(const core::StateMetadata& value) noexcept {
+      std::uint64_t bytes = 0U;
+      for (const auto* text : {&value.run_name, &value.normalized_config_hash_hex, &value.snapshot_stem,
+                               &value.restart_stem}) {
+        bytes += static_cast<std::uint64_t>(text->capacity()) + 1U;
+      }
+      return bytes;
+    }
+    // Bytes actually retained by every owned buffer (+ overhead allowance).
+    [[nodiscard]] std::uint64_t retainedCapacityBytes() const noexcept {
+      std::uint64_t bytes = k_vector_count * k_allocation_overhead_bytes + metadataBytes(metadata);
+      for (const auto* lane : {&position_x_comoving, &position_y_comoving, &position_z_comoving,
+                               &velocity_x_peculiar, &velocity_y_peculiar, &velocity_z_peculiar}) {
+        bytes += static_cast<std::uint64_t>(lane->capacity()) * sizeof(double);
+      }
+      bytes += static_cast<std::uint64_t>(sfc_key.capacity()) * sizeof(std::uint64_t);
+      bytes += force_endpoint.retainedCapacityBytes();
+      bytes += schedulerCapacityBytes(particle_scheduler) + schedulerCapacityBytes(cell_scheduler);
+      return bytes;
+    }
+    // Governed bytes needed for fresh storage of the given extents (checked).
+    [[nodiscard]] static std::uint64_t requiredBytes(
+        std::size_t rows, std::size_t sfc_rows, std::size_t cell_rows, const core::StateMetadata& next_metadata) {
+      const std::uint64_t per_row = 6U * sizeof(double) +
+          TransactionalForceEndpoint::k_lane_count * sizeof(double) + k_scheduler_row_bytes;
+      std::uint64_t bytes = core::checkedSizeMultiply(
+          static_cast<std::uint64_t>(rows), per_row, "multirate rollback snapshot particle bytes");
+      bytes = core::checkedMemoryBytesAdd(bytes, core::checkedSizeMultiply(
+          static_cast<std::uint64_t>(sfc_rows), sizeof(std::uint64_t), "multirate rollback snapshot SFC bytes"),
+          "multirate rollback snapshot bytes");
+      bytes = core::checkedMemoryBytesAdd(bytes, core::checkedSizeMultiply(
+          static_cast<std::uint64_t>(cell_rows), k_scheduler_row_bytes, "multirate rollback snapshot cell bytes"),
+          "multirate rollback snapshot bytes");
+      return core::checkedMemoryBytesAdd(bytes,
+          k_vector_count * k_allocation_overhead_bytes + metadataBytes(next_metadata),
+          "multirate rollback snapshot bytes");
+    }
+    // True when a capture of these extents allocates nothing.
+    [[nodiscard]] bool coversRows(std::size_t rows, std::size_t sfc_rows, std::size_t cell_rows) const noexcept {
+      for (const auto* lane : {&position_x_comoving, &position_y_comoving, &position_z_comoving,
+                               &velocity_x_peculiar, &velocity_y_peculiar, &velocity_z_peculiar}) {
+        if (lane->capacity() < rows) return false;
+      }
+      const auto scheduler_covers = [](const core::TimeBinPersistentState& scheduler, std::size_t count) {
+        return scheduler.bin_index.capacity() >= count && scheduler.next_activation_tick.capacity() >= count &&
+            scheduler.active_flag.capacity() >= count && scheduler.pending_bin_index.capacity() >= count;
+      };
+      return sfc_key.capacity() >= sfc_rows && force_endpoint.minimumLaneCapacity() >= rows &&
+          scheduler_covers(particle_scheduler, rows) && scheduler_covers(cell_scheduler, cell_rows);
+    }
+    // Allocates every lane to the given extents (after governor admission).
+    void reserveRows(std::size_t rows, std::size_t sfc_rows, std::size_t cell_rows) {
+      for (auto* lane : {&position_x_comoving, &position_y_comoving, &position_z_comoving,
+                         &velocity_x_peculiar, &velocity_y_peculiar, &velocity_z_peculiar}) {
+        lane->reserve(rows);
+      }
+      sfc_key.reserve(sfc_rows);
+      force_endpoint.reserveRows(rows);
+      for (auto [scheduler, count] : {std::pair{&particle_scheduler, rows}, std::pair{&cell_scheduler, cell_rows}}) {
+        scheduler->bin_index.reserve(count);
+        scheduler->next_activation_tick.reserve(count);
+        scheduler->active_flag.reserve(count);
+        scheduler->pending_bin_index.reserve(count);
+      }
+    }
     void releaseStorage() noexcept {
       armed = false;
       for (auto* lane : {&position_x_comoving, &position_y_comoving, &position_z_comoving,
@@ -1525,9 +1611,10 @@ void TimeCoordinator::runHierarchicalSegment(
         std::vector<double>().swap(*lane);
       }
       std::vector<std::uint64_t>().swap(sfc_key);
-      force_cache = io::GravityForceCachePersistentState{};
+      force_endpoint.release();
       particle_scheduler = core::TimeBinPersistentState{};
       cell_scheduler = core::TimeBinPersistentState{};
+      metadata = core::StateMetadata{};
       reservation.release();
       reserved_bytes = 0U;
     }
@@ -1564,6 +1651,38 @@ void TimeCoordinator::runHierarchicalSegment(
                 options.multirate_test_snapshot_refusal_ranks.end(),
                 m_services.mpi_context.worldRank()) != options.multirate_test_snapshot_refusal_ranks.end();
   core::HierarchicalPmCyclePlan pm_cycle_plan{};
+  // Hierarchical scheduler-preparation caches (2026-10-27). Both hold only
+  // derived values and are rebuilt from authoritative state on any miss; a
+  // hit performs O(1) key comparisons, never an O(N) validation scan.
+  // * Identity row list 0..N-1 (the all-active source/target index lane) in
+  //   the segment workspace's scratch arena. Key: row count,
+  //   SimulationState::particleIndexGeneration() (advanced by every reorder,
+  //   resize, compaction, migration commit and population replacement) and
+  //   the scratch span itself (data pointer and extent, so a foreign
+  //   re-preparation is detected). Force/source generations are not part of
+  //   the key: drifting, kicking or rolling back positions never changes row
+  //   identity. The arena is reset before a rebuild: the identity list is its
+  //   only allocation in this segment, so it stays bounded by one N-row list
+  //   (previously every block allocated a fresh list without a reset, so the
+  //   arena grew by 4N bytes per block).
+  // * Local maximum particle mass (encounter criterion). Key: row count,
+  //   SimulationState::particleMassGeneration() (advanced by every dense-row
+  //   change and every in-place mass write) and the mass lane address. The
+  //   global maximum is still reduced every block (one collective, as before),
+  //   so ranks with and without a local hit stay in lock step.
+  struct IdentityRowCache {
+    bool valid = false;
+    std::size_t rows = 0U;
+    std::uint64_t particle_index_generation = 0U;
+    const std::uint32_t* data = nullptr;
+  } identity_rows;
+  struct LocalMassMaxCache {
+    bool valid = false;
+    std::size_t rows = 0U;
+    std::uint64_t particle_mass_generation = 0U;
+    const double* data = nullptr;
+    double value = 0.0;
+  } local_mass_max_cache;
   if (multirate_pm && !integrator.last_completed_restart_safe && integrator.step_index > 0U) {
     throw std::logic_error("multirate PM cycle must open at a restart-safe synchronization boundary");
   }
@@ -1610,6 +1729,18 @@ void TimeCoordinator::runHierarchicalSegment(
   // refusal or allocation failure, both reduced collectively before any rank
   // advances): the caller then applies the configured memory policy. Any
   // other failure is collective and fatal.
+  //
+  // Admission and allocation order (no undercounted peak, no old/new overlap):
+  // 1. Steady state (existing capacity covers the extents and a reservation
+  //    exists): nothing is allocated; the capture writes into retained
+  //    capacity that the reservation already covers.
+  // 2. Growth: the old storage and its reservation are released FIRST, the
+  //    governor is asked for the exact fresh-storage bytes, and only then are
+  //    the lanes allocated; if the allocator retains more than requested, the
+  //    reservation is grown with the new grant taken before the old one is
+  //    dropped (transient over-count, never under-count).
+  // 3. Any refusal (governor or std::bad_alloc) releases the storage on that
+  //    rank; the collective vote then makes every rank fall back or fail.
   const auto take_cycle_snapshot = [&]() -> bool {
     std::exception_ptr failure;
     bool admitted_local = true;
@@ -1622,28 +1753,32 @@ void TimeCoordinator::runHierarchicalSegment(
         throw std::logic_error("multirate PM cycle rollback requires homogeneous DMO particle metadata");
       }
       const bool simulated_refusal = snapshot_refusals_remaining > 0U && snapshot_refusal_this_rank;
-      const std::uint64_t n = static_cast<std::uint64_t>(state.particles.size());
-      // Governed: 6 phase-space lanes + SFC key, the force endpoint (total,
-      // Tree and PM vectors + nearest pair = 10 doubles, ids only when the
-      // cache order differs) and both schedulers' persistent lanes.
-      const std::uint64_t bytes = core::checkedSizeMultiply(
-          n, 17U * sizeof(double) + 3U * sizeof(std::uint64_t), "multirate rollback snapshot bytes");
-      if (simulated_refusal && options.multirate_test_snapshot_allocation_failure) throw std::bad_alloc();
-      if (simulated_refusal) {
+      const std::size_t rows = state.particles.size();
+      const std::size_t sfc_rows = state.particle_sidecar.sfc_key.size();
+      const std::size_t cell_rows = static_cast<std::size_t>(cells.elementCount());
+      const bool governed = m_services.memory_governor != nullptr;
+      if (simulated_refusal && !options.multirate_test_snapshot_allocation_failure) {
         admitted_local = false;
-      } else if (m_services.memory_governor != nullptr && bytes > store.reserved_bytes) {
-        // Grow the governed reservation (released first so the old and new
-        // grants are never double counted).
-        store.reservation.release();
-        store.reserved_bytes = 0U;
-        try {
-          store.reservation = m_services.memory_governor->reserve(
-              core::MemoryClass::kPhaseResident, bytes, "time.multirate_cycle_rollback_snapshot");
-          store.reservation.commit();
-          store.reserved_bytes = bytes;
-          store.peak_reserved_bytes = std::max(store.peak_reserved_bytes, bytes);
-        } catch (const core::MemoryAdmissionError&) {
-          admitted_local = false;
+      } else if (simulated_refusal || !store.coversRows(rows, sfc_rows, cell_rows) ||
+                 (governed && store.reserved_bytes == 0U)) {
+        store.releaseStorage();
+        const std::uint64_t bytes =
+            MultirateRollbackStore::requiredBytes(rows, sfc_rows, cell_rows, state.metadata);
+        if (governed) {
+          try {
+            store.reservation = m_services.memory_governor->reserve(
+                core::MemoryClass::kPhaseResident, bytes, "time.multirate_cycle_rollback_snapshot");
+            store.reservation.commit();
+            store.reserved_bytes = bytes;
+          } catch (const core::MemoryAdmissionError&) {
+            admitted_local = false;
+          }
+        }
+        if (admitted_local) {
+          // Test seam: an allocation failure after a granted reservation.
+          if (simulated_refusal) throw std::bad_alloc();
+          store.reserveRows(rows, sfc_rows, cell_rows);
+          ++store.growths;
         }
       }
       if (admitted_local) {
@@ -1660,51 +1795,37 @@ void TimeCoordinator::runHierarchicalSegment(
         store.drift_scale_factor = state.homogeneousDmoLastDriftScaleFactor();
         store.frozen_fingerprint = frozen_state_fingerprint();
         store.integrator = integrator;
-        store.particle_scheduler = particles.exportPersistentState();
-        store.cell_scheduler = cells.exportPersistentState();
+        particles.exportPersistentStateInto(store.particle_scheduler);
+        cells.exportPersistentStateInto(store.cell_scheduler);
         store.pending = pending;
-        const io::GravityForceCachePersistentView view = m_gravity.restartForceCacheView(state);
-        if (!view.valid || !view.hierarchical_endpoint_valid) {
-          throw std::logic_error("multirate PM cycle opening lacks a complete synchronized force endpoint");
+        m_gravity.captureTransactionalForceEndpoint(state, store.frozen_fingerprint, store.force_endpoint);
+        // Reconcile the reservation with what is actually retained (allocator
+        // rounding, metadata strings): grow, never shrink below capacity.
+        const std::uint64_t retained = store.retainedCapacityBytes();
+        if (governed && retained > store.reserved_bytes) {
+          try {
+            auto grown = m_services.memory_governor->reserve(
+                core::MemoryClass::kPhaseResident, retained, "time.multirate_cycle_rollback_snapshot");
+            grown.commit();
+            store.reservation = std::move(grown);  // new grant held before the old is released
+            store.reserved_bytes = retained;
+          } catch (const core::MemoryAdmissionError&) {
+            admitted_local = false;
+          }
         }
-        auto& cache = store.force_cache;
-        cache.valid = true;
-        const auto& ids = state.particle_sidecar.particle_id;
-        if (view.particle_id.size() != ids.size() ||
-            !std::equal(view.particle_id.begin(), view.particle_id.end(), ids.begin())) {
-          cache.particle_id.assign(view.particle_id.begin(), view.particle_id.end());
-        } else {
-          cache.particle_id.clear();
-        }
-        cache.gas_cell_id.assign(view.gas_cell_id.begin(), view.gas_cell_id.end());
-        copy(view.particle_accel_x_comoving, cache.particle_accel_x_comoving);
-        copy(view.particle_accel_y_comoving, cache.particle_accel_y_comoving);
-        copy(view.particle_accel_z_comoving, cache.particle_accel_z_comoving);
-        copy(view.cell_accel_x_comoving, cache.cell_accel_x_comoving);
-        copy(view.cell_accel_y_comoving, cache.cell_accel_y_comoving);
-        copy(view.cell_accel_z_comoving, cache.cell_accel_z_comoving);
-        cache.hierarchical_endpoint_valid = true;
-        cache.hierarchical_pm_field_version = view.hierarchical_pm_field_version;
-        copy(view.hierarchical_tree_accel_x_comoving, cache.hierarchical_tree_accel_x_comoving);
-        copy(view.hierarchical_tree_accel_y_comoving, cache.hierarchical_tree_accel_y_comoving);
-        copy(view.hierarchical_tree_accel_z_comoving, cache.hierarchical_tree_accel_z_comoving);
-        copy(view.hierarchical_pm_accel_x_comoving, cache.hierarchical_pm_accel_x_comoving);
-        copy(view.hierarchical_pm_accel_y_comoving, cache.hierarchical_pm_accel_y_comoving);
-        copy(view.hierarchical_pm_accel_z_comoving, cache.hierarchical_pm_accel_z_comoving);
-        copy(view.hierarchical_nearest_pair_r2_comoving, cache.hierarchical_nearest_pair_r2_comoving);
+        store.peak_reserved_bytes = std::max(store.peak_reserved_bytes, store.reserved_bytes);
+        store.peak_retained_capacity_bytes = std::max(store.peak_retained_capacity_bytes, retained);
       }
     } catch (const std::bad_alloc&) {
       // Allocation failure of the snapshot lanes is an admission refusal,
       // not a fatal error: drop the partial copy and its capacity.
       admitted_local = false;
-      store.releaseStorage();
     } catch (...) { failure = std::current_exception(); }
+    // A locally refused rank holds no rollback storage at all (reservation
+    // and retained capacity go together, so the governor never under-counts).
+    if (!admitted_local) store.releaseStorage();
     FailureCoordinator(m_services).rethrowCollectiveFailure(failure, "multirate PM cycle snapshot");
     // Collective admission: every rank opens the same cycle shape.
-    // A locally refused rank holds no rollback storage at all (the released
-    // reservation and the retained lane capacity go together, so the
-    // governor never under-counts resident snapshot memory).
-    if (!admitted_local) store.releaseStorage();
     const bool admitted = mpi.allreduceMinUint64(admitted_local ? 1U : 0U) == 1U;
     if (snapshot_refusals_remaining > 0U) --snapshot_refusals_remaining;
     if (!admitted) {
@@ -1720,28 +1841,50 @@ void TimeCoordinator::runHierarchicalSegment(
     return true;
   };
   // Transactional rollback to the cycle opening. Every rank executes it (the
-  // decision derives from globally reduced criteria). The source generation
-  // is advanced strictly beyond every generation used by the rejected attempt
-  // so no generation-keyed consumer can mistake retried positions for
-  // rejected ones; GravityRuntime::rollbackCycleTransaction additionally
-  // drops every source-history-dependent derived gravity state explicitly
-  // and re-imports the opening endpoint force stamped with the new
-  // generation. Diagnostics of the rejected attempt move to execution cost.
+  // decision derives from globally reduced criteria). Order:
+  // 1. Verify the frozen identity/layout certificate (fingerprint of the ID
+  //    lane and every frozen lane) and the row count: row identity is proven,
+  //    not assumed from a matching count.
+  // 2. Restore the authoritative lanes and records (no allocation: equal
+  //    extents), advance the gravity source generation strictly beyond every
+  //    generation the rejected attempt used.
+  // 3. GravityRuntime::rollbackCycleTransaction restores the opening endpoint
+  //    ROW-ALIGNED (no ID hash map, no allocation; refusal is checked before
+  //    any write), moves the attempt's diagnostics to execution cost and drops
+  //    every source-history-dependent derived gravity state.
+  // A failure at any step on any rank fails every rank (FailureCoordinator).
   const auto rollback_cycle = [&]() {
-    std::exception_ptr failure;
     auto& store = rollback_store;
+    // Phase 1 (read-only, every rank): prove row identity and every restore
+    // precondition, then agree collectively. A refusal on ANY rank fails the
+    // run on EVERY rank before any rank has restored anything.
+    std::exception_ptr validation_failure;
+    std::uint64_t layout_certificate = 0U;
     try {
       if (options.multirate_test_rollback_failure_rank == m_services.mpi_context.worldRank()) {
-        throw std::runtime_error("injected multirate PM cycle rollback failure (test seam)");
+        // Test seam: break the row-identity proof on this rank only, so the
+        // production row-aligned validation refuses the restore here while
+        // every peer would accept it.
+        store.force_endpoint.layout_certificate ^= 1U;
       }
       if (!store.armed || !m_gravity.cycleTransactionOpen()) {
         throw std::logic_error("multirate PM cycle rollback requested without an armed rollback point");
       }
+      layout_certificate = frozen_state_fingerprint();
       if (state.particles.size() != store.position_x_comoving.size() ||
-          frozen_state_fingerprint() != store.frozen_fingerprint) {
+          state.particle_sidecar.sfc_key.size() != store.sfc_key.size() ||
+          layout_certificate != store.frozen_fingerprint) {
         throw std::logic_error(
             "multirate PM cycle rollback: state outside the rollback lanes changed inside the cycle");
       }
+      m_gravity.validateTransactionalForceEndpoint(store.force_endpoint, state, layout_certificate);
+    } catch (...) { validation_failure = std::current_exception(); }
+    FailureCoordinator(m_services).rethrowCollectiveFailure(validation_failure, "multirate PM cycle rollback validation");
+    // Phase 2 (every rank validated): restore. The lane copies cannot fail;
+    // the remaining calls re-check their own preconditions and any failure
+    // is again collective.
+    std::exception_ptr failure;
+    try {
       const std::uint64_t generation_reached = state.gravitySourceGeneration();
       const auto restore = [](const auto& saved, auto& lane) { std::copy(saved.begin(), saved.end(), lane.begin()); };
       restore(store.position_x_comoving, state.particles.position_x_comoving);
@@ -1750,7 +1893,7 @@ void TimeCoordinator::runHierarchicalSegment(
       restore(store.velocity_x_peculiar, state.particles.velocity_x_peculiar);
       restore(store.velocity_y_peculiar, state.particles.velocity_y_peculiar);
       restore(store.velocity_z_peculiar, state.particles.velocity_z_peculiar);
-      state.particle_sidecar.sfc_key.assign(store.sfc_key.begin(), store.sfc_key.end());
+      restore(store.sfc_key, state.particle_sidecar.sfc_key);
       state.metadata = store.metadata;
       state.updateAllParticleDriftEpoch(store.drift_time_code, store.drift_scale_factor);
       integrator = store.integrator;
@@ -1758,11 +1901,7 @@ void TimeCoordinator::runHierarchicalSegment(
       cells.importPersistentState(store.cell_scheduler);
       pending = store.pending;
       while (state.gravitySourceGeneration() <= generation_reached) state.bumpGravitySourceGeneration();
-      if (store.force_cache.particle_id.empty()) {
-        store.force_cache.particle_id.assign(state.particle_sidecar.particle_id.begin(),
-                                             state.particle_sidecar.particle_id.end());
-      }
-      m_gravity.rollbackCycleTransaction(store.force_cache, state);
+      m_gravity.rollbackCycleTransaction(store.force_endpoint, state, layout_certificate);
       integrator.pm_source_generation = state.gravitySourceGeneration();
       syncTimeBinsFromSchedulers(particles, cells, state);
       report.multirate_rejected_blocks += pm_cycle.completed_blocks;
@@ -1786,9 +1925,25 @@ void TimeCoordinator::runHierarchicalSegment(
     const double block_a_begin = integrator.current_scale_factor;
     std::exception_ptr preparation_failure;
     try {
-      workspace.prepareGravityParticleIndexScratch(state.particles.size());
-      for (std::size_t row = 0U; row < state.particles.size(); ++row) {
-        workspace.gravity_particle_index_scratch[row] = core::checkedIntegralNarrow<std::uint32_t>(row, "hierarchical identity row");
+      const std::size_t particle_rows = state.particles.size();
+      const bool identity_hit = !options.hierarchical_test_disable_preparation_caches &&
+          identity_rows.valid && identity_rows.rows == particle_rows &&
+          identity_rows.particle_index_generation == state.particleIndexGeneration() &&
+          workspace.gravity_particle_index_scratch.size() == particle_rows &&
+          workspace.gravity_particle_index_scratch.data() == identity_rows.data;
+      if (identity_hit) {
+        ++report.hierarchical_identity_row_reuses;
+      } else {
+        identity_rows.valid = false;
+        workspace.scratch.reset();
+        workspace.prepareGravityParticleIndexScratch(particle_rows);
+        for (std::size_t row = 0U; row < particle_rows; ++row) {
+          workspace.gravity_particle_index_scratch[row] = core::checkedIntegralNarrow<std::uint32_t>(row, "hierarchical identity row");
+        }
+        identity_rows = IdentityRowCache{.valid = true, .rows = particle_rows,
+            .particle_index_generation = state.particleIndexGeneration(),
+            .data = workspace.gravity_particle_index_scratch.data()};
+        ++report.hierarchical_identity_row_rebuilds;
       }
       core::RetainedCapacityTransaction mirror_plan(owned_runtime_bytes);
       mirror_plan.add(state.particles.time_bin, state.particles.size());
@@ -1912,8 +2067,23 @@ void TimeCoordinator::runHierarchicalSegment(
     // m_max, the global maximum particle mass, makes it conservative for
     // unequal masses. Nodes accepted as multipoles are not neighbours here.
     const bool encounter_criterion = config.numerics.hierarchical_encounter_timestep_enabled;
-    double local_mass_max = 0.0;
-    for (const auto row : all_rows) local_mass_max = std::max(local_mass_max, state.particles.mass_code[row]);
+    const std::size_t mass_rows = state.particles.mass_code.size();
+    const bool mass_max_hit = !options.hierarchical_test_disable_preparation_caches &&
+        local_mass_max_cache.valid && local_mass_max_cache.rows == mass_rows &&
+        local_mass_max_cache.particle_mass_generation == state.particleMassGeneration() &&
+        local_mass_max_cache.data == state.particles.mass_code.data();
+    if (!mass_max_hit) {
+      // all_rows is the identity list over every row: scan the whole lane.
+      double scanned = 0.0;
+      for (const double mass : state.particles.mass_code) scanned = std::max(scanned, mass);
+      local_mass_max_cache = LocalMassMaxCache{.valid = true, .rows = mass_rows,
+          .particle_mass_generation = state.particleMassGeneration(),
+          .data = state.particles.mass_code.data(), .value = scanned};
+      ++report.hierarchical_mass_max_scans;
+    } else {
+      ++report.hierarchical_mass_max_reuses;
+    }
+    const double local_mass_max = local_mass_max_cache.value;
     const double mass_max = -mpi.allreduceMinDouble(-local_mass_max);
     const double encounter_g_mass = m_gravity.gravitationalConstantCode() * mass_max;
     const double a_cubed = integrator.current_scale_factor * integrator.current_scale_factor *
@@ -2389,6 +2559,8 @@ void TimeCoordinator::runHierarchicalSegment(
   // Rollback storage: report the governed high-water and release it (the
   // RAII guard also releases it on failure paths).
   report.multirate_rollback_snapshot_peak_bytes = rollback_store.peak_reserved_bytes;
+  report.multirate_rollback_snapshot_peak_capacity_bytes = rollback_store.peak_retained_capacity_bytes;
+  report.multirate_rollback_snapshot_allocations = rollback_store.growths;
   rollback_store.releaseStorage();
   report.multirate_rollback_snapshot_retained_bytes = rollback_store.reserved_bytes;
   report.final_time_code = integrator.current_time_code;
