@@ -1,5 +1,20 @@
 # Repair open issues
 
+20261027 round 5 — source freeze. Engineering code-complete; NOT compiled,
+NOT tested; owner validation required.
+
+* Row-aligned transactional force restore (no O(N) ID hash map, no
+  allocation, collective two-phase validation).
+* Capacity-derived rollback memory governance (147 B/particle model,
+  release-before-grow, reconciled reservation).
+* Identity-row and max-mass scheduler caches. This fixed an unbounded
+  per-block scratch-arena growth, and adds
+  `SimulationState::particleMassGeneration()`.
+* New tests: `unit_gravity_force_endpoint`, `unit_particle_mass_generation`,
+  workflow sections (3), (7), (8), (10), (11).
+
+See the [round-5 record](repair/source_freeze_round5_20261027.md).
+
 20261026 round 4: final pre-validation completion. Engineering code-complete
 at source level; NOT compiled, NOT tested; owner validation required.
 
