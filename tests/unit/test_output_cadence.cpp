@@ -52,6 +52,9 @@ void testIndependentCheckpointCadence() {
   latchOutputRequestForCompletedStep(frozen.config, options, 4U, 0.0, pending);
   CHUI_REQUIRE(pending.snapshot_due);
   CHUI_REQUIRE(!pending.checkpoint_due);  // a science snapshot no longer implies a checkpoint
+  // Step four has completed and its snapshot has been serviced; resetting at
+  // step zero would re-arm the already-consumed snapshot for step six.
+  integrator.step_index = 4U;
   pending = initializeOutputCadence(frozen.config, options, integrator, nullptr);
 
   latchOutputRequestForCompletedStep(frozen.config, options, 6U, 0.0, pending);

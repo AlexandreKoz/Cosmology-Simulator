@@ -137,6 +137,15 @@ Outcome integrate(const Problem& problem, double cycle_length, std::size_t cycle
   TransientStepWorkspace workspace;
   std::uint64_t block = 0U;
   for (std::size_t cycle = 0U; cycle < cycles; ++cycle) {
+    // A multirate PM cycle has one fixed midpoint, measured from its opening
+    // scale factor. Recomputing this from the beginning of every fine block
+    // can move the midpoint beyond the final scale factor and reverse the
+    // closing drift integral.
+    const double cycle_start_scale_factor = integrator.current_scale_factor;
+    const double cycle_mid_scale_factor = cosmology.background != nullptr
+        ? advanceScaleFactorByCosmicTime(*cosmology.background, cycle_start_scale_factor,
+                                        0.5 * cycle_length * integrator.time_si_per_code)
+        : 1.0;
     for (std::size_t j = 0U; j < fractions.size(); ++j, ++block) {
       for (std::size_t row = 0U; row < n; ++row) {
         particles.setElementBin(static_cast<std::uint32_t>(row), problem.rung(row, block), particles.currentTick());
@@ -152,11 +161,10 @@ Outcome integrate(const Problem& problem, double cycle_length, std::size_t cycle
         plan.opening_pm_kick_factor_code = 0.5 * cycle_length;
         plan.closing_half_interval_time_code = 0.5 * cycle_length;
         if (cosmology.background != nullptr) {
-          const double a0 = integrator.current_scale_factor;
-          plan.cycle_mid_scale_factor = advanceScaleFactorByCosmicTime(
-              *cosmology.background, a0, 0.5 * cycle_length * integrator.time_si_per_code);
+          plan.cycle_mid_scale_factor = cycle_mid_scale_factor;
           plan.opening_pm_kick_factor_code = computeComovingDriftFactor(
-              *cosmology.background, a0, plan.cycle_mid_scale_factor, 64U) / (integrator.time_si_per_code * a0);
+              *cosmology.background, cycle_start_scale_factor, cycle_mid_scale_factor, 64U) /
+              (integrator.time_si_per_code * cycle_start_scale_factor);
         }
       }
       orchestrator.executeHierarchicalBlockWithDispatcher(state, integrator, particles, cells, dispatcher,

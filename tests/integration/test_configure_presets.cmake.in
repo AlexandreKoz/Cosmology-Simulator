@@ -7,6 +7,8 @@ set(current_build_has_python "@COSMOSIM_ENABLE_PYTHON@")
 function(require_preset_configure preset_name)
   execute_process(
     COMMAND "@CMAKE_COMMAND@" --preset "${preset_name}"
+            "-DCMAKE_C_COMPILER=@CMAKE_C_COMPILER@"
+            "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
     WORKING_DIRECTORY "${source_dir}"
     RESULT_VARIABLE preset_result
     OUTPUT_VARIABLE preset_stdout
@@ -42,6 +44,8 @@ endfunction()
 function(require_parallel_hdf5_probe_reexecution preset_name)
   execute_process(
     COMMAND "@CMAKE_COMMAND@" --preset "${preset_name}"
+            "-DCMAKE_C_COMPILER=@CMAKE_C_COMPILER@"
+            "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
             -DCOSMOSIM_HDF5_MPIO_CAPABILITY_PROBE=FALSE
     WORKING_DIRECTORY "${source_dir}"
     RESULT_VARIABLE preset_result
@@ -94,6 +98,8 @@ function(require_serial_hdf5_rejected_when_parallel_required)
   execute_process(
     COMMAND "@CMAKE_COMMAND@" -S "${source_dir}" -B "${serial_build_dir}"
             -DCMAKE_BUILD_TYPE=Debug
+            "-DCMAKE_C_COMPILER=@CMAKE_C_COMPILER@"
+            "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
             -DCOSMOSIM_ENABLE_MPI=ON
             -DCOSMOSIM_ENABLE_HDF5=ON
             -DCOSMOSIM_ENABLE_FFTW=OFF

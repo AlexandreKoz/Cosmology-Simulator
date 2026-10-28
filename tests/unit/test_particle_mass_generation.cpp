@@ -25,6 +25,9 @@ SimulationState makeState(std::size_t count) {
     state.particle_sidecar.owning_rank[row] = 0U;
     state.particles.mass_code[row] = 1.0 + static_cast<double>(row);  // mixed masses
   }
+  // rebuildSpeciesIndex() maintains the lookup, not the independent species
+  // population counters. Keep the fixture consistent for reorder invariants.
+  state.species.count_by_species[particleSpeciesIndex(ParticleSpecies::kDarkMatter)] = count;
   state.rebuildSpeciesIndex();
   return state;
 }

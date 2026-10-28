@@ -171,7 +171,17 @@ void requireOrThrow(bool condition, const std::string& message) {
   std::vector<double> gathered_mass(global_size, 0.0);
   std::vector<std::uint8_t> gathered_time_bin(global_size, 0U);
   std::vector<std::uint64_t> gathered_id(global_size, 0U);
+  // Homogeneous collisionless DMO stores rung zero implicitly. MPI requires
+  // an actual count-element send buffer even when the stored mirror is empty.
+  std::vector<std::uint8_t> local_time_bins(local_size, 0U);
+  for (std::size_t i = 0; i < local_size; ++i) {
+    local_time_bins[i] = local_state.particleTimeBin(i);
+  }
+  requireOrThrow(
+      local_state.particle_sidecar.particle_id.size() >= local_size,
+      "DMO spectrum gather needs stable particle IDs for every local particle");
   const auto gather_double_lane = [&](std::span<const double> lane, std::vector<double>& gathered) {
+    requireOrThrow(lane.size() >= local_size, "DMO spectrum gather has a truncated floating-point lane");
     MPI_Gatherv(
         local_count > 0 ? lane.data() : nullptr,
         local_count,
@@ -191,7 +201,7 @@ void requireOrThrow(bool condition, const std::string& message) {
   gather_double_lane(local_state.particles.velocity_z_peculiar, gathered_vz);
   gather_double_lane(local_state.particles.mass_code, gathered_mass);
   MPI_Gatherv(
-      local_count > 0 ? local_state.particles.time_bin.data() : nullptr,
+      local_count > 0 ? local_time_bins.data() : nullptr,
       local_count,
       MPI_UINT8_T,
       runtime.world_rank == 0 ? gathered_time_bin.data() : nullptr,
@@ -244,13 +254,9 @@ void requireOrThrow(bool condition, const std::string& message) {
     gathered_mass.assign(
         local_state.particles.mass_code.begin(),
         local_state.particles.mass_code.end());
-    gathered_time_bin.assign(
-        local_state.particles.time_bin.begin(),
-        local_state.particles.time_bin.end());
-    // Global-KDK compact states keep no time-bin mirror; rung zero, as the
-    // distributed gather path already assumes.
-    if (gathered_time_bin.size() != local_state.particles.size()) {
-      gathered_time_bin.assign(local_state.particles.size(), 0U);
+    gathered_time_bin.resize(local_size);
+    for (std::size_t i = 0; i < local_size; ++i) {
+      gathered_time_bin[i] = local_state.particleTimeBin(i);
     }
     gathered_id.assign(
         local_state.particle_sidecar.particle_id.begin(),

@@ -78,6 +78,7 @@ struct Sources {
   options.adaptive_error_estimator = TreePmAdaptiveErrorEstimator::kRelativeMonopole;
   options.adaptive_maximum_opening_angle = 1.0e-6;
   options.gaussian_pair_lookup_enabled = true;
+  options.group_walk_enabled = true;  // leaf-map cache reuse is a grouped-walk diagnostic
   return options;
 }
 

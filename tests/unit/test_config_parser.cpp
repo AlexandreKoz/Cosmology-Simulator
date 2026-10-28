@@ -1,6 +1,7 @@
 // 20261012 regression repairs: NOT RUN — deferred to maintainer.
 #include "../support/test_require.hpp"
 #include <cmath>
+#include <cstdio>
 #include <string>
 #include <type_traits>
 
@@ -40,7 +41,9 @@ void requireNumericsRejected(
   } catch (const cosmosim::core::ConfigError& error) {
     const std::string message = error.what();
     rejected = message.find(context.empty() ? "numerics." + key : context) != std::string::npos;
+    if (!rejected) std::fprintf(stderr, "unexpected rejection: key=%s value=%s context=%s actual=%s\n", key.c_str(), value.c_str(), context.c_str(), message.c_str());
   }
+  if (!rejected) std::fprintf(stderr, "validation unexpectedly accepted key=%s value=%s context=%s\n", key.c_str(), value.c_str(), context.c_str());
   CHUI_REQUIRE(rejected);
 }
 
@@ -919,7 +922,7 @@ treepm_pm_exchange_batch_bytes = 12582912
   }
   for (const auto key : {"treepm_tree_opening_criterion", "treepm_assignment_scheme", "treepm_pm_decomposition_mode"})
     requireNumericsRejected(baseline, key, "magic");
-  requireNumericsRejected(baseline, "treepm_update_cadence_steps", "3", "must be exactly 1 in production");
+  requireNumericsRejected(baseline, "treepm_update_cadence_steps", "3", "must be exactly 1 with treepm_pm_reuse_policy=exact");
   for (const auto key : {"treepm_tree_exchange_batch_bytes", "treepm_pm_exchange_batch_bytes"}) {
     for (const auto value : {"0", "-1", "3.5", "nan", "inf", "18446744073709551616"})
       requireNumericsRejected(baseline, key, value);
@@ -1671,7 +1674,15 @@ void testTreePmProductionTuningRoundTrip() {
   // Multirate outer PM level (2026-10-26): hierarchical KDK only, cadence =
   // coarse blocks per PM cycle in [2,64]; distinct from the stale window.
   {
-    auto multirate_text = withNumericsValue(baseline.normalized_text, "treepm_pm_reuse_policy", "multirate_outer_kick");
+    // The multirate outer PM policy is only legal under source-free
+    // cosmo_cube DMO. The generic TreePM fixture is zoom_in and cannot
+    // demonstrate admission of hierarchical KDK.
+    const auto dmo = loadFrozenConfigFromString(
+        "[mode]\nmode = cosmo_cube\nic_file = generated\n"
+        "[physics]\nenable_cooling = false\nenable_star_formation = false\nenable_feedback = false\n"
+        "enable_stellar_evolution = false\nenable_black_hole_agn = false\nenable_tracers = false\n"
+        "enable_metal_diffusion = false\n", "pm_multirate_dmo_control");
+    auto multirate_text = withNumericsValue(dmo.normalized_text, "treepm_pm_reuse_policy", "multirate_outer_kick");
     multirate_text = withNumericsValue(multirate_text, "treepm_update_cadence_steps", "4");
     // Global KDK (baseline hierarchical_max_rung = 0) is rejected.
     bool global_rejected = false;

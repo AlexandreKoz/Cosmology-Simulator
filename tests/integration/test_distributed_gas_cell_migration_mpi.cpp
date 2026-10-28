@@ -161,7 +161,7 @@ int main() {
       "cosmosim_distributed_gas_cell_migration_mpi");
   const std::filesystem::path& root = workspace.root();
   const auto first_report = runner.run(
-      root / ("rank_" + std::to_string(world_rank) + "_first"),
+      root / "first",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .write_outputs = true,
           .initial_state_override = &initial_state,
@@ -180,7 +180,7 @@ int main() {
   assert(global_shared_parent == 1U);
 
   const auto resumed_report = runner.run(
-      root / ("rank_" + std::to_string(world_rank) + "_resumed"),
+      root / "resumed",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .write_outputs = true,
           .restart_state_override = &first_restart,

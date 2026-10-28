@@ -3,6 +3,7 @@
 #include "../support/test_require.hpp"
 #include <cmath>
 #include <complex>
+#include <cstdio>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -596,19 +597,29 @@ void testPmPlanRankLocalGeometryAndOverflow() {
   const auto overflow_rejected = [](PmGridShape shape, int ranks, int rank, const char* context) {
     const auto layout = cosmosim::parallel::makePmSlabLayout(shape.nx, shape.ny, shape.nz, ranks, rank);
     bool rejected = false;
+    std::string observed = "no exception";
     try { (void)cosmosim::gravity::estimatePmPlanResourcesMemory(shape, layout, PmDecompositionMode::kSlab); }
     catch (const std::overflow_error& error) {
-      rejected = std::string(error.what()).find(context) != std::string::npos;
+      observed = error.what();
+      rejected = observed.find(context) != std::string::npos;
     }
+    if (!rejected) std::fprintf(stderr, "PM planner overflow case expected '%s' observed '%s'\n", context, observed.c_str());
     CHUI_REQUIRE(rejected);
   };
   const auto max_size = std::numeric_limits<std::size_t>::max();
-  overflow_rejected({max_size / sizeof(double) + 1U, 1, 1}, 1, 0, "real bytes");
-  overflow_rejected({max_size / (2U * sizeof(std::complex<double>)) + 1U, 1, 1}, 1, 0, "complex spectral bytes");
-  overflow_rejected({1, max_size / (2U * sizeof(double)) + 1U, 1}, 2, 1, "spectral axis metadata bytes");
-  overflow_rejected({1, 1, max_size}, 2, 0, "distributed real stride");
-  overflow_rejected({max_size / (3U * sizeof(double) + 2U * sizeof(std::complex<double>)) + 1U, 1, 1},
-      1, 0, "total byte sum");
+  // In-place FFT storage has no separate real allocation: overflow must be
+  // rejected while deriving the padded real view of the complex buffer.
+  overflow_rejected({max_size / 2U + 1U, 1, 1}, 1, 0, "serial padded real extent");
+  overflow_rejected({max_size / (2U * sizeof(std::complex<double>)) + 1U, 1, 1},
+      1, 0, "complex spectral bytes");
+  overflow_rejected({1, max_size / (2U * sizeof(double)) + 1U, 1},
+      2, 1, "spectral axis metadata bytes");
+  overflow_rejected({1, 1, max_size}, 2, 0, "PM plan real stride");
+  // The complex allocation and axis metadata each fit independently, but
+  // their sum must still be checked for overflow.
+  overflow_rejected({max_size / (2U * sizeof(std::complex<double>) + 2U * sizeof(double)) + 1U,
+                     1, 1},
+      1, 0, "spectral byte sum");
 }
 
 void testPmPlanRetainedCapacityReport() {
@@ -621,8 +632,9 @@ void testPmPlanRetainedCapacityReport() {
   unit_box_options.box_size_mpc_comoving = 1.0;
   grid.ensureDensityStorage();
   solver.solvePoissonPeriodic(grid, unit_box_options);
-  constexpr std::uint64_t arrays = 4U * 3U * 5U * sizeof(double) +
-      2U * 4U * 3U * 3U * sizeof(std::complex<double>);
+  // In-place FFT aliases the padded real view to one complex buffer: only
+  // the complex spectrum and retained spectral potential are owned.
+  constexpr std::uint64_t arrays = 2U * 4U * 3U * 3U * sizeof(std::complex<double>);
   constexpr std::uint64_t axes = 2U * (4U + 3U + 3U) * sizeof(double);
   bool saw_arrays = false, saw_axes = false;
   cosmosim::core::MemoryReportBuilder builder;

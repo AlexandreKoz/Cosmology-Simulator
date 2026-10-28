@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1078,21 +1079,26 @@ int main(int argc, char** argv) {
             result.report.counters.exact_audit_exchange_count);
     const std::uint64_t global_routing_collective_phases =
         result.report.counters.routing_collective_phase_count;
-    assert(global_batches > 0U && global_batches <= expected_chunks);
-    if (!policy_mode) assert(global_batches < expected_chunks);
     assert(global_file_opens == K_MEMBER_COUNT);
     assert(global_hash_passes <= 2U * K_MEMBER_COUNT);
     assert(global_dataset_opens > 0U);
-    assert(global_reader_batches == global_batches);
-    assert(global_reader_records == expected_global);
-    assert(global_reader_imbalance <= expected_global);
-    assert(global_main_exchanges == global_batches);
-    assert(global_exact_audit_exchanges >= global_batches);
-    assert(global_routing_collective_phases > global_batches);
-    assert(global_routing_collective_phases <= 24U * global_batches);
-    const std::uint64_t global_collective_phases =
-        result.report.counters.collective_phase_count;
-    assert(global_collective_phases > global_batches);
+    if (world_size > 1) {
+      assert(global_batches > 0U && global_batches <= expected_chunks);
+      if (!policy_mode) assert(global_batches < expected_chunks);
+      assert(global_reader_batches == global_batches);
+      assert(global_reader_records == expected_global);
+      assert(global_reader_imbalance <= expected_global);
+      assert(global_main_exchanges == global_batches);
+      assert(global_exact_audit_exchanges >= global_batches);
+      assert(global_routing_collective_phases > global_batches);
+      assert(global_routing_collective_phases <= 24U * global_batches);
+      assert(result.report.counters.collective_phase_count > global_batches);
+    } else {
+      // One-rank reads take the production serial import path, which needs
+      // neither routing batches nor distributed-collective accounting.
+      assert(global_batches == 0U);
+      assert(global_routing_collective_phases == 0U);
+    }
 
     if (world_size > 1) {
       const std::uint64_t local_actual_collectives =
@@ -1121,6 +1127,22 @@ int main(int argc, char** argv) {
       assertCounterAgreesAcrossRanks(
           result.report.counters.distributed_id_audit_round_count);
       assert(local_actual_collectives > 0U);
+      if (result.report.counters.routing_mpi_collective_call_count !=
+          cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV3 * global_batches) {
+        std::fprintf(stderr,
+            "IC routing protocol collective mismatch: rank=%d actual=%llu expected=%llu batches=%llu "
+            "allreduce=%llu bcast=%llu gather=%llu gatherv=%llu alltoall=%llu alltoallv=%llu\n",
+            world_rank,
+            static_cast<unsigned long long>(result.report.counters.routing_mpi_collective_call_count),
+            static_cast<unsigned long long>(cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV3 * global_batches),
+            static_cast<unsigned long long>(global_batches),
+            static_cast<unsigned long long>(result.report.counters.mpi_allreduce_call_count),
+            static_cast<unsigned long long>(result.report.counters.mpi_bcast_call_count),
+            static_cast<unsigned long long>(result.report.counters.mpi_gather_call_count),
+            static_cast<unsigned long long>(result.report.counters.mpi_gatherv_call_count),
+            static_cast<unsigned long long>(result.report.counters.mpi_alltoall_call_count),
+            static_cast<unsigned long long>(result.report.counters.mpi_alltoallv_call_count));
+      }
       assert(
           result.report.counters.routing_mpi_collective_call_count ==
           cosmosim::io::kIcRoutingMpiCollectiveCallsPerBatchV3 *

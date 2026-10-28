@@ -5074,6 +5074,34 @@ void PmSolver::solvePoissonIsolatedOpen(PmGridStorage& grid, const PmSolveOption
               if (options.tree_pm_split_scale_comoving > 0.0) {
                 kernel = -std::erf(0.5 * r / options.tree_pm_split_scale_comoving) / r;
               }
+            } else if (options.tree_pm_split_scale_comoving > 0.0) {
+              // lim_{r->0} -erf(r/(2*r_s))/r = -1/(sqrt(pi)*r_s).
+              // Leaving the origin at zero instead reverses the centered
+              // force in the cell immediately adjacent to a point source.
+              kernel = -1.0 / (std::sqrt(std::acos(-1.0)) * options.tree_pm_split_scale_comoving);
+            } else {
+              // The unsplit 1/r Green function has a finite *cell average*.
+              // Approximate the integral over the source voxel by symmetric
+              // midpoint cubature (even subdivision count avoids r=0).
+              // This preserves attraction near a cell-centered point source
+              // without introducing an arbitrary particle softening length.
+              constexpr int k_subdivisions = 16;
+              double inverse_radius_sum = 0.0;
+              for (int qx = 0; qx < k_subdivisions; ++qx) {
+                const double cx = (static_cast<double>(qx) + 0.5) / k_subdivisions - 0.5;
+                for (int qy = 0; qy < k_subdivisions; ++qy) {
+                  const double cy = (static_cast<double>(qy) + 0.5) / k_subdivisions - 0.5;
+                  for (int qz = 0; qz < k_subdivisions; ++qz) {
+                    const double cz = (static_cast<double>(qz) + 0.5) / k_subdivisions - 0.5;
+                    inverse_radius_sum += 1.0 / std::sqrt(
+                        (cx * dx) * (cx * dx) +
+                        (cy * dy) * (cy * dy) +
+                        (cz * dz) * (cz * dz));
+                  }
+                }
+              }
+              kernel = -inverse_radius_sum / static_cast<double>(
+                  k_subdivisions * k_subdivisions * k_subdivisions);
             }
             ws.kernel_k[(ix * pad_ny + iy) * pad_nz + iz] = {kernel, 0.0};
           }

@@ -22,6 +22,11 @@ int main() {
   assert(result.direct_state.particles.size() == result.restarted_state.particles.size());
   assert(cosmosim::workflows::internal::restartRuntimeStateExactlyEquivalent(
       result.restarted_state, result.direct_state));
+  // The compact DMO representation owns a common drift epoch, not a dense
+  // drift lane. Materialize it before testing mutation detection by row.
+  result.restarted_state.materializeParticleMetadata();
+  assert(cosmosim::workflows::internal::restartRuntimeStateExactlyEquivalent(
+      result.restarted_state, result.direct_state));
   assert(!result.restarted_state.particle_sidecar.last_drift_time_code.empty());
   assert(!result.restarted_state.particle_sidecar.last_drift_scale_factor.empty());
 

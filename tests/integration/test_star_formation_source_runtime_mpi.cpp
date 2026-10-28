@@ -31,6 +31,7 @@ std::string configText(int world_size, std::string_view run_name) {
   stream << "[cosmology]\nbox_size_x = 1.0\nbox_size_y = 1.0\nbox_size_z = 1.0\n\n";
   stream << "[numerics]\ntime_begin_code = 0.01\ntime_end_code = 0.010000001\n"
             "max_global_steps = 1\nhierarchical_max_rung = 0\ntreepm_pm_grid = 8\n"
+            "gravity_softening = 0.01 kpc\n"
             "treepm_asmth_cells = 1.0\ntreepm_rcut_cells = 3.0\n"
             "treepm_enable_window_deconvolution = false\ntreepm_update_cadence_steps = 1\n\n";
   stream << "[physics]\nenable_star_formation = true\n"
@@ -125,12 +126,14 @@ cosmosim::core::SimulationState makeGlobalState() {
   return state;
 }
 
+void setGasLineage(cosmosim::core::SimulationState& state, bool shared_lineage);
+
 void runGravityGasOwnershipContract(int world_size, int world_rank) {
   auto state = makeGlobalState();
   // Exercise parentless and shared-lineage legality through the same selector
   // and accessor used by GravityRuntime. Generic gas particles remain mirrors.
-  state.gas_cells.parent_particle_id[0] = 0U;
-  state.gas_cells.parent_particle_id[1] = 0U;
+  // Authoritative map mutation also synchronizes compatibility mirror lanes.
+  setGasLineage(state, /*shared_lineage=*/false);
   auto rows = cosmosim::workflows::internal::selectAuthoritativeGravitySourceRows(
       state, static_cast<std::uint32_t>(world_rank),
       static_cast<std::uint32_t>(world_size), "mpi authoritative gas gravity contract");
@@ -170,7 +173,6 @@ void setGasLineage(
     const std::optional<std::uint64_t> parent = shared_lineage
         ? std::optional<std::uint64_t>{shared_parent}
         : std::nullopt;
-    state.gas_cells.parent_particle_id[row] = parent.value_or(0U);
     records.push_back(cosmosim::core::GasCellIdentityRecord{
         .gas_cell_id = state.gas_cells.gas_cell_id[row],
         .parent_particle_id = parent,

@@ -241,11 +241,29 @@ std::vector<std::uint64_t> schedulerActiveIdsFromPersistentState(
   return particleIdsForIndices(state, active);
 }
 
+// Every checkpoint containing gas cells requires a separate authoritative
+// cell scheduler; the particle scheduler cannot stand in for it.
+[[nodiscard]] cosmosim::core::HierarchicalTimeBinScheduler makePayloadGasCellScheduler(
+    const cosmosim::core::SimulationState& state,
+    const cosmosim::core::HierarchicalTimeBinScheduler& particle_scheduler) {
+  std::uint8_t max_bin = 0U;
+  for (const auto bin : state.cells.time_bin) max_bin = std::max(max_bin, bin);
+  cosmosim::core::HierarchicalTimeBinScheduler gas_scheduler(max_bin);
+  gas_scheduler.reset(static_cast<std::uint32_t>(state.cells.size()),
+                      max_bin, particle_scheduler.currentTick());
+  for (std::uint32_t row = 0U; row < state.cells.size(); ++row) {
+    gas_scheduler.setElementBin(row, state.cells.time_bin[row], gas_scheduler.currentTick());
+  }
+  return gas_scheduler;
+}
+
 void fillRestartPayload(
     cosmosim::io::RestartWritePayload& payload,
     cosmosim::core::SimulationState& state,
     cosmosim::core::IntegratorState& integrator_state,
-    cosmosim::core::HierarchicalTimeBinScheduler& scheduler) {
+    cosmosim::core::HierarchicalTimeBinScheduler& scheduler,
+    const cosmosim::core::HierarchicalTimeBinScheduler* gas_scheduler) {
+  payload.gas_cell_scheduler = gas_scheduler;
   payload.persistent_state.simulation_state = &state;
   payload.integrator_state = &integrator_state;
   payload.scheduler = &scheduler;
@@ -1112,8 +1130,9 @@ void testRestartAfterReorderAndMigration() {
   cosmosim::core::syncTimeBinMirrorsFromScheduler(
       scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
 
+  auto reorder_gas_scheduler = makePayloadGasCellScheduler(state, scheduler);
   cosmosim::io::RestartWritePayload reorder_payload;
-  fillRestartPayload(reorder_payload, state, integrator_state, scheduler);
+  fillRestartPayload(reorder_payload, state, integrator_state, scheduler, &reorder_gas_scheduler);
   const auto expected_density_by_id = gasDensityByParticleId(state);
   const std::filesystem::path reorder_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_after_reorder.hdf5");
@@ -1141,8 +1160,9 @@ void testRestartAfterReorderAndMigration() {
   cosmosim::core::syncTimeBinMirrorsFromScheduler(
       scheduler, state, cosmosim::core::TimeBinMirrorDomain::kParticlesAndCells);
 
+  auto migration_gas_scheduler = makePayloadGasCellScheduler(state, scheduler);
   cosmosim::io::RestartWritePayload migration_payload;
-  fillRestartPayload(migration_payload, state, integrator_state, scheduler);
+  fillRestartPayload(migration_payload, state, integrator_state, scheduler, &migration_gas_scheduler);
   const std::filesystem::path migration_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_after_migration.hdf5");
   cosmosim::io::writeRestartCheckpointHdf5(migration_path, migration_payload);
@@ -1208,8 +1228,9 @@ void testParentlessGasCellRestartRoundtrip() {
   integrator_state.step_index = 9;
   cosmosim::core::HierarchicalTimeBinScheduler scheduler(0);
   scheduler.reset(0, 0, 0);
+  auto gas_scheduler = makePayloadGasCellScheduler(state, scheduler);
   cosmosim::io::RestartWritePayload payload;
-  fillRestartPayload(payload, state, integrator_state, scheduler);
+  fillRestartPayload(payload, state, integrator_state, scheduler, &gas_scheduler);
 
   const std::filesystem::path checkpoint_path =
       cosmosim::test_support::TestTempWorkspace::uniqueProcessLocalPath("cosmosim_restart_parentless_gas_cells.hdf5");
