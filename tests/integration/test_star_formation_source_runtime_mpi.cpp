@@ -429,8 +429,11 @@ int main(int argc, char** argv) {
   auto workspace = cosmosim::test_support::createMpiSharedWorkspace(
       "cosmosim_star_formation_source_runtime_mpi_" + mode);
   const auto& root = workspace.root();
+  // Parallel-HDF5 writes one collective science snapshot, so all MPI ranks
+  // must use the same run root. Restart checkpoint paths remain rank-qualified
+  // by the workflow itself; never put rank_N in the shared snapshot root.
   const auto report = runner.run(
-      root / ("rank_" + std::to_string(world_rank)),
+      root / "initial",
       cosmosim::workflows::ReferenceWorkflowOptions{
           .dt_time_code = 1.0e-9,
           .write_outputs = true,
@@ -451,7 +454,7 @@ int main(int argc, char** argv) {
 
   if (mode == "restart") {
     const auto resumed = runner.run(
-        root / ("rank_" + std::to_string(world_rank) + "_resumed"),
+        root / "resumed",
         cosmosim::workflows::ReferenceWorkflowOptions{
             .dt_time_code = 1.0e-9,
             .write_outputs = true,

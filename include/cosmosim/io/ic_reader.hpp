@@ -348,11 +348,11 @@ inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV3 = 19U;
 inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV2 = 23U;
 // Retained only so archived reports/tests can interpret protocol-v1 counters.
 inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV1 = 30U;
-// Non-routing calls consist of a 40-call fixed protocol, one source-identity
+// Non-routing calls consist of a 37-call fixed protocol, one source-identity
 // completion vote per source file, ten calls per global duplicate-ID audit
 // round, one optional runtime-cosmology vote, and the measured Bcast calls
 // whose count depends on metadata payload chunking.
-inline constexpr std::uint64_t kIcNonroutingMpiCollectiveFixedCallsV1 = 40U;
+inline constexpr std::uint64_t kIcNonroutingMpiCollectiveFixedCallsV1 = 37U;
 inline constexpr std::uint64_t
     kIcNonroutingMpiCollectiveCallsPerSourceFileV1 = 1U;
 inline constexpr std::uint64_t

@@ -1,3 +1,12 @@
+## Round 8 corrective source changes — 2026-10-29
+
+- Collective science snapshots require one MPI-shared run root: the source-runtime star-formation test now supplies the same initial/resumed directory on every rank. The production path-consensus guard is unchanged.
+- IC reader fixed non-routing collective count updated to 37 (Round 7 instrumentation: 66 actual = 37 fixed + 1 cosmology + 2 files + 20 audit + 6 Bcast); strict per-rank protocol assertions remain enabled.
+- Owned grouped TreePM pair accounting now excludes exact same-source identity, while counting physically distinct coincident particles, matching the per-target walk. MPI and force-convergence qualification still required.
+- Restart read now rebases pending AMR flux-register transient patch geometry epoch only **after** verifying the persisted payload integrity digest and stable gas/patch ownership. No schema change; MPI restart validation remains required.
+- The strict TreePM historical normalized-defaults migration gate now accepts integrity-verified v24 as well as v23 checkpoints, without admitting older, unverified, or non-global-KDK checkpoints.
+- Outstanding unverified/high-risk failures: MPI_ERR_TRUNCATE rank-divergent collective sequences; hierarchical TreePM trajectory accuracy and verified checkpoint migration; PM mesh-refinement accuracy; SFC hard-memory collective rejection; gas migration metal conservation. Do not waive their acceptance gates.
+
 # Repair open issues
 
 20261027 round 5 — source freeze. Engineering code-complete; NOT compiled,

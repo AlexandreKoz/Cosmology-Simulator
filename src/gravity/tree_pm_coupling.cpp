@@ -4300,8 +4300,12 @@ void TreePmCoordinator::evaluateShortRangeResidual(
         .table_value = m_gaussian_table->knotValues(),
         .table_slope = m_gaussian_table->knotSlopes(),
         .gravitational_constant = options.tree_options.gravitational_constant_code};
+    // Owned targets exclude their exact source ID, not every distinct
+    // particle at the same coordinates. The latter still counts as a pair.
+    group_kernel.include_coincident = true;
+    group_kernel.source_index_by_tree_order = ordering.sorted_particle_index.data();
     remote_group_kernel = group_kernel;
-    remote_group_kernel.include_coincident = true;
+    remote_group_kernel.owned_target_source_index = kInvalidTreeLocalIndex;
     group_parameters = internal::TreePmGroupWalkParameters{
         .cutoff_radius2 = cutoff_radius2_comoving,
         .relative_tolerance_over_g = options.tree_options.relative_force_tolerance /
@@ -4321,6 +4325,7 @@ void TreePmCoordinator::evaluateShortRangeResidual(
     double z = 0.0;
     double epsilon = 0.0;
     double previous_acceleration = std::numeric_limits<double>::quiet_NaN();
+    TreeLocalIndex owned_source_index = kInvalidTreeLocalIndex;
   };
   // Generic shared-list evaluation for `count` targets. sample(i) returns the
   // i-th target; emit(i, ax, ay, az, nearest_pair_r2) receives its residual.
@@ -4380,7 +4385,10 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           internal::treePmGroupNearestImage(px - group.center[0], lengths[0]),
           internal::treePmGroupNearestImage(py - group.center[1], lengths[1]),
           internal::treePmGroupNearestImage(pz - group.center[2], lengths[2])};
-      internal::accumulateTreePmGroupCulledLeaves(remote_targets ? remote_group_kernel : group_kernel, scratch, target_offset, px, py, pz,
+      auto pair_kernel = remote_targets ? remote_group_kernel : group_kernel;
+      pair_kernel.owned_target_source_index = remote_targets
+          ? kInvalidTreeLocalIndex : target.owned_source_index;
+      internal::accumulateTreePmGroupCulledLeaves(pair_kernel, scratch, target_offset, px, py, pz,
           ax, ay, az, pairs, nearest_pair_r2, cull_counts);
       counters.direct_pair_evaluations += pairs;
       const std::array<double, 3> position{px, py, pz};
@@ -4429,6 +4437,8 @@ void TreePmCoordinator::evaluateShortRangeResidual(
           .previous_acceleration = accumulator.previous_acceleration_magnitude_code.empty()
               ? std::numeric_limits<double>::quiet_NaN()
               : accumulator.previous_acceleration_magnitude_code[active_i],
+          .owned_source_index = row < pos_x_comoving.size()
+              ? row : kInvalidTreeLocalIndex,
       };
     };
     const auto emit = [&](std::size_t i, double ax, double ay, double az, double nearest_pair_r2) {

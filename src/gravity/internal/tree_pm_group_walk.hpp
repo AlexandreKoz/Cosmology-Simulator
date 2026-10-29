@@ -177,18 +177,20 @@ struct TreePmGroupPairKernel {
   // nearest_pair_r2 = 0 exactly as the per-target remote walk does. Owned
   // targets keep r2 == 0 excluded (indistinguishable from the self pair).
   bool include_coincident = false;
+  // Optional exact self identity for owned group walks. Source indices are in
+  // tree order; equal coordinates do not imply equal particle identity.
+  const TreeLocalIndex* source_index_by_tree_order = nullptr;
+  TreeLocalIndex owned_target_source_index = kInvalidTreeLocalIndex;
 };
 
 // Accumulates the softened-minus-Gaussian residual of tree-order sources
 // [begin,end) on one target. Requires bounded periodic deltas (every wrapped
 // source and target lie in [0,L)), so one conditional shift per axis is the
 // nearest image; pairs near half a box lie beyond r_cut < L/2 and are masked.
-// Self and coincident pairs contribute exactly zero. nearest_pair_r2 is
-// min-combined with the squared separation of every evaluated pair; the
-// group path cannot tell an exactly coincident distinct source from the
-// target itself, so r2 == 0 is excluded for owned targets (the per-target
-// walk keeps it); include_coincident restores it for remote targets. The
-// force of a coincident pair is exactly zero either way (no 0 * inf).
+// Self contributes no force and is excluded by exact source identity for
+// owned targets; distinct coincident sources must still be counted and
+// considered for nearest-pair distance, matching the per-target walk. The
+// force of a coincident pair is exactly zero (no 0 * inf).
 template <bool UniformMass>
 inline void accumulateTreePmGroupPairsImpl(
     const TreePmGroupPairKernel& k, double px, double py, double pz,
@@ -209,7 +211,11 @@ inline void accumulateTreePmGroupPairsImpl(
     dy = dy > hy ? dy - ly : (dy < -hy ? dy + ly : dy);
     dz = dz > hz ? dz - lz : (dz < -hz ? dz + lz : dz);
     const double r2 = dx * dx + dy * dy + dz * dz;
-    const bool inside = (r2 > 0.0 || k.include_coincident) && r2 <= k.cutoff_radius2;
+    const bool is_self = k.source_index_by_tree_order != nullptr &&
+        k.owned_target_source_index != kInvalidTreeLocalIndex &&
+        k.source_index_by_tree_order[j] == k.owned_target_source_index;
+    const bool inside = !is_self && (r2 > 0.0 || k.include_coincident) &&
+        r2 <= k.cutoff_radius2;
     const double t = std::min(r2 * k.inverse_2a_squared, k.table_t_limit);
     const double cell = t * k.table_inverse_step;
     const auto i = static_cast<std::size_t>(cell);

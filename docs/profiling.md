@@ -280,7 +280,7 @@ routing_mpi_collective_call_count
   = 19 * routing_batch_count
 
 nonrouting_mpi_collective_call_count
-  = 40
+  = 37
   + (validate_runtime_cosmology ? 1 : 0)
   + source_file_count
   + 10 * distributed_id_audit_round_count

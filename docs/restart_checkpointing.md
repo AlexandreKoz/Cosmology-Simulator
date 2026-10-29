@@ -291,6 +291,8 @@ This proves local HDF5 AMR hydro restart equivalence for the exercised synchroni
 
 ---
 
+The narrow TreePM normalized-defaults compatibility projection accepts only an integrity-verified v23 or v24 checkpoint with matching historical provenance, an exact legacy-default projection, and a closed global KDK state. V24 is covered by the full canonical SHA-256 digest (including output-cadence state); this does not introduce open-ended configuration migration or change the restart schema.
+
 ## AMR pending flux-register restart lanes (v17)
 
 Restart schema v17 introduced pending AMR flux-register state; current v23 checkpoints retain it under:
@@ -314,6 +316,8 @@ The group persists stable identity and coverage metadata for deferred reflux rec
 - coarse/fine flux-integrated mass, momentum, and total-energy contributions
 
 Old restart files without this group are treated as legacy inputs with an empty pending store only at a synchronized point. A pre-v18 payload that does contain pending deferred-reflux records is rejected by the temporal-history reader, because it cannot prove the matching temporal boundary history needed for safe mid-subcycle continuation. Current v17 restart schema validation required the group and datasets so a new v17 restart could not accidentally omit pending deferred reflux truth.
+
+The persisted `patch_geometry_generation` participates in the checkpoint integrity hash. On read, CHUI verifies the original complete checkpoint digest **before** rebasing this transient dense-row epoch to the reconstructed state's `cellIndexGeneration()`. The rebase requires the stored `coarse_cell_index`, stable gas-cell identity, owning patch ID, and identity generation to agree with the restored state; any mismatch is rejected. The on-disk schema and gas-cell identity generation are not modified. This also covers restart after distributed AMR migration.
 
 The restart payload integrity hash includes the pending-register store for v17 payloads. The HDF5-gated `integration_restart_equivalence_amr_flux_registers` test writes an incomplete pending register before restart, reads it back, merges the missing fine contribution, applies completed reflux, and compares direct vs restart continuation.
 

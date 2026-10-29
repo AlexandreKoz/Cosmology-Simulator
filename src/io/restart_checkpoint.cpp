@@ -3322,9 +3322,15 @@ std::string restartConfigurationCompatibilityRecord(
     }
     return {};
   }
-  if (!restart.payload_integrity_verified || restart.diagnostics.restart_schema_version != 23U ||
+  // This exact historical default projection is also valid for the current
+  // fully verified v24 checkpoint. v24 adds output-cadence integrity but does
+  // not relax normalized-config provenance or global-KDK admission. Refuse
+  // older or unknown schemas rather than treating them as equivalent.
+  const auto restart_version = restart.diagnostics.restart_schema_version;
+  if (!restart.payload_integrity_verified ||
+      (restart_version != k_restart_schema_v23 && restart_version != k_restart_schema_v24) ||
       restart.payload_integrity_algorithm != "sha256-canonical-le-v1" || restart.payload_integrity_sha256_hex.size() != 64U) {
-    fail("migration requires a complete, integrity-verified v23 checkpoint");
+    fail("migration requires a complete, integrity-verified v23/v24 checkpoint");
   }
   const auto& original = restart.provenance;
   if (original.schema_version != "provenance_v7" || original.config_schema_name != "cosmosim_config" ||
@@ -4672,6 +4678,26 @@ RestartReadResult readRestartCheckpointHdf5(
   }
 
   result.payload_integrity_verified = true;
+
+  // The checkpoint stores the original flux-register geometry epoch for its
+  // integrity digest. The reconstructed SimulationState has a *new* in-memory
+  // dense-cell-index epoch; the original epoch is not authoritative in this
+  // process. After SHA-256/FNV verification, validate every stable target and
+  // rebase only the transient geometry marker. Never rebase before the digest
+  // or a corrupted checkpoint could be accepted as an ordinary restart.
+  for (core::PendingFluxRegisterRecord& pending :
+       result.state.pending_flux_registers.mutableRecords()) {
+    const auto row = result.state.rowForGasCellId(pending.coarse_gas_cell_id);
+    const auto owning_patch =
+        result.state.owningPatchIdForGasCellId(pending.coarse_gas_cell_id);
+    if (!row.has_value() || *row != pending.coarse_cell_index ||
+        !owning_patch.has_value() || *owning_patch != pending.coarse_patch_id ||
+        pending.gas_cell_identity_generation != result.state.gasCellIdentityGeneration()) {
+      throw std::runtime_error(
+          "restart pending AMR flux register has an invalid stable gas/patch target or identity generation");
+    }
+    pending.patch_geometry_generation = result.state.cellIndexGeneration();
+  }
 
   // The on-disk schema remains fully explicit. Only after complete logical
   // validation and integrity verification do we release redundant homogeneous

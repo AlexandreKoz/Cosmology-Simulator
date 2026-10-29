@@ -11,6 +11,7 @@
 #include "gravity/internal/tree_pm_transport_planner.hpp"
 #include "gravity/internal/tree_pm_geometry.hpp"
 #include "gravity/internal/tree_pm_leaf_kernel.hpp"
+#include "gravity/internal/tree_pm_group_walk.hpp"
 #include "gravity/internal/tree_pm_acceptance.hpp"
 
 namespace {
@@ -469,9 +470,53 @@ void testBoundedPeriodicMetric() {
   }
 }
 
+
+void testGroupedWalkExcludesOnlyExactSelfIdentity() {
+  using namespace cosmosim::gravity;
+  using namespace cosmosim::gravity::internal;
+  // Two distinct sources coincide at the target; source 0 is the target
+  // itself, source 1 is a different particle with exactly the same position.
+  const double x[]{0.1, 0.1, 0.2};
+  const double y[]{0.1, 0.1, 0.1};
+  const double z[]{0.1, 0.1, 0.1};
+  const TreeLocalIndex source_ids[]{0U, 1U, 2U};
+  const double zero_table[]{0.0, 0.0};
+  TreePmGroupPairKernel kernel{};
+  kernel.x = x;
+  kernel.y = y;
+  kernel.z = z;
+  kernel.uniform_mass = 1.0;
+  kernel.length = {1.0, 1.0, 1.0};
+  kernel.epsilon2 = 0.01;
+  kernel.cutoff_radius2 = 0.5;
+  kernel.table_value = zero_table;
+  kernel.table_slope = zero_table;
+  kernel.gravitational_constant = 1.0;
+  kernel.include_coincident = true;
+  kernel.source_index_by_tree_order = source_ids;
+  kernel.owned_target_source_index = 0U;
+  double ax = 0.0, ay = 0.0, az = 0.0;
+  double nearest = std::numeric_limits<double>::infinity();
+  std::uint64_t pairs = 0U;
+  accumulateTreePmGroupPairs(kernel, 0.1, 0.1, 0.1, 0U, 3U,
+                             ax, ay, az, pairs, nearest);
+  CHUI_REQUIRE(pairs == 2U);  // distinct coincident source + noncoincident source
+  CHUI_REQUIRE(nearest == 0.0);
+  CHUI_REQUIRE(std::isfinite(ax) && std::isfinite(ay) && std::isfinite(az));
+  kernel.owned_target_source_index = kInvalidTreeLocalIndex;
+  pairs = 0U;
+  nearest = std::numeric_limits<double>::infinity();
+  ax = ay = az = 0.0;
+  accumulateTreePmGroupPairs(kernel, 0.1, 0.1, 0.1, 0U, 3U,
+                             ax, ay, az, pairs, nearest);
+  CHUI_REQUIRE(pairs == 3U);  // remote target: no exact self source
+  CHUI_REQUIRE(nearest == 0.0);
+}
+
 }  // namespace
 
 int main() {
+  testGroupedWalkExcludesOnlyExactSelfIdentity();
   testResidualRadialDerivativesAndFullTable();
   testBoundedPeriodicMetric();
   testLeafVectorArithmeticAgainstScalar();
