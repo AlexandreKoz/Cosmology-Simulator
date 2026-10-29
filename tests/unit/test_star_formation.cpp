@@ -183,6 +183,19 @@ void testRateExactConversionAndTimeStepLimit() {
   assert(nearlyEqual(tiny.expected_spawn_mass_code, tiny_expected, 1.0e-15));
 }
 
+void testDeterministicSubminimumExpectedMassIsNoBirth() {
+  auto config = makeAdaptiveConfig();
+  config.stochastic_spawning = false;
+  cosmosim::physics::StarFormationModel model(config);
+  const auto cell = makeEligibleAdaptiveCell();
+  const auto outcome = model.sampleCellOutcome(cell, 1.0e-10, 99U, 0, 1.0);
+  assert(outcome.eligible);
+  assert(outcome.expected_spawn_mass_code > 0.0);
+  assert(outcome.expected_spawn_mass_code < config.min_star_particle_mass_code);
+  assert(outcome.spawned_particle_count == 0U);
+  assert(outcome.spawned_mass_code == 0.0);
+}
+
 void testCounterRngGoldenVectorsAndRankInvariance() {
   const double u0 = cosmosim::physics::starFormationUniform01(123456789ULL, 42ULL, 99ULL, 0U);
   const double u1 = cosmosim::physics::starFormationUniform01(123456789ULL, 42ULL, 99ULL, 1U);
@@ -465,6 +478,7 @@ int main() {
   testPhysicalFrameConversions();
   testVirialJeansAndFlowEligibility();
   testRateExactConversionAndTimeStepLimit();
+  testDeterministicSubminimumExpectedMassIsNoBirth();
   testCounterRngGoldenVectorsAndRankInvariance();
   testUnbiasedSamplingNearMassCap();
   testConservativeMultiParticleBirth();

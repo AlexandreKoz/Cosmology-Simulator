@@ -1159,6 +1159,23 @@ int main(int argc, char** argv) {
           cosmosim::io::kIcNonroutingMpiCollectiveCallsPerIdAuditRoundV1 *
               result.report.counters.distributed_id_audit_round_count +
           result.report.counters.mpi_bcast_call_count;
+      if (result.report.counters.nonrouting_mpi_collective_call_count !=
+          expected_nonrouting_collectives) {
+        std::fprintf(stderr,
+            "IC nonrouting collective mismatch: rank=%d observed=%llu expected=%llu "
+            "total=%llu routing=%llu fixed=%llu files=%u audit_rounds=%llu "
+            "validate_cosmology=%u bcast=%llu\n",
+            world_rank,
+            static_cast<unsigned long long>(result.report.counters.nonrouting_mpi_collective_call_count),
+            static_cast<unsigned long long>(expected_nonrouting_collectives),
+            static_cast<unsigned long long>(local_actual_collectives),
+            static_cast<unsigned long long>(result.report.counters.routing_mpi_collective_call_count),
+            static_cast<unsigned long long>(cosmosim::io::kIcNonroutingMpiCollectiveFixedCallsV1),
+            K_MEMBER_COUNT,
+            static_cast<unsigned long long>(result.report.counters.distributed_id_audit_round_count),
+            import_options.validate_runtime_cosmology ? 1U : 0U,
+            static_cast<unsigned long long>(result.report.counters.mpi_bcast_call_count));
+      }
       assert(
           result.report.counters.nonrouting_mpi_collective_call_count ==
           expected_nonrouting_collectives);

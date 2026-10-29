@@ -218,6 +218,36 @@ cosmosim::io::RestartReadResult checkpointAndReload(
   return restored;
 }
 
+// Migration wire v3 requires one scheduler identity per migrated gas cell.
+// packAmrPatchMigrationRecords() cannot fill this lane because the runtime
+// scheduler is an external authoritative object. The production migration
+// orchestrator attaches this lane before encoding; mirror that contract here.
+void attachFixtureGasSchedulerRecords(
+    const SimulationState& state, AmrPatchMigrationRecord& record) {
+  cosmosim::core::HierarchicalTimeBinScheduler scheduler(0U);
+  scheduler.reset(static_cast<std::uint32_t>(state.cells.size()), 0U, 0U);
+  std::vector<std::uint32_t> rows;
+  rows.reserve(record.gas_cell_records.size());
+  for (const auto& gas_record : record.gas_cell_records) {
+    const auto row = state.rowForGasCellId(gas_record.fields.gas_cell_id);
+    assert(row.has_value());
+    rows.push_back(*row);
+  }
+  const auto identities = cosmosim::core::exportGasCellSchedulerIdentityRecords(
+      scheduler, state, rows);
+  for (const auto& identity : identities) {
+    record.gas_cell_scheduler_records.push_back(
+        cosmosim::core::GasCellSchedulerMigrationRecord{
+            .gas_cell_id = identity.element_id,
+            .bin_index = identity.bin_index,
+            .next_activation_tick = identity.next_activation_tick,
+            .pending_bin_index = identity.pending_bin_index,
+        });
+  }
+  assert(record.gas_cell_scheduler_records.size() ==
+         record.gas_cell_records.size());
+}
+
 void continueMigrationContractAfterRestart(SimulationState& state) {
   const std::uint32_t migrated_patch_row = patchRow(state, 101U);
   auto records = state.packAmrPatchMigrationRecords(
@@ -225,6 +255,7 @@ void continueMigrationContractAfterRestart(SimulationState& state) {
   assert(records.size() == 1U);
   assert(records[0].pending_flux_register_records.size() == 1U);
   assert(records[0].temporal_boundary_history_records.size() == 1U);
+  attachFixtureGasSchedulerRecords(state, records[0]);
   records[0].patch.owning_rank = 1U;
   for (auto& gas_record : records[0].gas_cell_records) {
     gas_record.owning_rank = 1U;
@@ -265,7 +296,8 @@ int main(int argc, char** argv) {
     auto records = state.packAmrPatchMigrationRecords(
         std::span<const std::uint32_t>(&source_patch_row, 1U));
     assert(records.size() == 1U);
-    records[0].patch.owning_rank = 1U;
+    attachFixtureGasSchedulerRecords(state, records[0]);
+  records[0].patch.owning_rank = 1U;
     for (auto& gas_record : records[0].gas_cell_records) {
       gas_record.owning_rank = 1U;
     }

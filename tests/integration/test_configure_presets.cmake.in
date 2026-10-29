@@ -116,7 +116,10 @@ function(require_serial_hdf5_rejected_when_parallel_required)
     message(FATAL_ERROR
       "COSMOSIM_REQUIRE_PARALLEL_HDF5=ON unexpectedly accepted h5cc.serial:\n${combined_output}")
   endif()
-  if(NOT combined_output MATCHES
+  # CMake formats long diagnostics over multiple lines; normalize whitespace
+  # before checking the *reason* for rejecting a serial-only HDF5 wrapper.
+  string(REGEX REPLACE "[ \t\r\n]+" " " normalized_output "${combined_output}")
+  if(NOT normalized_output MATCHES
       "selected HDF5 C installation cannot compile/link")
     message(FATAL_ERROR
       "serial-HDF5 rejection failed for an unexpected reason:\n${combined_output}")

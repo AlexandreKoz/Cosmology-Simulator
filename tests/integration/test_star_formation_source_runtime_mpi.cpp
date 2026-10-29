@@ -39,9 +39,13 @@ std::string configText(int world_size, std::string_view run_name) {
             "sf_effective_t_star_at_threshold = 1.0e-9 code\n"
             "sf_effective_n_h_threshold = 0.13 cm^-3\n"
             "sf_star_particle_mass_policy = fixed\n"
-            "sf_target_star_particle_mass_code = 100.0\n"
+            // The intentionally extreme effective-ISM gas density yields a bounded expected
+            // conversion of ~5e13 code mass in the one-step fixture. One
+            // deterministic star must be able to represent that mass without
+            // violating the production particle-mass/count guard.
+            "sf_target_star_particle_mass_code = 5.0e13\n"
             "sf_min_star_particle_mass_code = 1.0\n"
-            "sf_max_star_particle_mass_code = 1000000.0\n"
+            "sf_max_star_particle_mass_code = 1.0e14\n"
             "sf_max_spawn_particles_per_cell_step = 1\n"
             "sf_max_fractional_mass_conversion = 0.25\n"
             "sf_min_remaining_gas_fraction = 0.01\n"
@@ -339,10 +343,22 @@ void runGravityGasNumericalForceContract(int world_size, int world_rank) {
   auto parentless = makeGlobalState();
   setGasLineage(parentless, false);
   const auto parentless_force = solveDistributedGasTreePm(parentless, world_size, world_rank);
+  // A rank-local-serial TreePM reference still executes communicator-wide
+  // admission checks when MPI is initialized. Every rank must therefore run
+  // the same number of reference solves, including source-only ranks with no
+  // active target. Previously rank 1 skipped the solve in the three-rank
+  // source-only/target-only test and other ranks entered incompatible MPI
+  // collectives, triggering the PM layout-mode consensus guard.
+  const std::array<std::array<double, 3>, 2> serial_references{
+      serialGasTreePmReference(parentless, std::size_t{0}, std::nullopt),
+      serialGasTreePmReference(parentless, std::size_t{1}, std::nullopt),
+  };
+  const auto independent_reference = serialGasTreePmReference(
+      parentless, std::nullopt, std::array<double, 3>{0.50, 0.25, 0.75});
   for (std::size_t i = 0; i < parentless_force.ax.size(); ++i) {
-    const auto reference = parentless_force.has_independent_target
-        ? serialGasTreePmReference(parentless, std::nullopt, std::array<double, 3>{0.50, 0.25, 0.75})
-        : serialGasTreePmReference(parentless, parentless_force.target_global_cell_row[i], std::nullopt);
+    const auto& reference = parentless_force.has_independent_target
+        ? independent_reference
+        : serial_references.at(parentless_force.target_global_cell_row[i]);
     assert(std::abs(parentless_force.ax[i] - reference[0]) < 1.0e-9);
     assert(std::abs(parentless_force.ay[i] - reference[1]) < 1.0e-9);
     assert(std::abs(parentless_force.az[i] - reference[2]) < 1.0e-9);

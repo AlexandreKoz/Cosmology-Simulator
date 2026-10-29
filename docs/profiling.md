@@ -268,8 +268,8 @@ zero; byte counters remain rank-local and may be reduced by the caller. The
 compatibility collective fields count logical rank-consistent protocol phases,
 not raw MPI calls. Actual production communicator calls are counted centrally by
 the `mpi_*_call_count` fields. Their per-kind sum equals
-`mpi_collective_call_count`; `routing_mpi_collective_call_count` is exactly 20
-calls per successful routing batch in routing protocol version 3 (12 consensus votes,
+`mpi_collective_call_count`; `routing_mpi_collective_call_count` is exactly 19
+calls per successful routing batch in routing protocol version 3 (11 consensus votes,
 three coverage reductions, two `Alltoall`/`Alltoallv` pairs, and one exact
 reconciliation reduction). Fixed discovery, manifest, final audit, and
 finalization calls are reported by `nonrouting_mpi_collective_call_count`.
@@ -277,7 +277,7 @@ For routing protocol version 3 the successful-path identity is:
 
 ```text
 routing_mpi_collective_call_count
-  = 20 * routing_batch_count
+  = 19 * routing_batch_count
 
 nonrouting_mpi_collective_call_count
   = 40

@@ -201,9 +201,14 @@ void runCase(const Case& c, std::uint64_t& global_grouped_remote, std::uint64_t&
   // including the coincident distinct pair counted on the remote side.
   requireOrThrow(globalSum(g_in.direct_pair_evaluations) == globalSum(r_in.direct_pair_evaluations),
                  label + ": incoming direct pair count differs between grouped and per-target walks");
-  requireOrThrow(globalSum(grouped.diagnostics.local_traversal.direct_pair_evaluations) ==
-                     globalSum(reference.diagnostics.local_traversal.direct_pair_evaluations),
-                 label + ": owned direct pair count differs between grouped and per-target walks");
+  const auto grouped_owned_pairs = globalSum(
+      grouped.diagnostics.local_traversal.direct_pair_evaluations);
+  const auto reference_owned_pairs = globalSum(
+      reference.diagnostics.local_traversal.direct_pair_evaluations);
+  requireOrThrow(grouped_owned_pairs == reference_owned_pairs,
+                 label + ": owned direct pair count differs between grouped and per-target walks "
+                     "(grouped=" + std::to_string(grouped_owned_pairs) +
+                     " reference=" + std::to_string(reference_owned_pairs) + ")");
   // Exactly-once accounting of incoming targets.
   requireOrThrow(globalSum(g_in.targets) == globalSum(r_in.targets),
                  label + ": incoming target evaluation count changed");

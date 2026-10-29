@@ -366,8 +366,8 @@ schema. Its Campaign B distributed counters distinguish:
   exchange, byte, staging, imbalance, `distributed_id_audit_round_count`, and
   final owner-local state counters.
 
-For a successful routing-protocol-v2 batch,
-`routing_mpi_collective_call_count == 20 * routing_batch_count` on every MPI
+For a successful routing-protocol-v3 batch,
+`routing_mpi_collective_call_count == 19 * routing_batch_count` on every MPI
 rank. The successful non-routing protocol is also exact:
 
 ```text

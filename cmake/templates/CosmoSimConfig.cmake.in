@@ -38,7 +38,12 @@ endif()
 # metadata records what CHUI itself was qualified against, while this probe
 # verifies that the consumer resolved an HDF5/MPI family exposing the same MPIO
 # APIs rather than silently substituting a serial HDF5 installation.
-set(COSMOSIM_PACKAGE_CONSUMER_HDF5_MPIO_PROBE FALSE)
+# check_cxx_source_compiles() only executes if its result is undefined.
+# Do not preinitialize this probe to FALSE: that silently skips the actual
+# downstream MPI/HDF5 link check and rejects even valid parallel consumers.
+# Force revalidation if the consumer reconfigures against a new HDF5 provider.
+unset(COSMOSIM_PACKAGE_CONSUMER_HDF5_MPIO_PROBE CACHE)
+unset(COSMOSIM_PACKAGE_CONSUMER_HDF5_MPIO_PROBE)
 if(COSMOSIM_PACKAGE_HDF5_PARALLEL AND COSMOSIM_PACKAGE_WITH_MPI)
   include(CheckCXXSourceCompiles)
   set(_COSMOSIM_SAVED_REQUIRED_INCLUDES "${CMAKE_REQUIRED_INCLUDES}")

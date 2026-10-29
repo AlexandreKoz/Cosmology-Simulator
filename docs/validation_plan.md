@@ -481,6 +481,25 @@ ctest --test-dir build/mpi-hdf5-fftw-debug --output-on-failure \
   -R 'integration_distributed_ic_reader'
 ```
 
+## Post-optimization source repairs (2026-10-28)
+
+The distributed IC protocol-v3 successful routing budget is 19 measured MPI
+collective calls per batch (formerly documented as 20); the exact per-rank
+accounting assertion remains enabled. The installed-package consumer must
+execute its own MPI/Parallel-HDF5 capability compile/link probe rather than
+preinitializing its result to false. Deterministic star formation returns no
+birth for a positive expected mass below the configured minimum particle mass
+without invoking the stochastic target-mass feasibility search; the
+`unit_star_formation` regression checks this boundary. The multi-rank gas
+force fixture must execute its rank-local-serial reference solves on *every*
+rank, even those with no active target. The distributed PM potential fixture
+checks globally reduced routed requests, retaining per-rank upper bounds and
+numerical field comparisons.
+
+The numerical gravity invariant, hierarchical trajectory, group-walk
+accounting, SFC failure-injection, and general distributed collective failures
+remain separate acceptance gates and must not be waived by these fixes.
+
 ## Adaptive bound–Jeans star-formation validation
 
 Acceptance coverage includes physical/comoving conversion, gradient norm, virial and Jeans transitions, converging/static/expanding flow, free-fall/compression times, exact exponential depletion, source timestep limits, stable RNG golden vectors, row/rank-offset invariance, unbiased stochastic ensembles, multi-particle count consistency, conservative mass/momentum/metals, internal-energy sink accounting, invalid-state rejection, disabled no-op behavior, legacy compatibility, actual `SourceRuntime` gradient/metal use, snapshot round-trip, restart schema coverage, AMR metal transport, feedback metal return, and distributed ownership ledgers.

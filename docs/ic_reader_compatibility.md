@@ -267,7 +267,7 @@ The distributed report distinguishes logical failure-consensus phases from
 actual MPI calls. Production IC collectives are routed through one instrumented
 wrapper layer and reported as total, routing/non-routing, and per-operation
 (`Allreduce`, `Bcast`, `Gather`, `Gatherv`, `Alltoall`, `Alltoallv`) counts. A
-successful routing batch has a protocol-derived cost of exactly 20 actual MPI
+successful routing batch has a protocol-derived cost of exactly 19 actual MPI
 collective calls in version 3. The non-routing identity is
 `40 + runtime_cosmology_vote + source_file_count +
 10 * distributed_id_audit_round_count + mpi_bcast_call_count`, where the Bcast

@@ -339,10 +339,11 @@ struct IcImportCounters {
 // Protocol v3 folds post-exchange reconciliation accounting, wire decode,
 // local multiset validation, and capacity accounting into one rank-local phase
 // followed by one exact global reduction. A successful routing batch therefore
-// executes 12 logical consensus phases, three coverage reductions, two
+// executes 11 logical consensus phases, three coverage reductions, two
 // Alltoall/Alltoallv exchange pairs, and one exact reconciliation reduction:
-// 20 communicator-wide calls per batch.
-inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV3 = 20U;
+// 19 communicator-wide calls per batch. The merged local accounting phase
+// must not introduce a redundant global vote.
+inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV3 = 19U;
 // Retained so archived protocol-v2 reports/tests remain interpretable.
 inline constexpr std::uint64_t kIcRoutingMpiCollectiveCallsPerBatchV2 = 23U;
 // Retained only so archived reports/tests can interpret protocol-v1 counters.

@@ -785,6 +785,13 @@ StarFormationCellOutcome StarFormationModel::evaluateCell(
       maximum_transfer < m_config.min_star_particle_mass_code) {
     return outcome;
   }
+  // Deterministic births cannot produce a star lighter than the configured
+  // minimum.  Return before the stochastic target/count feasibility search:
+  // a subminimum expected mass is a legitimate no-birth step, not an error.
+  if (!m_config.stochastic_spawning &&
+      outcome.expected_spawn_mass_code < m_config.min_star_particle_mass_code) {
+    return outcome;
+  }
 
   if (m_config.model == core::StarFormationModelKind::kLegacySchmidtThreshold ||
       m_config.star_particle_mass_policy == core::StarParticleMassPolicy::kFixed) {
@@ -836,8 +843,15 @@ StarFormationCellOutcome StarFormationModel::evaluateCell(
     }
   }
   if (!finitePositive(feasible_target_mass_code)) {
-    throw std::runtime_error(
-        "StarFormationModel: configured particle-mass/count bounds cannot represent bounded expected mass");
+    std::ostringstream error;
+    error << "StarFormationModel: configured particle-mass/count bounds cannot represent bounded expected mass"
+          << " (expected_mass_code=" << outcome.expected_spawn_mass_code
+          << ", maximum_transfer_code=" << maximum_transfer
+          << ", minimum_particle_mass_code=" << m_config.min_star_particle_mass_code
+          << ", maximum_particle_mass_code=" << m_config.max_star_particle_mass_code
+          << ", max_spawn_particles_per_cell_step=" << m_config.max_spawn_particles_per_cell_step
+          << ", stochastic=" << m_config.stochastic_spawning << ')';
+    throw std::runtime_error(error.str());
   }
   outcome.target_particle_mass_code = feasible_target_mass_code;
 

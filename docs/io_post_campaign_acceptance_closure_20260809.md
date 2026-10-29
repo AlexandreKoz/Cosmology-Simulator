@@ -99,8 +99,8 @@ cannot substitute for that Windows runtime result.
 
 No metadata-only mode is mislabeled as cryptographic integrity.
 
-The successful distributed routing contract is now version 3 at 20 communicator-wide calls per
-routing batch, down from 23 in the preceding campaign and 30 historically. Post-exchange exact
+The successful distributed routing contract is now version 3 at 19 communicator-wide calls per
+routing batch (after fusing redundant accounting consensus), down from 23 in the preceding campaign and 30 historically. Post-exchange exact
 reconciliation work is grouped into fewer consensus boundaries while exact count/ID/ownership
 checks remain intact. Runtime MPI evidence is delegated to MPI-capable CI when the local
 execution environment lacks MPI.

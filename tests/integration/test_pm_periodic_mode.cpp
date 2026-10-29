@@ -716,9 +716,16 @@ void runDistributedInterpolationAgreementCase(cosmosim::gravity::PmAssignmentSch
   std::vector<double> local_phi(local_x.size(), 0.0);
   if (gather_potential) {
     local_solver.interpolatePotential(local_grid, local_x, local_y, local_z, local_phi, options, &profile);
+    // A rank may own only local potential stencils, despite another rank
+    // issuing remote requests. Require global routing activity, not traffic
+    // on every individual rank; the comparison below still checks values.
+    std::uint64_t global_routed_potential_requests = 0U;
+    MPI_Allreduce(
+        &profile.routed_potential_requests, &global_routed_potential_requests,
+        1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
     requireOrThrow(
-        profile.routed_potential_requests > 0,
-        "Distributed PM potential gather did not report routed requests");
+        global_routed_potential_requests > 0U,
+        "Distributed PM potential gather did not report any global routed requests");
     requireOrThrow(
         profile.routed_potential_requests <= 3ULL * static_cast<std::uint64_t>(local_x.size()),
         "Distributed PM potential routing regressed toward materialized xyz-stencil requests");

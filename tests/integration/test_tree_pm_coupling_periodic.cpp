@@ -1584,7 +1584,10 @@ void testDistributedShortRangeExportImportMatchesSingleRankReference() {
   options.tree_options.softening.epsilon_comoving = 1.0e-3;
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
       2.0, rcutCellsForAvailableBackend(4.0, 3.9), mesh_spacing);
-  options.tree_exchange_batch_bytes = sizeof(double) * 3U * 3U;
+  // Keep the exchange deliberately tiny (two packets), but respect the
+  // current 96-byte short-range request wire format.
+  options.tree_exchange_batch_bytes =
+      2U * cosmosim::gravity::kTreePmShortRangeRequestWireBytes;
 
   options.full_residual_lookup_enabled=true; options.leaf_simd_enabled=true;
   options.radial_coefficients_enabled=true; options.full_mac_diagnostics=false;
@@ -1722,7 +1725,10 @@ void testDistributedActiveSubsetMatchesSingleRankReference() {
   options.tree_options.softening.epsilon_comoving = 1.0e-3;
   options.split_policy = cosmosim::gravity::makeTreePmSplitPolicyFromMeshSpacing(
       2.0, rcutCellsForAvailableBackend(4.0, 3.9), mesh_spacing);
-  options.tree_exchange_batch_bytes = sizeof(double) * 3U * 3U;
+  // Keep the exchange deliberately tiny (two packets), but respect the
+  // current 96-byte short-range request wire format.
+  options.tree_exchange_batch_bytes =
+      2U * cosmosim::gravity::kTreePmShortRangeRequestWireBytes;
 
   const auto local_layout =
       cosmosim::parallel::makePmSlabLayout(pm_shape.nx, pm_shape.ny, pm_shape.nz, world_size, world_rank);

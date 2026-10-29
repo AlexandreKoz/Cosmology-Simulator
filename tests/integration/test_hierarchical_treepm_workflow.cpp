@@ -3,6 +3,7 @@
 #include <source_location>
 #include <stdexcept>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -251,6 +252,12 @@ void run(int rank,int ranks,std::uint64_t token) {
   const double refined_error=mpi.allreduceSumDouble(phaseError(refined.second.state,reference.second.state));
   // Short cosmological fixture: 1 Mpc periodic box, velocities normalized by
   // 100 km/s. This gate checks trajectory refinement, not long-time P(k).
+  if (!(std::sqrt(refined_error/64.0)<1e-3) && rank == 0) {
+    std::fprintf(stderr,
+        "hierarchical TreePM RMS trajectory mismatch: coarse_sum=%0.17g "
+        "refined_sum=%0.17g refined_rms=%0.17g required<1e-3\n",
+        coarse_error, refined_error, std::sqrt(refined_error/64.0));
+  }
   require(std::sqrt(refined_error/64.0)<1e-3);
   require(refined_error<=coarse_error+1e-18);
   auto optimized_text=hierarchical_config.normalized_text;

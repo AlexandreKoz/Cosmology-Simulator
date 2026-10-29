@@ -1,6 +1,7 @@
 #include <array>
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -198,6 +199,13 @@ int main() {
   }
   const double global_metal_mass = cosmosim::parallel::MpiContext{}.allreduceSumDouble(local_metal_mass);
   const double expected_global_metal_mass = 0.02 * (0.1 + 0.12 + 0.09);
+  if (!(std::abs(global_metal_mass - expected_global_metal_mass) < 1.0e-12)) {
+    std::fprintf(stderr,
+        "gas-cell migration metal mass: rank=%d local=%.17g global=%.17g "
+        "initial_expected=%.17g delta=%.17g\n", world_rank,
+        local_metal_mass, global_metal_mass, expected_global_metal_mass,
+        global_metal_mass - expected_global_metal_mass);
+  }
   assert(std::abs(global_metal_mass - expected_global_metal_mass) < 1.0e-12);
   assert(::unsetenv("COSMOSIM_MPI_TEST_TRANSPORT_LIMIT_BYTES") == 0);
   MPI_Barrier(MPI_COMM_WORLD);

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -338,8 +339,14 @@ void checkHardMemoryCollectivePreparation(
           mpi_context, items, config, rebalance);
     } catch (const std::exception&) { rejected = true; }
     clearSfcTestFault();
-    assert(mpi_context.allreduceSumUint64(rejected ? 1ULL : 0ULL) ==
-           static_cast<std::uint64_t>(mpi_context.worldSize()));
+    const auto rejected_ranks = mpi_context.allreduceSumUint64(rejected ? 1ULL : 0ULL);
+    if (rejected_ranks != static_cast<std::uint64_t>(mpi_context.worldSize())) {
+      std::fprintf(stderr, "SFC fault phase '%.*s' rejected %llu/%d ranks (local=%d)\n",
+                   static_cast<int>(phase.size()), phase.data(),
+                   static_cast<unsigned long long>(rejected_ranks),
+                   mpi_context.worldSize(), rejected ? 1 : 0);
+    }
+    assert(rejected_ranks == static_cast<std::uint64_t>(mpi_context.worldSize()));
   }
   // A malformed rank-local configuration must be collectively rejected at
   // entry, rather than leaving other ranks in the first sample exchange.
