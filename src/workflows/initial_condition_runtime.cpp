@@ -109,15 +109,25 @@ void materializeRootHydroPatchIfMissing(
   }
 
   state.patches.resize(1U);
-  state.patches.patch_id[0] = static_cast<std::uint64_t>(world_rank) + 1ULL;
+  // Generated ICs are materialized identically on every MPI rank and are only
+  // compacted to their final owners afterwards.  Their synthetic root patch
+  // must therefore have one deterministic global identity on every rank at
+  // this stage; rank-qualified identities would make the startup SFC inputs
+  // differ across ranks and can drive divergent collective sequences.
+  const bool replicated_generated_state =
+      config.mode.ic_convention == core::InitialConditionConvention::kGenerated;
+  state.patches.patch_id[0] = replicated_generated_state
+      ? 1ULL
+      : static_cast<std::uint64_t>(world_rank) + 1ULL;
   state.patches.level[0] = 0;
   state.patches.first_cell[0] = 0U;
   state.patches.cell_count[0] =
       core::checkedIntegralNarrow<std::uint32_t>(
           state.cells.size(), "root hydro patch cell count");
-  state.patches.owning_rank[0] =
-      core::checkedIntegralNarrow<std::uint32_t>(
-          world_rank, "root hydro patch owning rank");
+  state.patches.owning_rank[0] = replicated_generated_state
+      ? 0U
+      : core::checkedIntegralNarrow<std::uint32_t>(
+            world_rank, "root hydro patch owning rank");
   state.patches.origin_x_comoving[0] = layout.layout.spec.origin_x_comoving;
   state.patches.origin_y_comoving[0] = layout.layout.spec.origin_y_comoving;
   state.patches.origin_z_comoving[0] = layout.layout.spec.origin_z_comoving;

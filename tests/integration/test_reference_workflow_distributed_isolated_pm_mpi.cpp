@@ -27,6 +27,14 @@ std::string buildConfigText(int mpi_ranks_expected, std::uint64_t isolated_limit
   stream << "treepm_rcut_cells = 4.5\n";
   stream << "treepm_enable_window_deconvolution = false\n";
   stream << "treepm_update_cadence_steps = 1\n\n";
+  stream << "[physics]\n";
+  stream << "enable_cooling = false\n";
+  stream << "enable_star_formation = false\n";
+  stream << "enable_feedback = false\n";
+  stream << "enable_stellar_evolution = false\n";
+  stream << "enable_black_hole_agn = false\n";
+  stream << "enable_tracers = false\n";
+  stream << "enable_metal_diffusion = false\n\n";
   stream << "[output]\n";
   stream << "run_name = reference_workflow_distributed_isolated_pm_mpi\n";
   stream << "output_directory = integration_outputs\n";
@@ -64,10 +72,13 @@ int main() {
     guard_threw = guard_diagnostic.find("isolated/open PM root-gather guard exceeded") !=
         std::string::npos;
   }
-  if (!guard_threw) {
+  const cosmosim::parallel::MpiContext mpi_context{};
+  const std::uint64_t guard_rejections =
+      mpi_context.allreduceSumUint64(guard_threw ? 1ULL : 0ULL);
+  if (guard_rejections != static_cast<std::uint64_t>(world_size)) {
     throw std::runtime_error(
-        "distributed isolated PM workspace guard did not produce its contract diagnostic: " +
-        guard_diagnostic);
+        "distributed isolated PM workspace guard was not rejected coherently on all ranks; "
+        "local diagnostic: " + guard_diagnostic);
   }
 
   const auto frozen = cosmosim::core::loadFrozenConfigFromString(

@@ -328,9 +328,16 @@ void checkHardMemoryCollectivePreparation(
   rebalance.imbalance_trigger_ratio = 1000.0;
   rebalance.memory_trigger_ratio = 1000.0;
   rebalance.max_migrated_load_fraction = 0.01;
-  const std::vector<std::string_view> phases{
-      "sfc_local_preparation", "sfc_cut_sample", "sfc_memory_preflight",
-      "sfc_memory_prefix", "sfc_memory_repair_metadata"};
+  std::vector<std::string_view> phases{
+      "sfc_local_preparation", "sfc_cut_sample", "sfc_memory_preflight"};
+  // Prefix/repair metadata are conditional phases: with 3-4 ranks the sampled
+  // cuts for this tiny four-item fixture can already satisfy the hard-memory
+  // ceiling, so those phases are correctly skipped.  The two-rank case is the
+  // dedicated fixture that deterministically enters memory repair.
+  if (mpi_context.worldSize() == 2) {
+    phases.push_back("sfc_memory_prefix");
+    phases.push_back("sfc_memory_repair_metadata");
+  }
   for (const auto phase : phases) {
     setSfcTestFault(phase, 0);
     bool rejected = false;

@@ -1398,6 +1398,10 @@ void TimeCoordinator::runRungZeroSegment(
       static_cast<std::uint64_t>(m_hydro_amr.remoteInterfaceFaceCount());
   report.final_hydro_remote_stale_payloads =
       static_cast<std::uint64_t>(m_hydro_amr.remoteStaleInvalidPayloadCount());
+  report.final_hydro_directed_amr_remote_interfaces =
+      m_hydro_amr.directedAmrRemoteInterfaceCount();
+  report.final_hydro_directed_amr_patch_cell_records_received =
+      m_hydro_amr.directedAmrPatchCellRecordsReceived();
 }
 
 void TimeCoordinator::runHierarchicalSegment(

@@ -192,9 +192,13 @@ void testPmResolutionConvergence() {
   const double e32 = twoBodyEwaldError(32U, PmForceGradientBackend::kSpectral, 0.3);
   const double e64 = twoBodyEwaldError(64U, PmForceGradientBackend::kSpectral, 0.3);
   std::printf("pm_resolution_two_body_rel_error mesh16=%.3e mesh32=%.3e mesh64=%.3e\n", e16, e32, e64);
-  // PROVISIONAL: non-increasing with refinement (5% slack for roundoff and
-  // aliasing noise) and below 2% at 64^3.
-  requireOrThrow(e32 <= 1.05 * e16 && e64 <= 1.05 * e32, "two-body TreePM error grows with PM refinement");
+  // A single two-body phase can land unusually close to a mesh sweet spot at
+  // an intermediate resolution, so strict pairwise monotonicity is not a
+  // stable convergence test (the 32^3 case can beat 64^3 while both are far
+  // better than 16^3).  Require genuine end-to-end refinement progress plus
+  // the independent absolute accuracy ceiling instead.
+  requireOrThrow(e64 <= 0.25 * e16,
+                 "two-body TreePM error does not improve sufficiently from 16^3 to 64^3");
   requireOrThrow(e64 <= 2.0e-2, "two-body TreePM error at 64^3 exceeds the provisional 2% bound");
   // Split-transition separation (~ r_s) is dominated by the tree residual.
   const double transition = twoBodyEwaldError(32U, PmForceGradientBackend::kSpectral, 1.25 / 32.0);

@@ -150,6 +150,8 @@ struct ReferenceWorkflowReport {
   std::uint64_t final_hydro_imported_mpi_ghosts = 0;
   std::uint64_t final_hydro_remote_interface_faces = 0;
   std::uint64_t final_hydro_remote_stale_payloads = 0;
+  std::uint64_t final_hydro_directed_amr_remote_interfaces = 0;
+  std::uint64_t final_hydro_directed_amr_patch_cell_records_received = 0;
   std::size_t treepm_pm_grid = 0;
   std::size_t treepm_pm_grid_nx = 0;
   std::size_t treepm_pm_grid_ny = 0;

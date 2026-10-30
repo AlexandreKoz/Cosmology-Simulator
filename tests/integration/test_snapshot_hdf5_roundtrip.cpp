@@ -319,6 +319,13 @@ void testRoundtripMixedSpeciesSnapshot() {
   payload.config = &config;
   payload.normalized_config_text = "schema_version=1\nmode=zoom_in\n";
   payload.provenance = cosmosim::core::makeProvenanceRecord("abc123", "deadbeef", 0, payload.normalized_config_text);
+  // Regression: large runtime provenance must not overflow HDF5 1.10 object
+  // headers.  The writer stores large scalar strings as variable-length
+  // attributes while the reader accepts both legacy fixed-width and new
+  // variable-width encodings.
+  payload.provenance.derived_runtime_state =
+      "large_runtime_provenance_begin\n" + std::string(16U * 1024U, 'x') +
+      "\nlarge_runtime_provenance_end\n";
   payload.provenance.gravity_treepm_pm_grid = 9;
   payload.provenance.gravity_treepm_pm_grid_nx = 9;
   payload.provenance.gravity_treepm_pm_grid_ny = 7;
@@ -485,6 +492,7 @@ void testRoundtripMixedSpeciesSnapshot() {
       roundtrip.provenance.normalized_config_sha256_hex ==
       cosmosim::core::strongConfigHashSha256Hex(payload.normalized_config_text));
   CHUI_REQUIRE(roundtrip.provenance.enabled_features == payload.provenance.enabled_features);
+  CHUI_REQUIRE(roundtrip.provenance.derived_runtime_state == payload.provenance.derived_runtime_state);
   CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_pm_grid == payload.provenance.gravity_treepm_pm_grid);
   CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_pm_grid_nx == payload.provenance.gravity_treepm_pm_grid_nx);
   CHUI_REQUIRE(roundtrip.provenance.gravity_treepm_pm_grid_ny == payload.provenance.gravity_treepm_pm_grid_ny);

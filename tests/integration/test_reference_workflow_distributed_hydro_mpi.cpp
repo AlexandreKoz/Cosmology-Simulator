@@ -42,6 +42,14 @@ std::string configText(int world_size, std::string_view run_name) {
   stream << "treepm_asmth_cells = 1.25\n";
   stream << "treepm_rcut_cells = 3.9\n";
   stream << "treepm_update_cadence_steps = 1\n\n";
+  stream << "[physics]\n";
+  stream << "enable_cooling = false\n";
+  stream << "enable_star_formation = false\n";
+  stream << "enable_feedback = false\n";
+  stream << "enable_stellar_evolution = false\n";
+  stream << "enable_black_hole_agn = false\n";
+  stream << "enable_tracers = false\n";
+  stream << "enable_metal_diffusion = false\n\n";
   stream << "[output]\n";
   stream << "run_name = " << run_name << '\n';
   stream << "output_directory = integration_outputs\n";
@@ -89,15 +97,18 @@ cosmosim::core::SimulationState makeRankState(int world_rank) {
     state.patches.first_cell[patch] = patch * 2U;
     state.patches.cell_count[patch] = 2U;
     state.patches.owning_rank[patch] = patch;
-    state.patches.origin_x_comoving[patch] = 0.0;
+    // Two production AMR root patches tile the 2 x 0.5 x 0.5 box.  The old
+    // zero-extent/zero-dimension fixture deliberately selected the legacy
+    // fixed-Cartesian path, which production MPI correctly rejects.
+    state.patches.origin_x_comoving[patch] = static_cast<double>(patch);
     state.patches.origin_y_comoving[patch] = 0.0;
     state.patches.origin_z_comoving[patch] = 0.0;
-    state.patches.extent_x_comoving[patch] = 0.0;
-    state.patches.extent_y_comoving[patch] = 0.0;
-    state.patches.extent_z_comoving[patch] = 0.0;
-    state.patches.cell_dim_x[patch] = 0U;
-    state.patches.cell_dim_y[patch] = 0U;
-    state.patches.cell_dim_z[patch] = 0U;
+    state.patches.extent_x_comoving[patch] = 1.0;
+    state.patches.extent_y_comoving[patch] = 0.5;
+    state.patches.extent_z_comoving[patch] = 0.5;
+    state.patches.cell_dim_x[patch] = 2U;
+    state.patches.cell_dim_y[patch] = 1U;
+    state.patches.cell_dim_z[patch] = 1U;
   }
 
   std::vector<core::GasCellIdentityRecord> records;
@@ -120,7 +131,7 @@ cosmosim::core::SimulationState makeRankState(int world_rank) {
     state.gas_cells.sound_speed_code[row] = std::sqrt((5.0 / 3.0) * pressure / rho);
     state.gas_cells.velocity_x_peculiar[row] = vx;
     records.push_back(core::GasCellIdentityRecord{
-        .gas_cell_id = 70001U + static_cast<std::uint64_t>(world_rank) * 10U + row,
+        .gas_cell_id = 70001U + row,
         .parent_particle_id = state.particle_sidecar.particle_id[row],
         .owning_patch_id = state.patches.patch_id[owner_rank],
         .local_cell_row = row,
@@ -169,17 +180,24 @@ int main() {
           .initial_state_override = &initial_state,
           .max_steps_override = 2});
   assert(direct_report.restart_roundtrip_ok);
-  if (direct_report.final_hydro_imported_mpi_ghosts != 1U) {
+  if (direct_report.final_hydro_directed_amr_remote_interfaces == 0U ||
+      direct_report.final_hydro_directed_amr_patch_cell_records_received == 0U) {
     std::cerr << "rank=" << world_rank
               << " local_cells=" << direct_report.local_cell_count
               << " global_cells=" << direct_report.global_cell_count
-              << " imported=" << direct_report.final_hydro_imported_mpi_ghosts
-              << " faces=" << direct_report.final_hydro_remote_interface_faces
+              << " legacy_imported=" << direct_report.final_hydro_imported_mpi_ghosts
+              << " legacy_faces=" << direct_report.final_hydro_remote_interface_faces
+              << " directed_interfaces=" << direct_report.final_hydro_directed_amr_remote_interfaces
+              << " directed_cells_received="
+              << direct_report.final_hydro_directed_amr_patch_cell_records_received
               << " stale=" << direct_report.final_hydro_remote_stale_payloads
               << '\n';
   }
-  assert(direct_report.final_hydro_imported_mpi_ghosts == 1U);
-  assert(direct_report.final_hydro_remote_interface_faces == 1U);
+  // This fixture now exercises the production directed-AMR transport.  The
+  // legacy fixed-Cartesian imported-ghost counters are intentionally not the
+  // qualification surface for this path.
+  assert(direct_report.final_hydro_directed_amr_remote_interfaces >= 1U);
+  assert(direct_report.final_hydro_directed_amr_patch_cell_records_received >= 1U);
   assert(direct_report.final_hydro_remote_stale_payloads == 0U);
   const auto direct_restart = cosmosim::io::readRestartCheckpointHdf5(direct_report.restart_path);
   const double direct_global_mass = cosmosim::parallel::MpiContext{}.allreduceSumDouble(localMass(direct_restart.state));

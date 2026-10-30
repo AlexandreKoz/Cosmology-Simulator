@@ -107,24 +107,29 @@ int main() {
   cosmosim::workflows::ReferenceWorkflowRunner runner(frozen);
   cosmosim::workflows::ReferenceWorkflowOptions options;
   options.write_outputs = false;
+  std::uint64_t local_drift_grants = 0U;
   options.register_runtime_modules = [&](cosmosim::workflows::RuntimeModuleRegistry& registry) {
     using namespace cosmosim::workflows;
-    std::uint64_t grants=0U;
+    local_drift_grants = 0U;
     for (const auto& module : registry.descriptors()) for (const auto& task : module.stage_tasks) {
       if (task.task_id != "time.drift_particles") continue;
       for (const auto access : task.resources) {
         if ((access.resource == RuntimeResourceKey::kParticlePosition || access.resource == RuntimeResourceKey::kParticleVelocity) &&
-            access.mode == RuntimeResourceAccessMode::kReadWrite) ++grants;
-        if (access.resource == RuntimeResourceKey::kMigrationOwnership && access.mode == RuntimeResourceAccessMode::kRead) ++grants;
+            access.mode == RuntimeResourceAccessMode::kReadWrite) ++local_drift_grants;
+        if (access.resource == RuntimeResourceKey::kMigrationOwnership && access.mode == RuntimeResourceAccessMode::kRead) ++local_drift_grants;
       }
     }
-    std::uint64_t minimum=0U,maximum=0U;
-    MPI_Allreduce(&grants,&minimum,1,MPI_UINT64_T,MPI_MIN,MPI_COMM_WORLD);
-    MPI_Allreduce(&grants,&maximum,1,MPI_UINT64_T,MPI_MAX,MPI_COMM_WORLD);
-    if (minimum != 3U || maximum != 3U) throw std::runtime_error("reference drift grants differ across ranks");
   };
   options.initial_particle_scheduler_identity_records = schedulerSeedForRank(world_rank);
   const cosmosim::workflows::ReferenceWorkflowReport report = runner.run(options);
+  // Registration is not itself an MPI protocol phase.  Keep the callback
+  // rank-local and perform consensus only after every rank has returned from
+  // the workflow, so these test-only reductions cannot interleave with runtime
+  // collectives.
+  std::uint64_t minimum_drift_grants = 0U, maximum_drift_grants = 0U;
+  MPI_Allreduce(&local_drift_grants, &minimum_drift_grants, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(&local_drift_grants, &maximum_drift_grants, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+  assert(minimum_drift_grants == 3U && maximum_drift_grants == 3U);
 
   assert(report.completed_steps == 2);
   assert(report.world_size == world_size);

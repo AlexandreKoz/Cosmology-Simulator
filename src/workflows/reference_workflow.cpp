@@ -575,6 +575,27 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
       throw std::runtime_error(
           "distributed ownership invariant failed after initial decomposition: duplicate, missing, or extra authoritative particle IDs");
     }
+    // Homogeneous-DMO metadata is a global representation contract and must
+    // be established before scheduler/runtime owner construction.  GravityRuntime
+    // selects source representations during composition; compacting afterward is
+    // too late and can leave ranks on different MPI protocols when some ranks own
+    // zero particles.  report.global_cell_count is already a collective result.
+    if (report.global_cell_count == 0U) {
+      std::exception_ptr local_dmo_compaction_failure;
+      try {
+        if (!state.hasHomogeneousDmoMetadata() &&
+            !state.compactHomogeneousDmoMetadata(
+                static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0)))) {
+          throw std::runtime_error(
+              "globally gas-free runtime could not establish homogeneous DMO metadata on this rank");
+        }
+      } catch (...) {
+        local_dmo_compaction_failure = std::current_exception();
+      }
+      failure_coordinator.rethrowCollectiveFailure(
+          local_dmo_compaction_failure, "global DMO metadata compaction");
+    }
+
     profiler.recordEvent(core::RuntimeEvent{
         .event_kind = "parallel.ownership.partition_summary",
         .severity = core::RuntimeEventSeverity::kInfo,
@@ -688,9 +709,6 @@ ReferenceWorkflowReport ReferenceWorkflowRunner::runImpl(
                     std::max(mpi_context.worldRank(), 0)),
             });
     traceRuntimePhase("runtime_composition_complete");
-    if (!state.hasHomogeneousDmoMetadata() && state.cells.size() == 0U) {
-      (void)state.compactHomogeneousDmoMetadata(static_cast<std::uint32_t>(std::max(mpi_context.worldRank(), 0)));
-    }
     console_reporter.emitRuntimePhase(
         "runtime_composition_ready", "solver/runtime modules frozen and instantiated");
     if (restoring_from_restart) {

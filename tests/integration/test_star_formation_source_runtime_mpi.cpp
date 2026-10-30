@@ -397,6 +397,16 @@ std::string sidecarText(const cosmosim::core::SimulationState& state, const std:
   return std::string(reinterpret_cast<const char*>(block->payload.data()), block->payload.size());
 }
 
+std::string sidecarValue(std::string_view text, std::string_view key) {
+  const std::string prefix = std::string(key) + "=";
+  std::istringstream lines{std::string(text)};
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (line.rfind(prefix, 0U) == 0U) return line.substr(prefix.size());
+  }
+  return {};
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -447,10 +457,15 @@ int main(int argc, char** argv) {
   assert(restart.state.validateUniqueParticleIds());
 
   const std::string eos_sidecar = sidecarText(restart.state, "effective_multiphase_ism");
-  assert(eos_sidecar.find("table_hash=") != std::string::npos);
-  const std::uint64_t local_hash = cosmosim::core::stableConfigHash(eos_sidecar);
-  const std::uint64_t hash_xor = cosmosim::parallel::MpiContext{}.allreduceXorUint64(local_hash);
-  assert(hash_xor == 0U);
+  const std::string table_hash = sidecarValue(eos_sidecar, "table_hash");
+  assert(!table_hash.empty());
+  // The sidecar also contains latest/cumulative energy ledgers, which are
+  // intentionally rank-local diagnostics and need not be byte-identical.
+  // Only the immutable EOS table identity is a cross-rank consensus contract.
+  const std::uint64_t local_hash = cosmosim::core::stableConfigHash(table_hash);
+  const cosmosim::parallel::MpiContext mpi_context{};
+  assert(mpi_context.allreduceMinUint64(local_hash) ==
+         mpi_context.allreduceMaxUint64(local_hash));
 
   if (mode == "restart") {
     const auto resumed = runner.run(

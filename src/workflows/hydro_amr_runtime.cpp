@@ -480,6 +480,12 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   [[nodiscard]] std::size_t remoteStaleInvalidPayloadCount() const noexcept override {
     return m_last_remote_ghost_boundary_report.stale_or_invalid_payloads;
   }
+  [[nodiscard]] std::uint64_t directedAmrRemoteInterfaceCount() const noexcept override {
+    return m_last_directed_amr_diagnostics.remote_interface_count;
+  }
+  [[nodiscard]] std::uint64_t directedAmrPatchCellRecordsReceived() const noexcept override {
+    return m_last_directed_amr_diagnostics.directed_patch_cell_records_received;
+  }
   [[nodiscard]] core::MemoryReport memoryReport() const override {
     core::MemoryReportBuilder builder;
     const std::uint64_t conserved_capacity = m_conserved.ownedCapacityBytes();
@@ -2070,6 +2076,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
         context.state,
         m_current_world_rank,
         "production AMR hydro parent compatibility mirror");
+    m_last_directed_amr_diagnostics = directed_amr_diagnostics;
     if (context.profiler_session != nullptr) {
       context.profiler_session->recordEvent(core::RuntimeEvent{
           .event_kind = "hydro.amr_production_stage",
@@ -2421,6 +2428,7 @@ class HydroAmrRuntimeImpl final : public HydroAmrRuntime {
   core::HydroCflDiagnostics m_last_hydro_cfl_diagnostics{};
   internal::SolverGhostRefreshReport m_last_ghost_refresh{};
   HydroRemoteGhostBoundaryReport m_last_remote_ghost_boundary_report{};
+  parallel::DirectedAmrExchangeDiagnostics m_last_directed_amr_diagnostics{};
   amr::ProductionAmrHydroDiagnostics m_last_amr_hydro_diagnostics{};
   std::uint64_t m_communication_high_water_bytes = 0U;
   std::uint64_t m_last_communication_traffic_bytes = 0U;

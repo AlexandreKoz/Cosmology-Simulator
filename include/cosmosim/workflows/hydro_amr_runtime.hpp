@@ -46,6 +46,14 @@ class HydroAmrRuntime {
   remoteInterfaceFaceCount() const noexcept = 0;
   [[nodiscard]] virtual std::size_t
   remoteStaleInvalidPayloadCount() const noexcept = 0;
+  // Production AMR uses directed patch/cell exchange rather than the legacy
+  // fixed-Cartesian imported-ghost counters above. Expose narrow telemetry so
+  // workflow qualification can assert that a real inter-rank AMR interface
+  // was exercised without reaching into transport workspaces.
+  [[nodiscard]] virtual std::uint64_t
+  directedAmrRemoteInterfaceCount() const noexcept = 0;
+  [[nodiscard]] virtual std::uint64_t
+  directedAmrPatchCellRecordsReceived() const noexcept = 0;
   [[nodiscard]] virtual core::MemoryReport memoryReport() const = 0;
 };
 

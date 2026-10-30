@@ -182,6 +182,9 @@ class Hdf5Handle {
 }
 
 void writeScalarStringAttribute(hid_t location, const std::string& key, std::string_view value) {
+  if (static_cast<std::uint64_t>(value.size()) > g_snapshot_max_attribute_bytes) {
+    throw std::length_error("snapshot string attribute exceeds max_attribute_bytes: " + key);
+  }
   Hdf5Handle scalar_space(H5Screate(H5S_SCALAR));
   if (!scalar_space.valid()) {
     throw std::runtime_error("failed to allocate scalar dataspace for attribute: " + key);
@@ -191,7 +194,21 @@ void writeScalarStringAttribute(hid_t location, const std::string& key, std::str
   if (!string_type.valid()) {
     throw std::runtime_error("failed to allocate HDF5 string datatype");
   }
-  if (H5Tset_size(string_type.get(), std::max<std::size_t>(std::size_t{1}, value.size() + 1)) < 0 || H5Tset_strpad(string_type.get(), H5T_STR_NULLTERM) < 0) {
+  // HDF5 1.10 stores large fixed-width string attributes in the object header
+  // and can fail with "object header message is too large" for runtime
+  // provenance blobs.  Variable-length scalar strings keep the attribute
+  // metadata small while preserving the same logical schema.  The reader
+  // already accepts both fixed-width and variable-length HDF5 strings.
+  constexpr std::size_t k_variable_string_threshold = 4096U;
+  const bool variable_length = value.size() >= k_variable_string_threshold;
+  if (variable_length) {
+    if (H5Tset_size(string_type.get(), H5T_VARIABLE) < 0) {
+      throw std::runtime_error("failed to configure variable-length HDF5 string datatype");
+    }
+  } else if (H5Tset_size(
+                 string_type.get(),
+                 std::max<std::size_t>(std::size_t{1}, value.size() + 1)) < 0 ||
+             H5Tset_strpad(string_type.get(), H5T_STR_NULLTERM) < 0) {
     throw std::runtime_error("failed to configure HDF5 string datatype");
   }
 
@@ -201,7 +218,12 @@ void writeScalarStringAttribute(hid_t location, const std::string& key, std::str
   }
 
   std::string local(value);
-  if (H5Awrite(attr.get(), string_type.get(), local.c_str()) < 0) {
+  if (variable_length) {
+    const char* raw = local.c_str();
+    if (H5Awrite(attr.get(), string_type.get(), &raw) < 0) {
+      throw std::runtime_error("failed to write variable string attribute: " + key);
+    }
+  } else if (H5Awrite(attr.get(), string_type.get(), local.c_str()) < 0) {
     throw std::runtime_error("failed to write attribute: " + key);
   }
 }

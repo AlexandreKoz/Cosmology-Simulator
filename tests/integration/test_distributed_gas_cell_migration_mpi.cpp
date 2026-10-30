@@ -37,6 +37,17 @@ std::string configText(int world_size) {
   // This ownership test uses a deliberately small mesh; keep r_cut < L/2.
   stream << "treepm_rcut_cells = 3.9\n";
   stream << "treepm_update_cadence_steps = 1\n\n";
+  // This fixture qualifies migration/identity conservation, not source
+  // physics.  The global defaults enable cooling/SF/feedback/evolution, which
+  // legitimately change gas and metal mass between checkpoints.
+  stream << "[physics]\n";
+  stream << "enable_cooling = false\n";
+  stream << "enable_star_formation = false\n";
+  stream << "enable_feedback = false\n";
+  stream << "enable_stellar_evolution = false\n";
+  stream << "enable_black_hole_agn = false\n";
+  stream << "enable_tracers = false\n";
+  stream << "enable_metal_diffusion = false\n\n";
   stream << "[output]\n";
   stream << "run_name = distributed_gas_cell_migration_mpi\n";
   stream << "output_directory = integration_outputs\n";
@@ -114,7 +125,14 @@ cosmosim::core::SimulationState makeState() {
     state.cells.center_x_comoving[row] = seed.x;
     state.cells.center_y_comoving[row] = 0.5;
     state.cells.center_z_comoving[row] = 0.5;
-    state.cells.mass_code[row] = seed.density * 0.1;
+    const double cell_dx = state.patches.extent_x_comoving[seed.patch_index] /
+        static_cast<double>(state.patches.cell_dim_x[seed.patch_index]);
+    const double cell_dy = state.patches.extent_y_comoving[seed.patch_index] /
+        static_cast<double>(state.patches.cell_dim_y[seed.patch_index]);
+    const double cell_dz = state.patches.extent_z_comoving[seed.patch_index] /
+        static_cast<double>(state.patches.cell_dim_z[seed.patch_index]);
+    const double cell_volume = cell_dx * cell_dy * cell_dz;
+    state.cells.mass_code[row] = seed.density * cell_volume;
     state.cells.patch_index[row] = seed.patch_index;
     state.gas_cells.density_code[row] = seed.density;
     state.gas_cells.pressure_code[row] = 1.0 + 0.1 * static_cast<double>(row);
@@ -198,7 +216,10 @@ int main() {
     local_metal_mass += metal_mass_code;
   }
   const double global_metal_mass = cosmosim::parallel::MpiContext{}.allreduceSumDouble(local_metal_mass);
-  const double expected_global_metal_mass = 0.02 * (0.1 + 0.12 + 0.09);
+  double expected_global_metal_mass = 0.0;
+  for (const double metal_mass_code : initial_state.gas_cells.metal_mass_code) {
+    expected_global_metal_mass += metal_mass_code;
+  }
   if (!(std::abs(global_metal_mass - expected_global_metal_mass) < 1.0e-12)) {
     std::fprintf(stderr,
         "gas-cell migration metal mass: rank=%d local=%.17g global=%.17g "

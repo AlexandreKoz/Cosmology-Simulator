@@ -3353,7 +3353,7 @@ std::string restartConfigurationCompatibilityRecord(
     fail("new options must retain legacy defaults and global KDK must remain selected");
   }
   if (restart.integrator_state.inside_kdk_step || !restart.integrator_state.last_completed_restart_safe ||
-      restart.integrator_state.last_completed_boundary_kind != core::StepBoundaryKind::kGlobalSynchronizationPoint ||
+      !core::isRestartSafeBoundary(restart.integrator_state.last_completed_boundary_kind) ||
       restart.integrator_state.time_bins.max_bin != 0U ||
       restart.scheduler_state.max_bin != 0U || restart.gas_cell_scheduler_state.max_bin != 0U ||
       restart.scheduler_state.current_tick != restart.gas_cell_scheduler_state.current_tick ||
